@@ -1,4 +1,4 @@
 build*/
 bin64/
 .cache/
-
+/output/
