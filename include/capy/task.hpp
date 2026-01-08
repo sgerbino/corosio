@@ -169,4 +169,3 @@ static_assert(affine_awaitable<task, executor_base>);
 } // namespace capy
 
 #endif
-

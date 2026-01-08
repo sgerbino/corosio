@@ -14,7 +14,7 @@
 #include <capy/service_provider.hpp>
 #include <capy/detail/frame_pool.hpp>
 #include <capy/executor.hpp>
-
+ 
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
@@ -44,11 +44,26 @@ struct socket
 {
     struct async_read_some_t
     {
-        async_read_some_t(socket& s) : s_(s) {}
-        bool await_ready() const noexcept { return false; }
-        void await_resume() const noexcept {}
+        async_read_some_t(
+            socket& s)
+            : s_(s)
+        {
+        }
 
-        std::coroutine_handle<> await_suspend(capy::coro h, capy::executor_base const& ex) const
+        bool await_ready() const noexcept
+        {
+            return false;
+        }
+
+        void await_resume() const noexcept
+        {
+        }
+
+        auto
+        await_suspend(
+            std::coroutine_handle<> h,
+            capy::executor_base const& ex) const ->
+                std::coroutine_handle<>
         {
             s_.do_read_some(h, ex);
             // Affine awaitable: receive caller's executor for completion dispatch.
@@ -60,45 +75,32 @@ struct socket
         socket& s_;
     };
 
-    explicit socket(capy::service_provider& sp)
-        : reactor_(sp.find_service<platform_reactor>()),
-          read_op_(new read_state)
+    explicit socket(capy::service_provider& sp);
+
+    async_read_some_t
+    async_read_some()
     {
-        assert(reactor_ != nullptr);
+        return async_read_some_t(*this);
     }
 
-    async_read_some_t async_read_some() { return async_read_some_t(*this); }
-
-    capy::detail::frame_pool& get_frame_allocator() { return pool_; }
+    capy::detail::frame_pool& get_frame_allocator()
+    {
+        return pool_;
+    }
 
 private:
-    struct read_state final : capy::executor_work
-    {
-        capy::coro h_;
-        capy::executor_base const* ex_;
+    void do_read_some(
+        std::coroutine_handle<>,
+        capy::executor_base const&);
 
-        void operator()() override { ex_->dispatch(h_)(); }
-
-        void destroy() override
-        {
-            // Not meant to be destroyed; owned by std::unique_ptr in socket
-        }
-    };
-
-    void do_read_some(capy::coro h, capy::executor_base const& ex)
-    {
-        ++g_io_count;
-        read_op_->h_ = h;
-        read_op_->ex_ = &ex;
-        reactor_->submit(read_op_.get());
-    }
+    struct ops_state;
 
     platform_reactor* reactor_;
-    std::unique_ptr<read_state> read_op_;
     capy::detail::frame_pool pool_;
+    std::unique_ptr<ops_state, void(*)(ops_state*)> ops_;
 };
 
-} // namespace corosio
+} // corosio
 
 #endif
 

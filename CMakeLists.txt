@@ -16,81 +16,99 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Threading support
 find_package(Threads REQUIRED)
 
-add_library(capy INTERFACE)
+#------------------------------------------------------------------------------
+# capy library
+#------------------------------------------------------------------------------
+
+file(GLOB_RECURSE CAPY_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/capy/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/capy/*.cpp")
+file(GLOB_RECURSE CAPY_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/capy/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/capy/*.cpp")
+
+add_library(capy STATIC)
 
 target_sources(capy
-  PUBLIC
-    FILE_SET capy_headers
-    TYPE HEADERS
-    BASE_DIRS include
-    FILES
-      include/capy/detail/frame_pool.hpp
-      include/capy/detail/root_task.hpp
-      include/capy/affine.hpp
-      include/capy/async_run.hpp
-      include/capy/config.hpp
-      include/capy/default_frame_allocator.hpp
-      include/capy/executor.hpp
-      include/capy/executor_work.hpp
-      include/capy/frame_allocator.hpp
-      include/capy/make_affine.hpp
-      include/capy/run_on.hpp
-      include/capy/service_provider.hpp
-      include/capy/task.hpp)
+    PUBLIC
+        FILE_SET capy_headers
+        TYPE HEADERS
+        BASE_DIRS include
+        FILES ${CAPY_HEADERS}
+    PRIVATE
+        ${CAPY_SOURCES})
 
-add_library(corosio INTERFACE)
+target_include_directories(capy PUBLIC include)
+
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/include/capy" PREFIX "capy" FILES ${CAPY_HEADERS})
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src/capy" PREFIX "src" FILES ${CAPY_SOURCES})
+
+#------------------------------------------------------------------------------
+# corosio library
+#------------------------------------------------------------------------------
+
+file(GLOB_RECURSE COROSIO_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/corosio/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/corosio/*.cpp")
+file(GLOB_RECURSE COROSIO_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/corosio/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/corosio/*.cpp")
+
+add_library(corosio STATIC)
 
 target_sources(corosio
-  PUBLIC
-    FILE_SET corosio_headers
-    TYPE HEADERS
-    BASE_DIRS include
-    FILES
-      include/corosio/io_context.hpp
-      include/corosio/platform_reactor.hpp
-      include/corosio/socket.hpp
-      include/corosio/tls_stream.hpp)
+    PUBLIC
+        FILE_SET corosio_headers
+        TYPE HEADERS
+        BASE_DIRS include
+        FILES ${COROSIO_HEADERS}
+    PRIVATE
+        ${COROSIO_SOURCES})
+
+target_include_directories(corosio PUBLIC include)
 
 target_link_libraries(corosio
-  INTERFACE
-    capy)
+    PUBLIC
+        capy)
 
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/include/corosio" PREFIX "corosio" FILES ${COROSIO_HEADERS})
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src/corosio" PREFIX "src" FILES ${COROSIO_SOURCES})
+
+#------------------------------------------------------------------------------
 # Benchmark
+#------------------------------------------------------------------------------
+
+file(GLOB_RECURSE BENCH_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench/*.cpp")
+
 add_executable(bench)
 
 target_sources(bench
-  PRIVATE
-    FILE_SET bench_headers
-    TYPE HEADERS
-    BASE_DIRS bench
-    FILES
-      bench/callback/detail/op.hpp
-      bench/callback/handler.hpp
-      bench/callback/operations.hpp
-      bench/callback/socket.hpp
-      bench/callback/tls_stream.hpp
-      bench/coroutine/operations.hpp
-      bench/instrumentation.hpp
-  PRIVATE
-    bench/bench.cpp)
+    PRIVATE
+        ${BENCH_SOURCES})
+
+target_include_directories(bench PRIVATE bench)
 
 target_link_libraries(bench
-  PRIVATE
-    corosio)
+    PRIVATE
+        corosio)
+
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/bench" PREFIX "bench" FILES ${BENCH_SOURCES})
 
 # Warning flags (separate from optimizations)
 target_compile_options(bench
-  PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic -Werror -fcoroutines>
-    $<$<CXX_COMPILER_ID:Clang>:-Wall -Wextra -Wpedantic -Werror>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive->)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic -Werror -fcoroutines>
+        $<$<CXX_COMPILER_ID:Clang>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive->)
 
 # Optimization flags (separate from warnings)
 target_compile_options(bench
-  PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-O3 -march=native -funroll-loops -ffast-math -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables>
-    $<$<CXX_COMPILER_ID:Clang>:-O3 -march=native>
-    $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>>:/O2 /Ob2 /GL>)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-O3 -march=native -funroll-loops -ffast-math -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables>
+        $<$<CXX_COMPILER_ID:Clang>:-O3 -march=native>
+        $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>>:/O2 /Ob2 /GL>)
 
 target_compile_definitions(bench PRIVATE
     $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
@@ -100,36 +118,45 @@ set_property(TARGET bench PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 
 # Linker-specific flags that aren't covered by IPO property
 target_link_options(bench
-  PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-s -Wl,--as-needed>
-    $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>
-    $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>>:/LTCG>)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-s -Wl,--as-needed>
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>
+        $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>>:/LTCG>)
 
 # Clang stdlib requirement
 target_compile_options(bench
-  PRIVATE
-    $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
 
+#------------------------------------------------------------------------------
 # Platform Service Provider Test
+#------------------------------------------------------------------------------
+
+file(GLOB_RECURSE TEST_SERVICE_PROVIDER_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/capy/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/capy/*.cpp")
+
 add_executable(test_service_provider)
 
 target_sources(test_service_provider
-  PRIVATE
-    test/capy/service_provider.cpp)
+    PRIVATE
+        ${TEST_SERVICE_PROVIDER_SOURCES})
 
 target_link_libraries(test_service_provider
-  PRIVATE
-    capy)
+    PRIVATE
+        capy)
+
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/test/capy" PREFIX "test" FILES ${TEST_SERVICE_PROVIDER_SOURCES})
 
 target_compile_options(test_service_provider
-  PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines -Wall -Wextra -Wpedantic -Werror>
-    $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++ -Wall -Wextra -Wpedantic -Werror>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive->)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-fcoroutines -Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++ -Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive->)
 
 target_link_options(test_service_provider
-  PRIVATE
-    $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
 
 # async_run Test
 add_executable(test_async_run)
@@ -153,26 +180,34 @@ target_link_options(test_async_run
     $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
 
 # Platform Reactor Test
+#------------------------------------------------------------------------------
+
+file(GLOB_RECURSE TEST_PLATFORM_REACTOR_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/corosio/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/corosio/*.cpp")
+
 add_executable(test_platform_reactor)
 
 target_sources(test_platform_reactor
-  PRIVATE
-    test/corosio/platform_reactor.cpp)
+    PRIVATE
+        ${TEST_PLATFORM_REACTOR_SOURCES})
 
 target_link_libraries(test_platform_reactor
-  PRIVATE
-    corosio
-    Threads::Threads)
+    PRIVATE
+        corosio
+        Threads::Threads)
+
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/test/corosio" PREFIX "test" FILES ${TEST_PLATFORM_REACTOR_SOURCES})
 
 target_compile_options(test_platform_reactor
-  PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines -Wall -Wextra -Wpedantic -Werror>
-    $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++ -Wall -Wextra -Wpedantic -Werror>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive->)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-fcoroutines -Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++ -Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive->)
 
 target_link_options(test_platform_reactor
-  PRIVATE
-    $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
+    PRIVATE
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
 
 # Socket Test
 add_executable(test_socket)
@@ -197,6 +232,8 @@ target_link_options(test_socket
     $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
 
 # Register as tests for ctest
+#------------------------------------------------------------------------------
+
 enable_testing()
 add_test(NAME bench COMMAND bench)
 add_test(NAME test_service_provider COMMAND test_service_provider)
