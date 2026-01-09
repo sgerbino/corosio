@@ -98,8 +98,9 @@ struct root_task
         std::exception_ptr ep_;
 
         template<typename E, typename H, typename... Args>
-        promise_type(E&&, H&& h, Args&&...)
-            : handler_(std::forward<H>(h))
+        promise_type(E&& e, H&& h, Args&&...)
+            : ex_(std::forward<E>(e))
+            , handler_(std::forward<H>(h))
         {
         }
 
@@ -211,7 +212,7 @@ struct root_task
 
 template<executor Executor, typename T, typename Handler>
 root_task<Executor, T, Handler>
-wrapper(Executor, Handler handler, task<T> t)
+async_run_wrapper(Executor, Handler handler, task<T> t)
 {
     if constexpr (std::is_void_v<T>)
         co_await std::move(t);
@@ -255,8 +256,8 @@ wrapper(Executor, Handler handler, task<T> t)
 template<executor Executor, typename T, typename Handler = default_handler>
 void async_run(Executor ex, task<T> t, Handler handler = {})
 {
-    auto root = detail::wrapper<Executor, T, Handler>(ex, std::move(handler), std::move(t));
-    root.h_.promise().ex_ = std::move(ex);
+    auto root = detail::async_run_wrapper<Executor, T, Handler>(
+        std::move(ex), std::move(handler), std::move(t));
     root.h_.promise().starter_.h_ = root.h_;
     root.h_.promise().ex_.post(&root.h_.promise().starter_);
     root.release();
