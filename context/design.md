@@ -6,7 +6,7 @@
 
 Optimized for coroutines-first, other models secondary
 
-
+**HALO will improve:** Clang is best at HALO, and we should assume other compilers will eventually get there
 
 ## Definitions
 
