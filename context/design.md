@@ -1,8 +1,12 @@
 # Coroutine-First I/O Execution Model
 
+
+
 ## System Properties
 
 Optimized for coroutines-first, other models secondary
+
+
 
 ## Definitions
 
@@ -14,36 +18,66 @@ Optimized for coroutines-first, other models secondary
 
 **Implication:** Because the `io_object` always resumes through the dispatcher, a coroutine at `final_suspend` is guaranteed to be executing on its own executor's context. When returning to a caller with the same executor (`caller_ex_ == ex_`), symmetric transfer can proceed without a `running_in_this_thread()` check—pointer equality is sufficient. When executors differ, `final_suspend` must dispatch through the caller's executor.
 
-## Executor Model
+
+
+## Executor Operations
+
+An executor is to coroutines what an allocator is to memory. An executor encapsulates rules for where, when, and how a coroutine resumes. Lightweight, copyable handle to an execution context (thread pool, strand, system threads, etc.). There are three basic operations:
+
+- `dispatch`: Run inline if allowed, else queue. Cheapest path. Use when crossing execution context boundaries (e.g., I/O thread completing an operation, resuming a coroutine on the user's executor). Runs inline if executor rules permit, otherwise queues.
+
+- `post`: Always queue, never inline. Use when you need guaranteed asynchrony — resumption must not happen inline. Rarely needed for coroutines.
+
+- `defer`: Always queue, but hints "this is my continuation" — enables tail-call/thread-local optimizations. Use when resuming a coroutine from within the same executor context and you must go through the executor (e.g., strand enforcement, different associated executors in chain). Optimizes as continuation via thread-local queue.
+
+- **symmetric transfer**: Prefer over all three when caller and callee share the same executor and no strand/ordering constraints apply. Direct tail call, zero overhead, no executor involvement.
+
+In a pure coroutine model, symmetric transfer handles continuation chaining directly — the compiler generates tail calls between frames, no executor involvement. `defer` is an executor-based optimization that becomes redundant when you can just return the next coroutine handle.
+
+### Decision order:
+
+1. Same executor, no constraints → symmetric transfer
+2. Crossing context boundary → dispatch
+3. Same executor, must use executor (strand, etc.) → defer
+4. Need guaranteed async → post
+
+
+
+## Flow Diagrams
 
 A _flow diagram_ signifies a composed asynchronous call chain reified as a series of co_awaits.
 
-* Coroutines are indicated by `c`, `c1`, `c2`, ...
+* Coroutines are lazy and indicated by `c`, `c1`, `c2`, ...
 * `io_object` are represented as `io`, `io1`, `io2`, ...
 * Foreign awaitable contexts are represented as `f`, `f1`, `f2`, ...
 * `co_await` leading to an `io_object` are represented by arrows `->`
 * `co_await` to a foreign context are represented by `\`
 * Executors are annotated `ex`, `ex1`, `ex2`, ...
+* A coroutine with _executor affinity_ is preceded by `!`
 
-For example, this call chain:
+
+
+This call chain:
 ```
 c -> io
 ```
-reflects (ordinals are left out when singular):
+represents (ordinals are left out when singular):
 ```
 task c(io_object& io) { co_await io.op(); }
 ```
 
 
-While this call chain:
+This call chain:
 ```
 c1 -> c2 -> io
 ```
-reflects:
+represents:
 ```
 task c1(io_object& io) { co_await c2(io); }
 task c2(io_object& io) { co_await io.op(); }
 ```
+
+
 
 A coroutine can await a foreign context, to send work elsewhere:
 ```
@@ -56,6 +90,8 @@ for example a CPU-bound task to not block the io thread:
 task c1(io_object& io) { co_await c2(io); }
 task c2(io_object& io) { co_await f(); co_await io.op(); }
 ```
+
+
 
 A coroutine preceded by an exclamation point in a flow diagram has _executor affinity_, or just _affinity_. It is a lazy coroutine, and its call to resume is dispatched through `ex`. The execution model offers an invariant: the later call to resume `c` happens through the executor `ex`, obtained through `co_await io.op()` (affine awaitable protocol).
 ```
@@ -89,6 +125,10 @@ The `run_on` function is notional, representing an awaitable means of awaiting a
 - When the I/O completes, `c3` is resumed through `ex2`
 - When `c3` returns, `c2` is resumed through `ex1`
 - When `c2` returns, its dispatcher compares equal to `c1`'s dispatcher and the transfer is symmetric; `ex1` is not invoked
+
+
+
+
 
 ## Allocation Model
 
