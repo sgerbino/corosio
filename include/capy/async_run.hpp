@@ -16,6 +16,7 @@
 #include <capy/detail/frame_pool.hpp>
 
 #include <exception>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -237,10 +238,11 @@ void run_root_task(Dispatcher d, task<T> t, Handler handler)
 
     @see async_run
 */
-template<dispatcher Dispatcher>
+template<dispatcher Dispatcher, typename Allocator = std::allocator<void>>
 struct async_runner
 {
     Dispatcher d_;
+    Allocator alloc_;
 
     /** Launch task with default handler (fire-and-forget).
 
@@ -349,7 +351,22 @@ struct async_runner
 template<dispatcher Dispatcher>
 auto async_run(Dispatcher d)
 {
-    return detail::async_runner<Dispatcher>{std::move(d)};
+    return detail::async_runner<Dispatcher>{std::move(d), {}};
+}
+
+/** Creates a runner with an explicit allocator.
+
+    @param d The dispatcher that schedules and resumes the task.
+    @param alloc The allocator for coroutine frame allocation.
+
+    @return An async_runner object with operator() to launch tasks.
+
+    @see async_runner
+*/
+template<dispatcher Dispatcher, typename Allocator>
+auto async_run(Dispatcher d, Allocator alloc)
+{
+    return detail::async_runner<Dispatcher, Allocator>{std::move(d), std::move(alloc)};
 }
 
 } // namespace capy
