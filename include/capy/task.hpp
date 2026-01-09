@@ -84,6 +84,7 @@ struct CAPY_CORO_AWAIT_ELIDABLE
         any_dispatcher ex_;
         any_dispatcher caller_ex_;
         coro continuation_;
+        std::exception_ptr ep_;
 
         // Detached cleanup support for async_run
         void (*detached_cleanup_)(void*) = nullptr;
@@ -117,11 +118,15 @@ struct CAPY_CORO_AWAIT_ELIDABLE
                     auto detached_cleanup = p_->detached_cleanup_;
                     auto detached_state = p_->detached_state_;
                     auto continuation = p_->continuation_;
+                    auto has_exception = static_cast<bool>(p_->ep_);
 
                     // Destroy before dispatch enables memory recycling
-                    // Only for void tasks - non-void tasks need result until await_resume
+                    // Only for void tasks without exceptions - need promise until await_resume
                     if constexpr (std::is_void_v<T>)
-                        h.destroy();
+                    {
+                        if(!has_exception)
+                            h.destroy();
+                    }
 
                     if(continuation)
                     {
@@ -146,7 +151,7 @@ struct CAPY_CORO_AWAIT_ELIDABLE
 
         void unhandled_exception()
         {
-            std::terminate();
+            ep_ = std::current_exception();
         }
 
         template<class Awaitable>
@@ -188,6 +193,8 @@ struct CAPY_CORO_AWAIT_ELIDABLE
 
     auto await_resume()
     {
+        if(h_.promise().ep_)
+            std::rethrow_exception(h_.promise().ep_);
         if constexpr (std::is_void_v<T>)
             return;
         else

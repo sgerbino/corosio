@@ -609,9 +609,7 @@ int main()
     test_flow_executor_change();
     test_same_executor_symmetric_transfer();
     test_task_move();
-    // Exception handling test skipped: task::unhandled_exception calls terminate()
-    // Exception propagation requires changes to the task design
-    // test_exception_handling();
+    test_exception_handling();
     test_void_and_nonvoid_tasks();
 
     std::cout << "========================================\n";
