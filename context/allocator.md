@@ -21,4 +21,11 @@ The system must be:
 4. **Internal coroutines exist** — `root_task` (and potentially others) are implementation details
 5. **Allocator must be specified BEFORE creation** — Once the coroutine call expression evaluates, it's too late
 
+## Proposed Solution
+
+An execution_context has a default frame allocator
+
+the `io_object` provides the default allocator from its execution_context
+
+`async_run` and `run_on` use the default allocator from the I/O object unless overridden, or no I/O object
 

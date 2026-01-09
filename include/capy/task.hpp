@@ -12,8 +12,6 @@
 
 #include <capy/config.hpp>
 #include <capy/affine.hpp>
-#include <capy/detail/frame_pool.hpp>
-#include <capy/frame_allocator.hpp>
 
 #include <exception>
 #include <optional>
@@ -35,23 +33,14 @@ namespace capy {
     Key features:
     @li Lazy execution - the coroutine does not start until awaited
     @li Symmetric transfer - uses coroutine handle returns for efficient
-   resumption
+        resumption
     @li Executor inheritance - inherits caller's executor unless explicitly
-   bound
-    @li Custom frame allocation - supports frame allocators via first/second
-   parameter
+        bound
 
     The task uses `[[clang::coro_await_elidable]]` (when available) to enable
     heap allocation elision optimization (HALO) for nested coroutine calls.
 
-    @par Frame Allocation
-    The promise type provides custom operator new overloads that detect
-    `has_frame_allocator` on the first or second coroutine parameter,
-    enabling pooled allocation of coroutine frames.
-
     @see any_dispatcher
-    @see has_frame_allocator
-    @see corosio::detail::frame_pool
 */
 template<typename T = void>
 struct CAPY_CORO_AWAIT_ELIDABLE
@@ -77,9 +66,7 @@ struct CAPY_CORO_AWAIT_ELIDABLE
         }
     };
 
-    struct promise_type
-        : capy::detail::frame_pool::promise_allocator
-        , return_base<T>
+    struct promise_type : return_base<T>
     {
         any_dispatcher ex_;
         any_dispatcher caller_ex_;

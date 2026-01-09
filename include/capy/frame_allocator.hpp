@@ -11,32 +11,56 @@
 #define CAPY_FRAME_ALLOCATOR_HPP
 
 #include <capy/config.hpp>
+
 #include <concepts>
 #include <cstddef>
+#include <new>
 
 namespace capy {
+
+/** Abstract base class for frame allocators.
+
+    This class provides a polymorphic interface for coroutine frame
+    allocation. Concrete allocators derive from this base and implement
+    the virtual allocate/deallocate methods.
+
+    @see frame_allocator
+    @see default_frame_allocator
+*/
+class frame_allocator_base
+{
+public:
+    virtual ~frame_allocator_base() = default;
+
+    /** Allocate memory for a coroutine frame.
+
+        @param n The number of bytes to allocate.
+
+        @return A pointer to the allocated memory.
+    */
+    virtual void* allocate(std::size_t n) = 0;
+
+    /** Deallocate memory for a coroutine frame.
+
+        @param p Pointer to the memory to deallocate.
+        @param n The number of bytes to deallocate.
+    */
+    virtual void deallocate(void* p, std::size_t n) = 0;
+};
 
 /** A concept for types that can allocate and deallocate memory for coroutine frames.
 
     Frame allocators are used to manage memory for coroutine frames, enabling
     custom allocation strategies such as pooling to reduce allocation overhead.
 
-    Given:
-    @li `a` a reference to type `A`
-    @li `p` a void pointer
-    @li `n` a size value (`std::size_t`)
-
-    The following expressions must be valid:
-    @li `a.allocate(n)` - Allocates `n` bytes and returns a pointer to the memory
-    @li `a.deallocate(p, n)` - Deallocates `n` bytes previously allocated at `p`
+    Types satisfying this concept must derive from `frame_allocator_base`.
 
     @tparam A The type to check for frame allocator conformance.
+
+    @see frame_allocator_base
 */
 template<class A>
-concept frame_allocator = requires(A& a, void* p, std::size_t n) {
-    { a.allocate(n) } -> std::convertible_to<void*>;
-    { a.deallocate(p, n) } -> std::same_as<void>;
-};
+concept frame_allocator = std::derived_from<A, frame_allocator_base>;
 
 /** A concept for types that provide access to a frame allocator.
 
@@ -59,80 +83,29 @@ concept has_frame_allocator = requires(T& t) {
     { t.get_frame_allocator() } -> frame_allocator;
 };
 
-/** A type-erased frame allocator.
+/** A frame allocator that passes through to global new/delete.
 
-    This class wraps any type satisfying the `frame_allocator` concept,
-    storing only a pointer to the allocator and a pointer to a static
-    operations table. This enables polymorphic frame allocation without
-    virtual functions or heap allocation for the wrapper itself.
+    This allocator provides no pooling or recycling—each allocation
+    goes directly to `::operator new` and each deallocation goes to
+    `::operator delete`. It serves as a baseline for comparison and
+    as a fallback when pooling is not desired.
 
-    The wrapped allocator must outlive the `any_frame_allocator` instance.
-
-    @see frame_allocator
+    @see frame_allocator_base
 */
-class any_frame_allocator
+struct default_frame_allocator : frame_allocator_base
 {
-    struct ops
+    void* allocate(std::size_t n) override
     {
-        void* (*allocate)(void* alloc, std::size_t n);
-        void (*deallocate)(void* alloc, void* p, std::size_t n);
-    };
-
-    template<frame_allocator A>
-    static ops const&
-    ops_for() noexcept
-    {
-        static constexpr ops o = {
-            [](void* alloc, std::size_t n) -> void* {
-                return static_cast<A*>(alloc)->allocate(n);
-            },
-            [](void* alloc, void* p, std::size_t n) {
-                static_cast<A*>(alloc)->deallocate(p, n);
-            }
-        };
-        return o;
+        return ::operator new(n);
     }
 
-    void* alloc_;
-    ops const* ops_;
-
-public:
-    /** Construct from a frame allocator.
-
-        @param alloc The allocator to wrap. Must outlive this instance.
-    */
-    template<frame_allocator A>
-    any_frame_allocator(A& alloc) noexcept
-        : alloc_(&alloc)
-        , ops_(&ops_for<A>())
+    void deallocate(void* p, std::size_t) override
     {
-    }
-
-    /** Allocate memory for a coroutine frame.
-
-        @param n The number of bytes to allocate.
-
-        @return A pointer to the allocated memory.
-    */
-    void*
-    allocate(std::size_t n)
-    {
-        return ops_->allocate(alloc_, n);
-    }
-
-    /** Deallocate memory for a coroutine frame.
-
-        @param p Pointer to the memory to deallocate.
-        @param n The number of bytes to deallocate.
-    */
-    void
-    deallocate(void* p, std::size_t n)
-    {
-        ops_->deallocate(alloc_, p, n);
+        ::operator delete(p);
     }
 };
 
-static_assert(frame_allocator<any_frame_allocator>);
+static_assert(frame_allocator<default_frame_allocator>);
 
 } // namespace capy
 

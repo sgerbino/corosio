@@ -19,7 +19,7 @@ namespace capy::detail {
 
 // Frame pool: thread-local with global overflow
 // Tracks block sizes to avoid returning undersized blocks
-class frame_pool
+class frame_pool : public frame_allocator_base
 {
     struct block
     {
@@ -103,7 +103,7 @@ class frame_pool
     }
 
 public:
-    void* allocate(std::size_t n)
+    void* allocate(std::size_t n) override
     {
         std::size_t total = n + sizeof(block);
 
@@ -119,7 +119,7 @@ public:
         return static_cast<char*>(static_cast<void*>(b)) + sizeof(block);
     }
 
-    void deallocate(void* p, std::size_t)
+    void deallocate(void* p, std::size_t) override
     {
         auto* b = static_cast<block*>(static_cast<void*>(static_cast<char*>(p) - sizeof(block)));
         b->next = nullptr;
@@ -138,57 +138,9 @@ public:
         static frame_pool pool;
         return pool;
     }
-
-    // Mixin for promise types to provide frame allocation
-    struct promise_allocator
-    {
-        struct header
-        {
-            void (*dealloc)(void* ctx, void* ptr, std::size_t size);
-            void* ctx;
-        };
-
-        template<class Allocator>
-        static void* allocate_with(std::size_t size, Allocator& alloc)
-        {
-            std::size_t total = size + sizeof(header);
-            void* raw = alloc.allocate(total);
-
-            auto* p = static_cast<header*>(raw);
-            p->dealloc = [](void* ctx, void* p, std::size_t n) {
-                static_cast<Allocator*>(ctx)->deallocate(p, n);
-            };
-            p->ctx = &alloc;
-
-            return p + 1;
-        }
-
-        static void* operator new(std::size_t size)
-        {
-            return allocate_with(size, frame_pool::shared());
-        }
-
-        template<capy::has_frame_allocator Arg0, class... ArgN>
-        static void* operator new(std::size_t size, Arg0& arg0, ArgN&...)
-        {
-            return allocate_with(size, arg0.get_frame_allocator());
-        }
-
-        template<class Arg0, capy::has_frame_allocator Arg1, class... ArgN>
-        static void* operator new(std::size_t size, Arg0&, Arg1& arg1, ArgN&...)
-            requires(!capy::has_frame_allocator<Arg0>)
-        {
-            return allocate_with(size, arg1.get_frame_allocator());
-        }
-
-        static void operator delete(void* ptr, std::size_t size)
-        {
-            auto* p = static_cast<header*>(ptr) - 1;
-            std::size_t total = size + sizeof(header);
-            p->dealloc(p->ctx, p, total);
-        }
-    };
 };
+
+static_assert(frame_allocator<frame_pool>);
 
 } // namespace capy::detail
 

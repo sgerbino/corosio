@@ -12,11 +12,10 @@
 
 #include <capy/config.hpp>
 #include <capy/affine.hpp>
+#include <capy/frame_allocator.hpp>
 #include <capy/task.hpp>
-#include <capy/detail/frame_pool.hpp>
 
 #include <exception>
-#include <memory>
 #include <optional>
 #include <utility>
 
@@ -90,9 +89,7 @@ struct root_task_result<void>
 template<dispatcher Dispatcher, typename T, typename Handler>
 struct root_task
 {
-    struct promise_type
-        : capy::detail::frame_pool::promise_allocator
-        , root_task_result<T>
+    struct promise_type : root_task_result<T>
     {
         Dispatcher d_;
         Handler handler_;
@@ -238,7 +235,7 @@ void run_root_task(Dispatcher d, task<T> t, Handler handler)
 
     @see async_run
 */
-template<dispatcher Dispatcher, typename Allocator = std::allocator<void>>
+template<dispatcher Dispatcher, frame_allocator Allocator = default_frame_allocator>
 struct async_runner
 {
     Dispatcher d_;
@@ -354,7 +351,7 @@ auto async_run(Dispatcher d)
     return detail::async_runner<Dispatcher>{std::move(d), {}};
 }
 
-/** Creates a runner with an explicit allocator.
+/** Creates a runner with an explicit frame allocator.
 
     @param d The dispatcher that schedules and resumes the task.
     @param alloc The allocator for coroutine frame allocation.
@@ -363,7 +360,7 @@ auto async_run(Dispatcher d)
 
     @see async_runner
 */
-template<dispatcher Dispatcher, typename Allocator>
+template<dispatcher Dispatcher, frame_allocator Allocator>
 auto async_run(Dispatcher d, Allocator alloc)
 {
     return detail::async_runner<Dispatcher, Allocator>{std::move(d), std::move(alloc)};
