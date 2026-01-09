@@ -112,11 +112,11 @@ struct CAPY_CORO_AWAIT_ELIDABLE
 
                 coro await_suspend(coro h) const noexcept
                 {
-                    auto continuation = p_->continuation_;
                     auto ex = p_->ex_;
                     auto caller_ex = p_->caller_ex_;
                     auto detached_cleanup = p_->detached_cleanup_;
                     auto detached_state = p_->detached_state_;
+                    auto continuation = p_->continuation_;
 
                     // Destroy before dispatch enables memory recycling
                     // Only for void tasks - non-void tasks need result until await_resume
