@@ -111,32 +111,17 @@ struct CAPY_CORO_AWAIT_ELIDABLE
                     return false;
                 }
 
-                coro await_suspend(coro h) const noexcept
+                coro await_suspend(coro) const noexcept
                 {
-                    auto ex = p_->ex_;
-                    auto caller_ex = p_->caller_ex_;
-                    auto detached_cleanup = p_->detached_cleanup_;
-                    auto detached_state = p_->detached_state_;
-                    auto continuation = p_->continuation_;
-                    auto has_exception = static_cast<bool>(p_->ep_);
-
-                    // Destroy before dispatch enables memory recycling
-                    // Only for void tasks without exceptions - need promise until await_resume
-                    if constexpr (std::is_void_v<T>)
-                    {
-                        if(!has_exception)
-                            h.destroy();
-                    }
-
-                    if(continuation)
+                    if(p_->continuation_)
                     {
                         // Same dispatcher: true symmetric transfer
-                        if(caller_ex == ex)
-                            return continuation;
-                        return caller_ex(continuation);
+                        if(p_->caller_ex_ == p_->ex_)
+                            return p_->continuation_;
+                        return p_->caller_ex_(p_->continuation_);
                     }
-                    if(detached_cleanup)
-                        detached_cleanup(detached_state);
+                    if(p_->detached_cleanup_)
+                        p_->detached_cleanup_(p_->detached_state_);
                     return std::noop_coroutine();
                 }
 
