@@ -48,6 +48,31 @@ struct default_handler
 
 namespace detail {
 
+/** Combines two handlers into one: h1 for success, h2 for exception.
+*/
+template<typename H1, typename H2>
+struct split_handler
+{
+    H1 h1_;
+    H2 h2_;
+
+    template<typename T>
+    void operator()(T&& v)
+    {
+        h1_(std::forward<T>(v));
+    }
+
+    void operator()()
+    {
+        h1_();
+    }
+
+    void operator()(std::exception_ptr ep)
+    {
+        h2_(ep);
+    }
+};
+
 template<dispatcher Dispatcher, typename T, typename Handler>
 struct root_task
 {
@@ -202,14 +227,88 @@ make_root_task(Dispatcher, Handler handler, task<T> t)
         co_return co_await std::move(t);
 }
 
+/** Runs the root task with the given dispatcher and handler.
+*/
+template<dispatcher Dispatcher, typename T, typename Handler>
+void run_root_task(Dispatcher d, task<T> t, Handler handler)
+{
+    auto root = make_root_task<Dispatcher, T, Handler>(
+        std::move(d), std::move(handler), std::move(t));
+    root.h_.promise().d_(coro{root.h_}).resume();
+    root.release();
+}
+
 } // namespace detail
 
-/** Launches a lazy task for detached execution.
+/** Runner object returned by async_run(dispatcher).
 
-    Initiates a task by invoking the dispatcher to schedule the coroutine.
-    This is analogous to Asio's `co_spawn`. The task begins executing when
-    the dispatcher schedules it; if the dispatcher permits inline execution,
-    the task runs immediately until it awaits an I/O operation.
+    Provides operator() overloads to launch tasks with various
+    handler configurations. The dispatcher is captured and used
+    to schedule the task execution.
+
+    @see async_run
+*/
+template<dispatcher Dispatcher>
+struct async_runner
+{
+    Dispatcher d_;
+
+    /** Launch task with default handler (fire-and-forget).
+
+        Uses default_handler which discards results and rethrows
+        exceptions.
+
+        @param t The task to execute.
+    */
+    template<typename T>
+    void operator()(task<T> t) &&
+    {
+        detail::run_root_task<Dispatcher, T, default_handler>(
+            std::move(d_), std::move(t), default_handler{});
+    }
+
+    /** Launch task with single overloaded handler.
+
+        The handler must provide overloads for both success and error:
+        @code
+        void operator()(T result);            // Success (non-void)
+        void operator()();                    // Success (void)
+        void operator()(std::exception_ptr);  // Error
+        @endcode
+
+        @param t The task to execute.
+        @param h The completion handler.
+    */
+    template<typename T, typename Handler>
+    void operator()(task<T> t, Handler h) &&
+    {
+        detail::run_root_task<Dispatcher, T, Handler>(
+            std::move(d_), std::move(t), std::move(h));
+    }
+
+    /** Launch task with split handlers.
+
+        @param t The task to execute.
+        @param h1 Handler called on success with the result value
+                  (or no args for void tasks).
+        @param h2 Handler called on error with exception_ptr.
+    */
+    template<typename T, typename H1, typename H2>
+    void operator()(task<T> t, H1 h1, H2 h2) &&
+    {
+        using combined = detail::split_handler<H1, H2>;
+        detail::run_root_task<Dispatcher, T, combined>(
+            std::move(d_), std::move(t), combined{std::move(h1), std::move(h2)});
+    }
+};
+
+/** Creates a runner to launch lazy tasks for detached execution.
+
+    Returns an async_runner that captures the dispatcher and provides
+    operator() overloads to launch tasks. This is analogous to Asio's
+    `co_spawn`. The task begins executing when the dispatcher schedules
+    it; if the dispatcher permits inline execution, the task runs
+    immediately until it awaits an I/O operation.
 
     The dispatcher controls where and how the task resumes after each
     suspension point. Tasks deal only with type-erased dispatchers
@@ -223,51 +322,42 @@ make_root_task(Dispatcher, Handler handler, task<T> t)
     execution is permitted, the call chain proceeds synchronously until
     an I/O await suspends execution.
 
-    @par Handler Requirements
-    The handler must provide overloads for success and error:
-    @code
-    void operator()(T result);            // Success (non-void task)
-    void operator()();                    // Success (void task)
-    void operator()(std::exception_ptr);  // Error
-    @endcode
-
-    @note The dispatcher and handler are captured by value. Use
-    `default_handler` to discard results and rethrow exceptions.
-
-    @par Example
+    @par Usage
     @code
     io_context ioc;
+    auto ex = ioc.get_executor();
 
-    // Fire and forget
-    async_run(ioc.get_executor(), my_coroutine());
+    // Fire and forget (uses default_handler)
+    async_run(ex)(my_coroutine());
 
-    // With completion handler
-    async_run(ioc.get_executor(), compute_value(), overload{
+    // Single overloaded handler
+    async_run(ex)(compute_value(), overload{
         [](int result) { std::cout << "Got: " << result << "\n"; },
         [](std::exception_ptr) { }
     });
+
+    // Split handlers: h1 for value, h2 for exception
+    async_run(ex)(compute_value(),
+        [](int result) { std::cout << result; },
+        [](std::exception_ptr ep) { if (ep) std::rethrow_exception(ep); }
+    );
 
     // Donate thread to run queued work
     ioc.run();
     @endcode
 
     @param d The dispatcher that schedules and resumes the task.
-    @param t The lazy task to execute.
-    @param handler Completion handler invoked when the task finishes.
 
+    @return An async_runner object with operator() to launch tasks.
+
+    @see async_runner
     @see task
     @see dispatcher
 */
-template<
-    dispatcher Dispatcher,
-    typename T,
-    typename Handler = default_handler>
-void async_run(Dispatcher d, task<T> t, Handler handler = {})
+template<dispatcher Dispatcher>
+async_runner<Dispatcher> async_run(Dispatcher d)
 {
-    auto root = detail::make_root_task<Dispatcher, T, Handler>(
-        std::move(d), std::move(handler), std::move(t));
-    root.h_.promise().d_(coro{root.h_}).resume();
-    root.release();
+    return async_runner<Dispatcher>{std::move(d)};
 }
 
 } // namespace capy
