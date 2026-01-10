@@ -204,6 +204,30 @@ target_link_options(test_task
         $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
 
 #------------------------------------------------------------------------------
+# run_on Test
+#------------------------------------------------------------------------------
+
+add_executable(test_run_on)
+
+target_sources(test_run_on
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/capy/run_on.cpp")
+
+target_link_libraries(test_run_on
+    PRIVATE
+        capy)
+
+target_compile_options(test_run_on
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-fcoroutines -Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++ -Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive->)
+
+target_link_options(test_run_on
+    PRIVATE
+        $<$<CXX_COMPILER_ID:Clang>:-stdlib=libc++>)
+
+#------------------------------------------------------------------------------
 # Platform Reactor Test
 #------------------------------------------------------------------------------
 
@@ -260,3 +284,4 @@ add_test(NAME test_async_run COMMAND test_async_run)
 add_test(NAME test_platform_reactor COMMAND test_platform_reactor)
 add_test(NAME test_socket COMMAND test_socket)
 add_test(NAME test_task COMMAND test_task)
+add_test(NAME test_run_on COMMAND test_run_on)
