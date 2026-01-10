@@ -14,6 +14,7 @@
 #include <capy/affine.hpp>
 #include <capy/detail/recycling_frame_allocator.hpp>
 #include <capy/frame_allocator.hpp>
+#include <capy/make_affine.hpp>
 #include <capy/task.hpp>
 
 #include <exception>
@@ -205,7 +206,18 @@ struct async_run_task
         template<class Awaitable>
         auto await_transform(Awaitable&& a)
         {
-            return transform_awaiter<Awaitable>{std::forward<Awaitable>(a), this};
+            using A = std::decay_t<Awaitable>;
+            if constexpr (affine_awaitable<A, Dispatcher>)
+            {
+                // Zero-overhead path for affine awaitables
+                return transform_awaiter<Awaitable>{
+                    std::forward<Awaitable>(a), this};
+            }
+            else
+            {
+                // Trampoline fallback for legacy awaitables
+                return make_affine(std::forward<Awaitable>(a), d_);
+            }
         }
     };
 
