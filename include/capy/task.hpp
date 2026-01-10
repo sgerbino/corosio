@@ -81,10 +81,6 @@ struct [[nodiscard]] CAPY_CORO_AWAIT_ELIDABLE
         std::exception_ptr ep_;
         bool needs_dispatch_ = false;
 
-        // Detached cleanup support for async_run
-        void (*detached_cleanup_)(void*) = nullptr;
-        void* detached_state_ = nullptr;
-
         task get_return_object()
         {
             return task{std::coroutine_handle<promise_type>::from_promise(*this)};
@@ -115,8 +111,6 @@ struct [[nodiscard]] CAPY_CORO_AWAIT_ELIDABLE
                             return p_->continuation_;
                         return p_->caller_ex_(p_->continuation_);
                     }
-                    if(p_->detached_cleanup_)
-                        p_->detached_cleanup_(p_->detached_state_);
                     return std::noop_coroutine();
                 }
 

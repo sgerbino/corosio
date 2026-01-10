@@ -71,21 +71,6 @@ struct [[nodiscard]] run_on_awaitable
         return h_;
     }
 
-    // Detached execution (no coroutine caller)
-    // Precondition: 'this' is heap-allocated
-    coro await_suspend_detached()
-    {
-        h_.promise().ex_ = ex_;
-        h_.promise().caller_ex_ = ex_;
-        h_.promise().continuation_ = nullptr;
-        h_.promise().needs_dispatch_ = false;
-        h_.promise().detached_cleanup_ = +[](void* p) {
-            delete static_cast<run_on_awaitable*>(p);
-        };
-        h_.promise().detached_state_ = this;
-        return h_;
-    }
-
     ~run_on_awaitable()
     {
         if(h_ && !h_.done())
