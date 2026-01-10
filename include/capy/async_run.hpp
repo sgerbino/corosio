@@ -87,10 +87,10 @@ struct root_task_result<void>
     }
 };
 
-// lifetime storage for the Dispatcher and Allocator value
+// Lifetime storage for the Dispatcher value.
+// The Allocator is embedded in the user's coroutine frame.
 template<
     dispatcher Dispatcher,
-    frame_allocator Allocator,
     typename T,
     typename Handler>
 struct root_task
@@ -100,14 +100,12 @@ struct root_task
         , root_task_result<T>
     {
         Dispatcher d_;
-        Allocator alloc_;
         Handler handler_;
         std::exception_ptr ep_;
 
-        template<typename D, typename A, typename H, typename... Args>
-        promise_type(D&& d, A&& a, H&& h, Args&&...)
+        template<typename D, typename H, typename... Args>
+        promise_type(D&& d, H&& h, Args&&...)
             : d_(std::forward<D>(d))
-            , alloc_(std::forward<A>(a))
             , handler_(std::forward<H>(h))
         {
         }
@@ -117,33 +115,15 @@ struct root_task
             return {std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        /** Suspend initially and set allocator on resume.
+        /** Suspend initially.
 
-            Sets the thread-local frame allocator when this coroutine
-            resumes, ensuring the child task inherits the allocator.
-
-            Only initial_suspend is needed because root_task awaits
-            exactly one child task and never suspends again until
-            final_suspend.
-
-            Thread safety: The allocator is stored in thread-local
-            storage, so concurrent coroutines on different threads
-            each have their own allocator pointer with no data races.
+            The frame allocator is already set in TLS by the
+            embedding_frame_allocator when the user's task was created.
+            No action needed here.
         */
-        auto initial_suspend() noexcept
+        std::suspend_always initial_suspend() noexcept
         {
-            struct awaiter
-            {
-                promise_type* p_;
-
-                bool await_ready() const noexcept { return false; }
-                void await_suspend(coro) const noexcept {}
-                void await_resume() const noexcept
-                {
-                    frame_allocating_base::set_frame_allocator(p_->alloc_);
-                }
-            };
-            return awaiter{this};
+            return {};
         }
 
         auto final_suspend() noexcept
@@ -162,7 +142,7 @@ struct root_task
                     // Save before destroy
                     auto handler = std::move(p_->handler_);
                     auto ep = p_->ep_;
-                    
+
                     // Clear thread-local before destroy to avoid dangling pointer
                     frame_allocating_base::clear_frame_allocator();
 
@@ -245,11 +225,10 @@ struct root_task
 
 template<
     dispatcher Dispatcher,
-    frame_allocator Allocator,
     typename T,
     typename Handler>
-root_task<Dispatcher, Allocator, T, Handler>
-make_root_task(Dispatcher, Allocator, Handler handler, task<T> t)
+root_task<Dispatcher, T, Handler>
+make_root_task(Dispatcher, Handler handler, task<T> t)
 {
     if constexpr (std::is_void_v<T>)
         co_await std::move(t);
@@ -261,14 +240,13 @@ make_root_task(Dispatcher, Allocator, Handler handler, task<T> t)
 */
 template<
     dispatcher Dispatcher,
-    frame_allocator Allocator,
     typename T,
     typename Handler>
 void
-run_root_task(Dispatcher d, Allocator alloc, task<T> t, Handler handler)
+run_root_task(Dispatcher d, task<T> t, Handler handler)
 {
-    auto root = make_root_task<Dispatcher, Allocator, T, Handler>(
-        std::move(d), std::move(alloc), std::move(handler), std::move(t));
+    auto root = make_root_task<Dispatcher, T, Handler>(
+        std::move(d), std::move(handler), std::move(t));
     root.h_.promise().d_(coro{root.h_}).resume();
     root.release();
 }
@@ -307,10 +285,6 @@ run_root_task(Dispatcher d, Allocator alloc, task<T> t, Handler handler)
         &&-qualified, meaning they can only be called on rvalues. This
         forces the idiom `async_run(ex)(task)` as a single expression.
 
-    @li <b>Runtime validation</b> - operator() verifies the TLS allocator
-        still points to this runner's allocator. If changed (e.g., via
-        std::move abuse), calls std::terminate to catch API misuse.
-
     @see async_run
 */
 template<
@@ -319,7 +293,7 @@ template<
 struct async_runner
 {
     Dispatcher d_;
-    Allocator alloc_;
+    detail::embedding_frame_allocator<Allocator> embedder_;
 
     /** Construct runner and activate frame allocator.
 
@@ -331,13 +305,13 @@ struct async_runner
     */
     async_runner(Dispatcher d, Allocator a)
         : d_(std::move(d))
-        , alloc_(std::move(a))
+        , embedder_(std::move(a))
     {
-        frame_allocating_base::set_frame_allocator(alloc_);
+        frame_allocating_base::set_frame_allocator(embedder_);
     }
 
     // Enforce C++17 guaranteed copy elision.
-    // If this compiles, elision occurred and &alloc_ is stable.
+    // If this compiles, elision occurred and &embedder_ is stable.
     async_runner(async_runner const&) = delete;
     async_runner(async_runner&&) = delete;
     async_runner& operator=(async_runner const&) = delete;
@@ -353,10 +327,10 @@ struct async_runner
     template<typename T>
     void operator()(task<T> t) &&
     {
-        if(frame_allocating_base::get_frame_allocator() != &alloc_)
-            std::terminate();
-        run_root_task<Dispatcher, Allocator, T, default_handler>(
-            std::move(d_), std::move(alloc_), std::move(t), default_handler{});
+        // Note: TLS now points to embedded wrapper in user's task frame,
+        // not to embedder_. This is expected behavior.
+        run_root_task<Dispatcher, T, default_handler>(
+            std::move(d_), std::move(t), default_handler{});
     }
 
     /** Launch task with single overloaded handler.
@@ -374,10 +348,8 @@ struct async_runner
     template<typename T, typename Handler>
     void operator()(task<T> t, Handler h) &&
     {
-        if(frame_allocating_base::get_frame_allocator() != &alloc_)
-            std::terminate();
-        run_root_task<Dispatcher, Allocator, T, Handler>(
-            std::move(d_), std::move(alloc_), std::move(t), std::move(h));
+        run_root_task<Dispatcher, T, Handler>(
+            std::move(d_), std::move(t), std::move(h));
     }
 
     /** Launch task with separate success/error handlers.
@@ -390,11 +362,9 @@ struct async_runner
     template<typename T, typename H1, typename H2>
     void operator()(task<T> t, H1 h1, H2 h2) &&
     {
-        if(frame_allocating_base::get_frame_allocator() != &alloc_)
-            std::terminate();
         using combined = handler_pair<H1, H2>;
-        run_root_task<Dispatcher, Allocator, T, combined>(
-            std::move(d_), std::move(alloc_), std::move(t),
+        run_root_task<Dispatcher, T, combined>(
+            std::move(d_), std::move(t),
                 combined{std::move(h1), std::move(h2)});
     }
 };

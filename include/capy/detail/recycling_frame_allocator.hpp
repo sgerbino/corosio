@@ -17,9 +17,18 @@
 
 namespace capy::detail {
 
-// Recycling frame allocator: thread-local with global overflow
-// Tracks block sizes to avoid returning undersized blocks
-class recycling_frame_allocator : public frame_allocator_base
+/** Recycling frame allocator with thread-local and global pools.
+
+    This allocator recycles memory blocks to reduce allocation overhead.
+    It maintains a thread-local pool for fast lock-free access and a
+    global pool for cross-thread block sharing.
+
+    Blocks are tracked by size to avoid returning undersized blocks.
+
+    This type satisfies the frame_allocator concept and is cheaply
+    copyable (all instances share the same static pools).
+*/
+class recycling_frame_allocator
 {
     struct block
     {
@@ -102,8 +111,14 @@ class recycling_frame_allocator : public frame_allocator_base
         return local;
     }
 
+    static global_pool& global()
+    {
+        static global_pool pool;
+        return pool;
+    }
+
 public:
-    void* allocate(std::size_t n) override
+    void* allocate(std::size_t n)
     {
         std::size_t total = n + sizeof(block);
 
@@ -119,24 +134,11 @@ public:
         return static_cast<char*>(static_cast<void*>(b)) + sizeof(block);
     }
 
-    void deallocate(void* p, std::size_t) override
+    void deallocate(void* p, std::size_t)
     {
         auto* b = static_cast<block*>(static_cast<void*>(static_cast<char*>(p) - sizeof(block)));
         b->next = nullptr;
         local().push(b);
-    }
-
-    static global_pool& global()
-    {
-        static global_pool pool;
-        return pool;
-    }
-
-    // Shared pool instance for all coroutine frames
-    static recycling_frame_allocator& shared()
-    {
-        static recycling_frame_allocator pool;
-        return pool;
     }
 };
 

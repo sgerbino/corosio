@@ -85,20 +85,9 @@ struct CAPY_CORO_AWAIT_ELIDABLE
             return task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        auto initial_suspend() noexcept
+        std::suspend_always initial_suspend() noexcept
         {
-            struct awaiter
-            {
-                promise_type* p_;
-
-                bool await_ready() const noexcept { return false; }
-                void await_suspend(coro) const noexcept {}
-                void await_resume() const noexcept
-                {
-                    p_->restore_frame_allocator();
-                }
-            };
-            return awaiter{this};
+            return {};
         }
 
         auto final_suspend() noexcept
@@ -153,7 +142,6 @@ struct CAPY_CORO_AWAIT_ELIDABLE
 
             auto await_resume()
             {
-                p_->restore_frame_allocator();
                 return a_.await_resume();
             }
 
@@ -201,7 +189,6 @@ struct CAPY_CORO_AWAIT_ELIDABLE
         h_.promise().caller_ex_ = caller_ex;
         h_.promise().continuation_ = continuation;
         h_.promise().ex_ = caller_ex;
-        h_.promise().alloc_ = frame_allocating_base::get_frame_allocator();
         return h_;
     }
 
