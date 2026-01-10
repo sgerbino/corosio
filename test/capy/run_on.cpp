@@ -160,15 +160,9 @@ void test_basic_run_on()
     };
 
     bool completed = false;
-    capy::async_run(ex1)(outer(), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex1)(outer(), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -225,15 +219,9 @@ void test_flow_executor_change_mid_chain()
     mock_io_op io("io");
 
     bool completed = false;
-    capy::async_run(ex1)(flow_c1(io, ex2), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex1)(flow_c1(io, ex2), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -293,15 +281,9 @@ void test_run_on_with_return_value()
     test_executor ex2("ex2");
 
     int final_result = 0;
-    capy::async_run(ex1)(outer_value_task(ex2), overloaded{
-        [&](int r) {
-            final_result = r;
-            log("completed with " + std::to_string(r));
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex1)(outer_value_task(ex2), [&](int r) {
+        final_result = r;
+        log("completed with " + std::to_string(r));
     });
 
     assert(final_result == 84);
@@ -334,15 +316,9 @@ void test_run_on_void_task()
     };
 
     bool completed = false;
-    capy::async_run(ex1)(outer(), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex1)(outer(), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -438,15 +414,9 @@ void test_nested_run_on()
     };
 
     bool completed = false;
-    capy::async_run(ex1)(outer(), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex1)(outer(), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -504,15 +474,9 @@ void test_run_on_same_executor()
     };
 
     bool completed = false;
-    capy::async_run(ex)(outer(), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(outer(), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -540,13 +504,7 @@ void test_run_on_dispatcher_propagation()
         co_await capy::run_on(ex2, inner());
     };
 
-    capy::async_run(ex1)(outer(), overloaded{
-        [&]() {},
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
-    });
+    capy::async_run(ex1)(outer(), [&]() {});
 
     // Verify io captured ex2's dispatcher (run_on's executor)
     // The dispatch happened through ex2

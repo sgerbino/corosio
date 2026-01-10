@@ -162,15 +162,9 @@ void test_flow_c_io()
     mock_io_op io("io");
 
     bool completed = false;
-    capy::async_run(ex)(flow_c_io(io), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(flow_c_io(io), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -212,15 +206,9 @@ void test_flow_c1_c2_io()
     mock_io_op io("io");
 
     bool completed = false;
-    capy::async_run(ex)(flow_c1_c2_io(io), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(flow_c1_c2_io(io), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -267,15 +255,9 @@ void test_flow_with_return_value()
     mock_io_op io("io");
 
     int final_result = 0;
-    capy::async_run(ex)(flow_c1_c2_value(io), overloaded{
-        [&](int result) {
-            final_result = result;
-            log("completed with " + std::to_string(result));
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(flow_c1_c2_value(io), [&](int result) {
+        final_result = result;
+        log("completed with " + std::to_string(result));
     });
 
     assert(final_result == 84);
@@ -317,15 +299,9 @@ void test_flow_executor_change()
     mock_io_op io("io");
 
     bool completed = false;
-    capy::async_run(ex1)(flow_c1_ex1(io, ex2), overloaded{
-        [&]() {
-            completed = true;
-            log("completed");
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex1)(flow_c1_ex1(io, ex2), [&]() {
+        completed = true;
+        log("completed");
     });
 
     assert(completed);
@@ -394,14 +370,8 @@ void test_same_executor_symmetric_transfer()
     };
 
     bool completed = false;
-    capy::async_run(ex)(c1(), overloaded{
-        [&]() {
-            completed = true;
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(c1(), [&]() {
+        completed = true;
     });
 
     assert(completed);
@@ -469,14 +439,8 @@ void test_task_move()
 
     test_executor ex("ex");
     int result = 0;
-    capy::async_run(ex)(std::move(t2), overloaded{
-        [&](int r) {
-            result = r;
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(std::move(t2), [&](int r) {
+        result = r;
     });
 
     assert(result == 42);
@@ -548,42 +512,24 @@ void test_void_and_nonvoid_tasks()
 
     // Test void
     bool void_done = false;
-    capy::async_run(ex)(void_task(), overloaded{
-        [&]() {
-            void_done = true;
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(void_task(), [&]() {
+        void_done = true;
     });
     assert(void_done);
     std::cout << "  void task: OK\n";
 
     // Test int
     int int_result = 0;
-    capy::async_run(ex)(int_task(), overloaded{
-        [&](int r) {
-            int_result = r;
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(int_task(), [&](int r) {
+        int_result = r;
     });
     assert(int_result == 123);
     std::cout << "  int task: " << int_result << "\n";
 
     // Test string
     std::string str_result;
-    capy::async_run(ex)(string_task(), overloaded{
-        [&](std::string r) {
-            str_result = std::move(r);
-        },
-        [](std::exception_ptr ep) {
-            if(ep)
-                std::rethrow_exception(ep);
-        }
+    capy::async_run(ex)(string_task(), [&](std::string r) {
+        str_result = std::move(r);
     });
     assert(str_result == "hello");
     std::cout << "  string task: " << str_result << "\n";

@@ -333,13 +333,24 @@ struct async_run_awaitable
             std::move(d_), std::move(t), default_handler{});
     }
 
-    /** Launch task with single overloaded handler.
+    /** Launch task with completion handler.
 
-        The handler must provide overloads for both success and error:
+        The handler is called on success with the result value (non-void)
+        or no arguments (void tasks). If the handler also provides an
+        overload for `std::exception_ptr`, it handles exceptions directly.
+        Otherwise, exceptions are automatically rethrown (default behavior).
+
         @code
-        void operator()(T result);            // Success (non-void)
-        void operator()();                    // Success (void)
-        void operator()(std::exception_ptr);  // Error
+        // Success-only handler (exceptions rethrow automatically)
+        async_run(ex)(my_task(), [](int result) {
+            std::cout << result;
+        });
+
+        // Full handler with exception support
+        async_run(ex)(my_task(), overloaded{
+            [](int result) { std::cout << result; },
+            [](std::exception_ptr) { }
+        });
         @endcode
 
         @param t The task to execute.
@@ -348,8 +359,20 @@ struct async_run_awaitable
     template<typename T, typename Handler>
     void operator()(task<T> t, Handler h) &&
     {
-        run_async_run_task<Dispatcher, T, Handler>(
-            std::move(d_), std::move(t), std::move(h));
+        if constexpr (std::is_invocable_v<Handler, std::exception_ptr>)
+        {
+            // Handler handles exceptions itself
+            run_async_run_task<Dispatcher, T, Handler>(
+                std::move(d_), std::move(t), std::move(h));
+        }
+        else
+        {
+            // Handler only handles success - pair with default exception handler
+            using combined = handler_pair<Handler, default_handler>;
+            run_async_run_task<Dispatcher, T, combined>(
+                std::move(d_), std::move(t),
+                    combined{std::move(h), default_handler{}});
+        }
     }
 
     /** Launch task with separate success/error handlers.
