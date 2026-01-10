@@ -203,6 +203,14 @@ public:
         return h + 1;
     }
 
+    /** Deallocate a coroutine frame.
+
+        Uses the allocator pointer stored in the header at allocation
+        time, not the current thread-local. This is correct because:
+        @li The coroutine may be destroyed on a different thread
+        @li The thread-local may have changed since allocation
+        @li Guarantees matching allocator for alloc/dealloc pair
+    */
     static void
     operator delete(void* ptr, std::size_t size)
     {
@@ -214,6 +222,7 @@ public:
 
         std::size_t total = size + sizeof(header);
 
+        // Use stored allocator, not thread-local
         if(h->alloc)
             h->alloc->deallocate(h, total);
         else

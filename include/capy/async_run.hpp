@@ -116,9 +116,33 @@ struct root_task
             return {std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        std::suspend_always initial_suspend() noexcept
+        /** Suspend initially and set allocator on resume.
+
+            Sets the thread-local frame allocator when this coroutine
+            resumes, ensuring the child task inherits the allocator.
+
+            Only initial_suspend is needed because root_task awaits
+            exactly one child task and never suspends again until
+            final_suspend.
+
+            Thread safety: The allocator is stored in thread-local
+            storage, so concurrent coroutines on different threads
+            each have their own allocator pointer with no data races.
+        */
+        auto initial_suspend() noexcept
         {
-            return {};
+            struct awaiter
+            {
+                promise_type* p_;
+
+                bool await_ready() const noexcept { return false; }
+                void await_suspend(coro) const noexcept {}
+                void await_resume() const noexcept
+                {
+                    frame_allocating_base::set_frame_allocator(p_->alloc_);
+                }
+            };
+            return awaiter{this};
         }
 
         auto final_suspend() noexcept
