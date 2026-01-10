@@ -30,7 +30,7 @@ project boost/corosio
   : source-location $(COROSIO_ROOT)
   ;
 
-alias corosio_sources : [ glob-tree-ex $(COROSIO_ROOT)/src/corosio : *.cpp ] ;
+alias corosio_sources : [ glob-tree-ex $(COROSIO_ROOT)/src/src : *.cpp ] ;
 
 lib boost_corosio
   : corosio_sources
@@ -38,6 +38,7 @@ lib boost_corosio
     <library>/boost/capy//boost_capy
     <library>/boost/buffers//boost_buffers
     <include>$(COROSIO_ROOT)/include
+    <include>$(COROSIO_ROOT)/src
   : usage-requirements
     <library>/boost/capy//boost_capy
     <library>/boost/buffers//boost_buffers
