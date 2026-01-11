@@ -43,6 +43,8 @@ struct overlapped_op
     : OVERLAPPED
     , capy::execution_context::handler  // handler already has intrusive_list node
 {
+    overlapped_op() { data_ = this; }
+
     struct canceller
     {
         overlapped_op* op;
@@ -120,6 +122,12 @@ struct overlapped_op
         error = err;
     }
 };
+
+inline overlapped_op*
+get_overlapped_op(capy::execution_context::handler* h) noexcept
+{
+    return static_cast<overlapped_op*>(h->data());
+}
 
 } // namespace detail
 } // namespace corosio

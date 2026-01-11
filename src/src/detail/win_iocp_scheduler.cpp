@@ -200,7 +200,7 @@ win_iocp_scheduler::
 post(capy::execution_context::handler* h) const
 {
     // Mark ready if this is an overlapped_op (safe to dispatch immediately)
-    if (auto* op = dynamic_cast<overlapped_op*>(h))
+    if (auto* op = get_overlapped_op(h))
         op->ready_ = 1;
 
     ::InterlockedIncrement(&outstanding_work_);
