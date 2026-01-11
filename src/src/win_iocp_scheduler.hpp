@@ -16,10 +16,10 @@
 
 #include <boost/corosio/io_context.hpp>
 #include <boost/capy/execution_context.hpp>
+#include <boost/capy/thread_local_ptr.hpp>
 
 #include <atomic>
 #include <chrono>
-#include <thread>
 
 namespace boost {
 namespace corosio {
@@ -142,7 +142,7 @@ public:
         This function is thread-safe. Multiple threads may call
         run() concurrently.
     */
-    std::size_t run(boost::system::error_code& ec) override;
+    std::size_t run(system::error_code& ec) override;
 
     /** Processes at most one pending work item.
 
@@ -152,7 +152,7 @@ public:
 
         @return The number of handlers executed (0 or 1).
     */
-    std::size_t run_one(boost::system::error_code& ec) override;
+    std::size_t run_one(system::error_code& ec) override;
 
     /** Processes at most one pending work item with timeout.
 
@@ -164,7 +164,7 @@ public:
 
         @return The number of handlers executed (0 or 1).
     */
-    std::size_t run_one(long usec, boost::system::error_code& ec) override;
+    std::size_t run_one(long usec, system::error_code& ec) override;
 
     /** Wait for at most one completion without executing.
 
@@ -176,7 +176,7 @@ public:
 
         @return The number of completions available (0 or 1).
     */
-    std::size_t wait_one(long usec, boost::system::error_code& ec) override;
+    std::size_t wait_one(long usec, system::error_code& ec) override;
 
     /** Processes work items for the specified duration.
 
@@ -200,7 +200,7 @@ public:
 
         @return The number of handlers executed.
     */
-    std::size_t poll(boost::system::error_code& ec) override;
+    std::size_t poll(system::error_code& ec) override;
 
     /** Processes at most one ready work item without blocking.
 
@@ -208,7 +208,7 @@ public:
 
         @return The number of handlers executed (0 or 1).
     */
-    std::size_t poll_one(boost::system::error_code& ec) override;
+    std::size_t poll_one(system::error_code& ec) override;
 
     /** Returns the native IOCP handle.
 
@@ -218,11 +218,10 @@ public:
 
 private:
     std::size_t do_run(unsigned long timeout, std::size_t max_handlers,
-        boost::system::error_code& ec);
-    std::size_t do_wait(unsigned long timeout, boost::system::error_code& ec);
+        system::error_code& ec);
+    std::size_t do_wait(unsigned long timeout, system::error_code& ec);
 
     void* iocp_;
-    std::thread::id thread_id_;
     std::atomic<bool> stopped_{false};
 };
 

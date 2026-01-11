@@ -34,6 +34,33 @@ constexpr ULONG_PTR work_key = 1;
 // Completion key used to signal shutdown
 constexpr ULONG_PTR shutdown_key = 0;
 
+// Stack frame for tracking nested scheduler contexts
+struct scheduler_context
+{
+    win_iocp_scheduler const* key;
+    scheduler_context* next;
+};
+
+// Thread-local head of the context stack
+capy::thread_local_ptr<scheduler_context> context_stack;
+
+// RAII guard that pushes/pops a frame
+struct thread_context_guard
+{
+    scheduler_context frame_;
+
+    explicit thread_context_guard(win_iocp_scheduler const* ctx) noexcept
+        : frame_{ctx, context_stack.get()}
+    {
+        context_stack.set(&frame_);
+    }
+
+    ~thread_context_guard() noexcept
+    {
+        context_stack.set(frame_.next);
+    }
+};
+
 } // namespace
 
 win_iocp_scheduler::
@@ -44,7 +71,6 @@ win_iocp_scheduler(
         nullptr,
         0,
         0))
-    , thread_id_(std::this_thread::get_id())
 {
     if (iocp_ == nullptr)
     {
@@ -151,7 +177,10 @@ bool
 win_iocp_scheduler::
 running_in_this_thread() const noexcept
 {
-    return std::this_thread::get_id() == thread_id_;
+    for (auto* c = context_stack.get(); c != nullptr; c = c->next)
+        if (c->key == this)
+            return true;
+    return false;
 }
 
 void
@@ -184,8 +213,9 @@ restart()
 std::size_t
 win_iocp_scheduler::
 do_run(unsigned long timeout, std::size_t max_handlers,
-    boost::system::error_code& ec)
+    system::error_code& ec)
 {
+    thread_context_guard guard(this);
     ec.clear();
     std::size_t count = 0;
     DWORD bytes;
@@ -209,7 +239,7 @@ do_run(unsigned long timeout, std::size_t max_handlers,
             if (overlapped == nullptr)
             {
                 // Real error
-                ec.assign(static_cast<int>(err), boost::system::system_category());
+                ec.assign(static_cast<int>(err), system::system_category());
                 break;
             }
             // Completion with error - still process it
@@ -242,7 +272,7 @@ do_run(unsigned long timeout, std::size_t max_handlers,
 
 std::size_t
 win_iocp_scheduler::
-do_wait(unsigned long timeout, boost::system::error_code& ec)
+do_wait(unsigned long timeout, system::error_code& ec)
 {
     ec.clear();
     DWORD bytes;
@@ -266,7 +296,7 @@ do_wait(unsigned long timeout, boost::system::error_code& ec)
             return 0; // Timeout is not an error
         if (overlapped == nullptr)
         {
-            ec.assign(static_cast<int>(err), boost::system::system_category());
+            ec.assign(static_cast<int>(err), system::system_category());
             return 0;
         }
     }
@@ -298,7 +328,7 @@ do_wait(unsigned long timeout, boost::system::error_code& ec)
 
 std::size_t
 win_iocp_scheduler::
-run(boost::system::error_code& ec)
+run(system::error_code& ec)
 {
     std::size_t total = 0;
 
@@ -317,14 +347,14 @@ run(boost::system::error_code& ec)
 
 std::size_t
 win_iocp_scheduler::
-run_one(boost::system::error_code& ec)
+run_one(system::error_code& ec)
 {
     return do_run(INFINITE, 1, ec);
 }
 
 std::size_t
 win_iocp_scheduler::
-run_one(long usec, boost::system::error_code& ec)
+run_one(long usec, system::error_code& ec)
 {
     // Convert microseconds to milliseconds (round up)
     unsigned long timeout_ms = static_cast<unsigned long>((usec + 999) / 1000);
@@ -333,7 +363,7 @@ run_one(long usec, boost::system::error_code& ec)
 
 std::size_t
 win_iocp_scheduler::
-wait_one(long usec, boost::system::error_code& ec)
+wait_one(long usec, system::error_code& ec)
 {
     // Convert microseconds to milliseconds (round up)
     unsigned long timeout_ms = static_cast<unsigned long>((usec + 999) / 1000);
@@ -352,7 +382,7 @@ std::size_t
 win_iocp_scheduler::
 run_until(std::chrono::steady_clock::time_point abs_time)
 {
-    boost::system::error_code ec;
+    system::error_code ec;
     std::size_t total = 0;
 
     while (!stopped())
@@ -379,14 +409,14 @@ run_until(std::chrono::steady_clock::time_point abs_time)
 
 std::size_t
 win_iocp_scheduler::
-poll(boost::system::error_code& ec)
+poll(system::error_code& ec)
 {
     return do_run(0, static_cast<std::size_t>(-1), ec);
 }
 
 std::size_t
 win_iocp_scheduler::
-poll_one(boost::system::error_code& ec)
+poll_one(system::error_code& ec)
 {
     return do_run(0, 1, ec);
 }
