@@ -13,7 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/capy/execution_context.hpp>
-#include <boost/capy/intrusive_list.hpp>
+#include <boost/capy/intrusive_queue.hpp>
 #include <boost/system/error_code.hpp>
 
 #include "src/detail/win_mutex.hpp"
@@ -33,7 +33,7 @@ constexpr std::uintptr_t shutdown_key = 0;
 constexpr std::uintptr_t handler_key = 1;
 constexpr std::uintptr_t overlapped_key = 2;
 
-using op_queue = capy::intrusive_list<capy::execution_context::handler>;
+using op_queue = capy::intrusive_queue<capy::execution_context::handler>;
 
 // Forward declaration
 struct overlapped_op;

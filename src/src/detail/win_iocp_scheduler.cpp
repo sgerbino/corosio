@@ -130,10 +130,10 @@ shutdown()
         op_queue ops;
         {
             std::lock_guard<win_mutex> lock(dispatch_mutex_);
-            ops.push_back(completed_ops_);  // splice all from completed_ops_
+            ops.splice(completed_ops_);  // splice all from completed_ops_
         }
 
-        while (auto* h = ops.pop_front())
+        while (auto* h = ops.pop())
         {
             ::InterlockedDecrement(&outstanding_work_);
             h->destroy();
@@ -201,7 +201,7 @@ post(capy::coro h) const
     {
         // PQCS can fail if non-paged pool exhausted; queue for later
         std::lock_guard<win_mutex> lock(dispatch_mutex_);
-        completed_ops_.push_back(ph);
+        completed_ops_.push(ph);
         ::InterlockedExchange(&dispatch_required_, 1);
     }
 }
@@ -221,7 +221,7 @@ post(capy::execution_context::handler* h) const
     {
         // PQCS can fail if non-paged pool exhausted; queue for later
         std::lock_guard<win_mutex> lock(dispatch_mutex_);
-        completed_ops_.push_back(h);
+        completed_ops_.push(h);
         ::InterlockedExchange(&dispatch_required_, 1);
     }
 }
@@ -390,7 +390,7 @@ win_iocp_scheduler::
 post_deferred_completions(
     op_queue& ops)
 {
-    while(auto h = ops.pop_front())
+    while(auto h = ops.pop())
     {
         if(auto op = get_overlapped_op(h))
         {
@@ -409,8 +409,8 @@ post_deferred_completions(
 
         // out of resources again, put stuff back
         std::lock_guard<win_mutex> lock(dispatch_mutex_);
-        completed_ops_.push_back(h);
-        completed_ops_.push_back(ops);
+        completed_ops_.push(h);
+        completed_ops_.splice(ops);
         ::InterlockedExchange(&dispatch_required_, 1);
     }
 }
