@@ -7,13 +7,10 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
-#include "src/detail/win_iocp_sockets.hpp"
-
 #ifdef _WIN32
 
+#include "src/detail/win_iocp_sockets.hpp"
 #include "src/detail/win_iocp_scheduler.hpp"
-
-#include <Ws2tcpip.h>
 
 namespace boost {
 namespace corosio {
@@ -319,7 +316,7 @@ void
 win_iocp_sockets::
 shutdown()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<win_mutex> lock(mutex_);
 
     for (auto* impl = list_.pop_front(); impl != nullptr;
          impl = list_.pop_front())
@@ -336,7 +333,7 @@ create_impl()
     auto* impl = new win_socket_impl(*this);
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<win_mutex> lock(mutex_);
         list_.push_back(impl);
     }
 
@@ -348,7 +345,7 @@ win_iocp_sockets::
 destroy_impl(win_socket_impl& impl)
 {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<win_mutex> lock(mutex_);
         list_.remove(&impl);
     }
 
@@ -379,7 +376,7 @@ open_socket(win_socket_impl& impl)
     HANDLE result = ::CreateIoCompletionPort(
         reinterpret_cast<HANDLE>(sock),
         static_cast<HANDLE>(iocp_),
-        socket_key,
+        overlapped_key,
         0);
 
     if (result == nullptr)

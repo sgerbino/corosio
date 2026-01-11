@@ -173,13 +173,17 @@ struct io_context_test
         auto ex = ioc.get_executor();
         int counter = 0;
 
-        // Poll with no work should return 0
+        // Poll with no work should return 0 and stop the context
         std::size_t n = ioc.poll();
         BOOST_TEST(n == 0);
+        BOOST_TEST(ioc.stopped());
 
         // Add work
         ex.post(make_coro(counter));
         ex.post(make_coro(counter));
+
+        // Must restart after stop before poll will process handlers
+        ioc.restart();
 
         // Poll should execute all ready work
         n = ioc.poll();
@@ -194,12 +198,16 @@ struct io_context_test
         auto ex = ioc.get_executor();
         int counter = 0;
 
-        // poll_one with no work should return 0
+        // poll_one with no work should return 0 and stop the context
         std::size_t n = ioc.poll_one();
         BOOST_TEST(n == 0);
+        BOOST_TEST(ioc.stopped());
 
         ex.post(make_coro(counter));
         ex.post(make_coro(counter));
+
+        // Must restart after stop before poll_one will process handlers
+        ioc.restart();
 
         // poll_one should execute exactly one
         n = ioc.poll_one();
@@ -210,9 +218,10 @@ struct io_context_test
         BOOST_TEST(n == 1);
         BOOST_TEST(counter == 2);
 
-        // No more work
+        // No more work - stops again
         n = ioc.poll_one();
         BOOST_TEST(n == 0);
+        BOOST_TEST(ioc.stopped());
     }
 
     void
@@ -247,51 +256,41 @@ struct io_context_test
     }
 
     void
-    testRunOneWithTimeout()
+    testRunOneFor()
     {
         io_context ioc;
+        auto ex = ioc.get_executor();
         int counter = 0;
 
-        // run_one with timeout and no work - should return after timeout
-        auto start = std::chrono::steady_clock::now();
-        std::size_t n = ioc.run_one(10000); // 10ms timeout
-        auto elapsed = std::chrono::steady_clock::now() - start;
-
+        // run_one_for with no work - returns immediately (no outstanding work)
+        std::size_t n = ioc.run_one_for(std::chrono::milliseconds(10));
         BOOST_TEST(n == 0);
-        // Should have waited at least some time (allow for timing variance)
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-        BOOST_TEST(ms >= 5); // At least 5ms
 
         // With work posted
-        auto ex = ioc.get_executor();
         ex.post(make_coro(counter));
 
-        n = ioc.run_one(100000); // 100ms timeout
+        n = ioc.run_one_for(std::chrono::milliseconds(100));
         BOOST_TEST(n == 1);
         BOOST_TEST(counter == 1);
     }
 
     void
-    testWaitOne()
+    testRunOneUntil()
     {
         io_context ioc;
         auto ex = ioc.get_executor();
         int counter = 0;
 
-        // wait_one with no work - should timeout
-        std::size_t n = ioc.wait_one(10000); // 10ms
+        // run_one_until with no work - should return after deadline
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+        std::size_t n = ioc.run_one_until(deadline);
         BOOST_TEST(n == 0);
 
-        // Post work
+        // Post work and run_one_until
         ex.post(make_coro(counter));
 
-        // wait_one should indicate work available but not execute
-        n = ioc.wait_one(100000); // 100ms
-        BOOST_TEST(n == 1);
-        BOOST_TEST(counter == 0); // Not executed yet
-
-        // Now run to actually execute
-        n = ioc.run();
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        n = ioc.run_one_until(deadline);
         BOOST_TEST(n == 1);
         BOOST_TEST(counter == 1);
     }
@@ -346,8 +345,8 @@ struct io_context_test
         testPoll();
         testPollOne();
         testStopAndRestart();
-        testRunOneWithTimeout();
-        testWaitOne();
+        testRunOneFor();
+        testRunOneUntil();
         testRunFor();
         testExecutorRunningInThisThread();
     }

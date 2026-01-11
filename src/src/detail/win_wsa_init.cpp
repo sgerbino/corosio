@@ -7,18 +7,11 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
-#include "src/detail/win_wsa_init.hpp"
-
 #ifdef _WIN32
 
+#include "src/detail/win_wsa_init.hpp"
+
 #include <boost/corosio/detail/except.hpp>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
-#include <WinSock2.h>
-#include <Windows.h>
 
 namespace boost {
 namespace corosio {

@@ -14,7 +14,6 @@
 #include <boost/capy/coro.hpp>
 #include <boost/capy/execution_context.hpp>
 
-#include <chrono>
 #include <cstddef>
 
 namespace boost {
@@ -29,15 +28,13 @@ struct scheduler
     virtual void on_work_started() noexcept = 0;
     virtual void on_work_finished() noexcept = 0;
     virtual bool running_in_this_thread() const noexcept = 0;
+    virtual bool has_outstanding_work() const noexcept = 0;
     virtual void stop() = 0;
     virtual bool stopped() const noexcept = 0;
     virtual void restart() = 0;
     virtual std::size_t run() = 0;
     virtual std::size_t run_one() = 0;
-    virtual std::size_t run_one(long usec) = 0;
     virtual std::size_t wait_one(long usec) = 0;
-    virtual std::size_t run_for(std::chrono::steady_clock::duration) = 0;
-    virtual std::size_t run_until(std::chrono::steady_clock::time_point) = 0;
     virtual std::size_t poll() = 0;
     virtual std::size_t poll_one() = 0;
 };

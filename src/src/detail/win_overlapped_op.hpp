@@ -11,20 +11,6 @@
 #define BOOST_COROSIO_DETAIL_WIN_OVERLAPPED_OP_HPP
 
 #include <boost/corosio/detail/config.hpp>
-
-#ifdef _WIN32
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-
-#include <WinSock2.h>
-#include <Windows.h>
-
 #include <boost/capy/affine.hpp>
 #include <boost/capy/coro.hpp>
 #include <boost/capy/execution_context.hpp>
@@ -35,16 +21,16 @@
 #include <optional>
 #include <stop_token>
 
+#include "src/detail/windows.hpp"
+
 namespace boost {
 namespace corosio {
 namespace detail {
 
 struct overlapped_op
     : OVERLAPPED
-    , capy::execution_context::handler  // handler already has intrusive_list node
+    , capy::execution_context::handler
 {
-    overlapped_op() { data_ = this; }
-
     struct canceller
     {
         overlapped_op* op;
@@ -64,6 +50,11 @@ struct overlapped_op
     // GQCS can complete before WSARecv/etc returns; ready_=1 means
     // the initiator is done and the op can be dispatched.
     long ready_ = 0;
+
+    overlapped_op()
+    {
+        data_ = this;
+    }
 
     void reset() noexcept
     {
@@ -132,7 +123,5 @@ get_overlapped_op(capy::execution_context::handler* h) noexcept
 } // namespace detail
 } // namespace corosio
 } // namespace boost
-
-#endif // _WIN32
 
 #endif

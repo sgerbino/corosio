@@ -20,6 +20,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 namespace boost {
@@ -144,41 +145,6 @@ public:
         return sched_.run_one();
     }
 
-    /** Process at most one pending work item with timeout.
-
-        This function blocks until one work item has been executed,
-        the timeout expires, or `stop()` is called.
-
-        @throws system::system_error on failure.
-
-        @param usec Timeout in microseconds.
-
-        @return The number of handlers executed (0 or 1).
-    */
-    std::size_t
-    run_one(long usec)
-    {
-        return sched_.run_one(usec);
-    }
-
-    /** Wait for at most one completion without executing.
-
-        This function blocks until a completion is available, the
-        timeout expires, or `stop()` is called. The completion is
-        not executed.
-
-        @throws system::system_error on failure.
-
-        @param usec Timeout in microseconds.
-
-        @return The number of completions available (0 or 1).
-    */
-    std::size_t
-    wait_one(long usec)
-    {
-        return sched_.wait_one(usec);
-    }
-
     /** Process work items for the specified duration.
 
         This function blocks until work items have been executed for
@@ -192,9 +158,7 @@ public:
     std::size_t
     run_for(std::chrono::duration<Rep, Period> const& rel_time)
     {
-        return sched_.run_for(
-            std::chrono::duration_cast<
-                std::chrono::steady_clock::duration>(rel_time));
+        return run_until(std::chrono::steady_clock::now() + rel_time);
     }
 
     /** Process work items until the specified time.
@@ -210,7 +174,60 @@ public:
     std::size_t
     run_until(std::chrono::time_point<Clock, Duration> const& abs_time)
     {
-        return run_for(abs_time - Clock::now());
+        std::size_t n = 0;
+        while (run_one_until(abs_time))
+            if (n != (std::numeric_limits<std::size_t>::max)())
+                ++n;
+        return n;
+    }
+
+    /** Process at most one work item for the specified duration.
+
+        This function blocks until one work item has been executed,
+        the specified duration has elapsed, or `stop()` is called.
+
+        @param rel_time The duration for which the call may block.
+
+        @return The number of handlers executed (0 or 1).
+    */
+    template<class Rep, class Period>
+    std::size_t
+    run_one_for(std::chrono::duration<Rep, Period> const& rel_time)
+    {
+        return run_one_until(std::chrono::steady_clock::now() + rel_time);
+    }
+
+    /** Process at most one work item until the specified time.
+
+        This function blocks until one work item has been executed,
+        the specified time is reached, or `stop()` is called.
+
+        @param abs_time The time point until which the call may block.
+
+        @return The number of handlers executed (0 or 1).
+    */
+    template<class Clock, class Duration>
+    std::size_t
+    run_one_until(std::chrono::time_point<Clock, Duration> const& abs_time)
+    {
+        typename Clock::time_point now = Clock::now();
+        while (now < abs_time)
+        {
+            auto rel_time = abs_time - now;
+            if (rel_time > std::chrono::seconds(1))
+                rel_time = std::chrono::seconds(1);
+
+            std::size_t s = sched_.wait_one(
+                static_cast<long>(std::chrono::duration_cast<
+                    std::chrono::microseconds>(rel_time).count()));
+
+            // Exit if: handler ran, stopped, or no outstanding work
+            if (s || stopped() || !sched_.has_outstanding_work())
+                return s;
+
+            now = Clock::now();
+        }
+        return 0;
     }
 
     /** Process all ready work items without blocking.

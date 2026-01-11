@@ -12,7 +12,7 @@
 
 #include <boost/corosio/detail/config.hpp>
 
-#ifdef _WIN32
+#include "src/detail/windows.hpp"
 
 namespace boost {
 namespace corosio {
@@ -42,7 +42,5 @@ private:
 } // namespace detail
 } // namespace corosio
 } // namespace boost
-
-#endif // _WIN32
 
 #endif

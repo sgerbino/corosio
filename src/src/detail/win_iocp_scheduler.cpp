@@ -7,24 +7,38 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
+#ifdef _WIN32
+
 #include "src/detail/win_iocp_scheduler.hpp"
 #include "src/detail/win_overlapped_op.hpp"
 
 #include <boost/corosio/detail/except.hpp>
 #include <boost/capy/thread_local_ptr.hpp>
 
-#ifdef _WIN32
+#include <limits>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
+/*
+    ARCHITECTURE NOTE: Difference from Boost.Asio
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
+    In Asio, only OVERLAPPED-derived operations go through the completion port.
+    Posted handlers are wrapped in an operation that contains OVERLAPPED.
 
-#include <WinSock2.h>
-#include <Windows.h>
+    In corosio, we post BOTH types directly to the completion port:
+      - OVERLAPPED* (overlapped_op) for I/O operations
+      - capy::execution_context::handler* for posted handlers/coroutines
+
+    Discrimination is done via the completion key:
+      - handler_key (1): the LPOVERLAPPED is actually a handler*
+      - overlapped_key (2): the LPOVERLAPPED is an overlapped_op*
+
+    The op_queue (intrusive_list<handler>) holds MIXED elements:
+      - Plain handlers (coro_work, etc.)
+      - overlapped_op (which derives from handler)
+
+    Use get_overlapped_op(handler*) to safely check if a handler is an
+    overlapped_op (returns nullptr if not). All code that processes op_queue
+    must be mindful of this mixed content.
+*/
 
 namespace boost {
 namespace corosio {
@@ -50,6 +64,7 @@ struct scheduler_context
     scheduler_context* next;
 };
 
+// used for running_in_this_thread()
 capy::thread_local_ptr<scheduler_context> context_stack;
 
 struct thread_context_guard
@@ -114,38 +129,33 @@ shutdown()
         // First drain the fallback queue (intrusive_list doesn't auto-destroy)
         op_queue ops;
         {
-            std::lock_guard<std::mutex> lock(dispatch_mutex_);
+            std::lock_guard<win_mutex> lock(dispatch_mutex_);
             ops.push_back(completed_ops_);  // splice all from completed_ops_
         }
 
-        if (!ops.empty())
+        while (auto* h = ops.pop_front())
         {
-            while (auto* h = ops.pop_front())
-            {
-                ::InterlockedDecrement(&outstanding_work_);
-                h->destroy();
-            }
+            ::InterlockedDecrement(&outstanding_work_);
+            h->destroy();
         }
-        else
+
+        // Then drain from IOCP with zero timeout (non-blocking)
+        DWORD bytes;
+        ULONG_PTR key;
+        LPOVERLAPPED overlapped;
+        ::GetQueuedCompletionStatus(iocp_, &bytes, &key, &overlapped, 0);
+        if (overlapped)
         {
-            // Then drain from IOCP with zero timeout (non-blocking)
-            DWORD bytes;
-            ULONG_PTR key;
-            LPOVERLAPPED overlapped;
-            ::GetQueuedCompletionStatus(iocp_, &bytes, &key, &overlapped, 0);
-            if (overlapped)
+            ::InterlockedDecrement(&outstanding_work_);
+            if (key == handler_key)
             {
-                ::InterlockedDecrement(&outstanding_work_);
-                if (key == handler_key)
-                {
-                    // Posted handlers (coro_work, etc.)
-                    reinterpret_cast<capy::execution_context::handler*>(overlapped)->destroy();
-                }
-                else if (key == socket_key)
-                {
-                    // I/O operations
-                    static_cast<overlapped_op*>(overlapped)->destroy();
-                }
+                // Posted handlers (coro_work, etc.)
+                reinterpret_cast<capy::execution_context::handler*>(overlapped)->destroy();
+            }
+            else if (key == overlapped_key)
+            {
+                // I/O operations
+                static_cast<overlapped_op*>(overlapped)->destroy();
             }
         }
     }
@@ -158,13 +168,14 @@ void
 win_iocp_scheduler::
 post(capy::coro h) const
 {
-    struct coro_work
-        : capy::execution_context::handler  // handler already has intrusive_list node
+    struct post_handler
+        : capy::execution_context::handler
     {
         capy::coro h_;
         long ready_ = 1;  // always ready for immediate dispatch
 
-        explicit coro_work(capy::coro h)
+        explicit
+        post_handler(capy::coro h)
             : h_(h)
         {
         }
@@ -182,15 +193,15 @@ post(capy::coro h) const
         }
     };
 
-    auto* work = new coro_work(h);
+    auto* ph = new post_handler(h);
     ::InterlockedIncrement(&outstanding_work_);
 
     if (!::PostQueuedCompletionStatus(iocp_, 0, handler_key,
-            reinterpret_cast<LPOVERLAPPED>(work)))
+            reinterpret_cast<LPOVERLAPPED>(ph)))
     {
         // PQCS can fail if non-paged pool exhausted; queue for later
-        std::lock_guard<std::mutex> lock(dispatch_mutex_);
-        completed_ops_.push_back(work);
+        std::lock_guard<win_mutex> lock(dispatch_mutex_);
+        completed_ops_.push_back(ph);
         ::InterlockedExchange(&dispatch_required_, 1);
     }
 }
@@ -209,7 +220,7 @@ post(capy::execution_context::handler* h) const
             reinterpret_cast<LPOVERLAPPED>(h)))
     {
         // PQCS can fail if non-paged pool exhausted; queue for later
-        std::lock_guard<std::mutex> lock(dispatch_mutex_);
+        std::lock_guard<win_mutex> lock(dispatch_mutex_);
         completed_ops_.push_back(h);
         ::InterlockedExchange(&dispatch_required_, 1);
     }
@@ -226,7 +237,6 @@ void
 win_iocp_scheduler::
 on_work_finished() noexcept
 {
-    // Auto-stop when no work remains; run() will return
     if (::InterlockedDecrement(&outstanding_work_) == 0)
         stop();
 }
@@ -239,6 +249,13 @@ running_in_this_thread() const noexcept
         if (c->key == this)
             return true;
     return false;
+}
+
+bool
+win_iocp_scheduler::
+has_outstanding_work() const noexcept
+{
+    return ::InterlockedExchangeAdd(&outstanding_work_, 0) > 0;
 }
 
 void
@@ -266,11 +283,13 @@ stop()
         // limiting to one outstanding stop event across all threads
         if (::InterlockedExchange(&stop_event_posted_, 1) == 0)
         {
-            if (!::PostQueuedCompletionStatus(iocp_, 0, shutdown_key, nullptr))
+            if (!::PostQueuedCompletionStatus(
+                iocp_, 0, shutdown_key, nullptr))
             {
                 DWORD last_error = ::GetLastError();
                 detail::throw_system_error(system::error_code(
-                    static_cast<int>(last_error), system::system_category()));
+                    static_cast<int>(last_error),
+                    system::system_category()));
             }
         }
     }
@@ -280,7 +299,7 @@ bool
 win_iocp_scheduler::
 stopped() const noexcept
 {
-    // InterlockedExchangeAdd with 0 is an atomic read
+    // equivalent to atomic read
     return ::InterlockedExchangeAdd(&stopped_, 0) != 0;
 }
 
@@ -296,127 +315,47 @@ win_iocp_scheduler::
 run()
 {
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
-        return 0;
-    if (stopped())
-        return 0;
-
-    system::error_code ec;
-    std::size_t total = 0;
-
-    while (!stopped())
     {
-        std::size_t n = do_run(INFINITE, static_cast<std::size_t>(-1), ec);
-        if (ec)
-            detail::throw_system_error(ec);
-        if (n == 0)
-            break;
-        total += n;
+        stop();
+        return 0;
     }
 
-    return total;
+    thread_context_guard ctx(this);
+
+    std::size_t n = 0;
+    while (do_one(INFINITE))
+        if (n != (std::numeric_limits<std::size_t>::max)())
+            ++n;
+    return n;
 }
 
 std::size_t
 win_iocp_scheduler::
 run_one()
 {
-    // Return immediately if stopped
-    if (stopped())
-        return 0;
-
-    // Return immediately if no work
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
+    {
+        stop();
         return 0;
+    }
 
-    system::error_code ec;
-    std::size_t n = do_run(INFINITE, 1, ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
-}
-
-std::size_t
-win_iocp_scheduler::
-run_one(long usec)
-{
-    // Return immediately if stopped
-    if (stopped())
-        return 0;
-
-    // Timed version: wait for timeout even if no work (work could be posted)
-    unsigned long timeout_ms = usec < 0 ? INFINITE :
-        static_cast<unsigned long>((usec + 999) / 1000);
-    system::error_code ec;
-    std::size_t n = do_run(timeout_ms, 1, ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
+    thread_context_guard ctx(this);
+    return do_one(INFINITE);
 }
 
 std::size_t
 win_iocp_scheduler::
 wait_one(long usec)
 {
-    // Return immediately if stopped
-    if (stopped())
+    // Unlike run()/run_one(), don't stop when no work - just return.
+    // run_for/run_until should not stop the context.
+    if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
         return 0;
 
-    // Timed version: wait for timeout even if no work
+    thread_context_guard ctx(this);
     unsigned long timeout_ms = usec < 0 ? INFINITE :
         static_cast<unsigned long>((usec + 999) / 1000);
-
-    system::error_code ec;
-    std::size_t n = do_wait(timeout_ms, ec);  // Wait only, don't execute
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
-}
-
-std::size_t
-win_iocp_scheduler::
-run_for(std::chrono::steady_clock::duration rel_time)
-{
-    auto end_time = std::chrono::steady_clock::now() + rel_time;
-    return run_until(end_time);
-}
-
-std::size_t
-win_iocp_scheduler::
-run_until(std::chrono::steady_clock::time_point abs_time)
-{
-    // Return immediately if stopped
-    if (stopped())
-        return 0;
-
-    system::error_code ec;
-    std::size_t total = 0;
-
-    while (!stopped())
-    {
-        auto now = std::chrono::steady_clock::now();
-        if (now >= abs_time)
-            break;
-
-        // Return if no work
-        if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
-            break;
-
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            abs_time - now);
-        unsigned long timeout = static_cast<unsigned long>(remaining.count());
-        if (timeout == 0)
-            timeout = 1;
-
-        std::size_t n = do_run(timeout, static_cast<std::size_t>(-1), ec);
-        total += n;
-
-        if (ec)
-            detail::throw_system_error(ec);
-        if (n == 0)
-            break;
-    }
-
-    return total;
+    return do_one(timeout_ms);
 }
 
 std::size_t
@@ -429,10 +368,12 @@ poll()
         return 0;
     }
 
-    system::error_code ec;
-    std::size_t n = do_run(0, static_cast<std::size_t>(-1), ec);
-    if (ec)
-        detail::throw_system_error(ec);
+    thread_context_guard ctx(this);
+
+    std::size_t n = 0;
+    while (do_one(0))
+        if (n != (std::numeric_limits<std::size_t>::max)())
+            ++n;
     return n;
 }
 
@@ -440,198 +381,132 @@ std::size_t
 win_iocp_scheduler::
 poll_one()
 {
-    // Return immediately if stopped
-    if (stopped())
-        return 0;
-
-    // Return immediately if no work
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
+    {
+        stop();
         return 0;
+    }
 
-    system::error_code ec;
-    std::size_t n = do_run(0, 1, ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
+    thread_context_guard ctx(this);
+    return do_one(0);
 }
 
+void
+win_iocp_scheduler::
+post_deferred_completions(
+    op_queue& ops)
+{
+    while(auto h = ops.pop_front())
+    {
+        if(auto op = get_overlapped_op(h))
+        {
+            op->ready_ = 1;
+            if(::PostQueuedCompletionStatus(
+                    iocp_, 0, overlapped_key, op))
+                continue;
+        }
+        else
+        {
+            if(::PostQueuedCompletionStatus(
+                iocp_, 0, handler_key,
+                    reinterpret_cast<LPOVERLAPPED>(h)))
+                continue;
+        }
+
+        // out of resources again, put stuff back
+        std::lock_guard<win_mutex> lock(dispatch_mutex_);
+        completed_ops_.push_back(h);
+        completed_ops_.push_back(ops);
+        ::InterlockedExchange(&dispatch_required_, 1);
+    }
+}
+
+// RAII guard - work_finished called even if handler throws
+struct work_guard
+{
+    win_iocp_scheduler* self;
+    ~work_guard() { self->on_work_finished(); }
+};
+
+// Execute exactly ONE handler, return 0 or 1
+// THROWS on system errors - no error_code
 std::size_t
 win_iocp_scheduler::
-do_run(
-    unsigned long timeout,
-    std::size_t max_handlers,
-    system::error_code& ec)
+do_one(unsigned long timeout_ms)
 {
-    std::size_t count = 0;
-    thread_context_guard guard(this);
-    ec.clear();
-
-    while (count < max_handlers)
+    for (;;)
     {
-        // Drain fallback queue (populated when PQCS fails)
+        // Drain fallback queue if needed
         if (::InterlockedCompareExchange(&dispatch_required_, 0, 1) == 1)
         {
-            std::lock_guard<std::mutex> lock(dispatch_mutex_);
-            while (auto* h = completed_ops_.pop_front())
-            {
-                ::PostQueuedCompletionStatus(iocp_, 0, handler_key,
-                    reinterpret_cast<LPOVERLAPPED>(h));
-            }
+            std::lock_guard<win_mutex> lock(dispatch_mutex_);
+            post_deferred_completions(completed_ops_);
         }
 
-        // Check if there's any work; if not and we're blocking, return
-        if (timeout == INFINITE &&
-            ::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
-        {
-            break;
-        }
-
-        DWORD bytes;
-        ULONG_PTR key;
-        LPOVERLAPPED overlapped;
+        DWORD bytes = 0;
+        ULONG_PTR key = 0;
+        LPOVERLAPPED overlapped = nullptr;
         ::SetLastError(0);
 
-        // Cap timeout to allow periodic re-checking of conditions
-        unsigned long actual_timeout = (timeout == INFINITE || timeout > max_gqcs_timeout)
-            ? max_gqcs_timeout : timeout;
-
         BOOL result = ::GetQueuedCompletionStatus(
-            iocp_, &bytes, &key, &overlapped, actual_timeout);
+            iocp_, &bytes, &key, &overlapped,
+            timeout_ms < max_gqcs_timeout ? timeout_ms : max_gqcs_timeout);
         DWORD last_error = ::GetLastError();
 
         if (overlapped)
         {
             if (key == handler_key)
             {
-                // Handler completions (post, coro) - always ready to dispatch
-                // RAII guards for exception safety
-                struct work_guard {
-                    win_iocp_scheduler* self;
-                    ~work_guard() { self->on_work_finished(); }
-                } wg{this};
-
-                struct count_guard {
-                    std::size_t& n;
-                    ~count_guard() { ++n; }
-                } cg{count};
-
+                // handler*
+                work_guard g{this};
                 (*reinterpret_cast<capy::execution_context::handler*>(overlapped))();
+                return 1;
             }
-            else if (key == socket_key)
+            else if (key == overlapped_key)
             {
+                // overlapped_op*
                 auto* op = static_cast<overlapped_op*>(overlapped);
-
-                // Race condition: GQCS can return before WSARecv/etc returns.
-                // CAS ready_ from 0->1: if old value was 1, initiator is done
-                // and we dispatch. If 0, initiator will see 1 and re-post.
                 if (::InterlockedCompareExchange(&op->ready_, 1, 0) == 1)
                 {
-                    // RAII guards for exception safety
-                    struct work_guard {
-                        win_iocp_scheduler* self;
-                        ~work_guard() { self->on_work_finished(); }
-                    } wg{this};
-
-                    struct count_guard {
-                        std::size_t& n;
-                        ~count_guard() { ++n; }
-                    } cg{count};
-
+                    work_guard g{this};
                     DWORD err = result ? 0 : last_error;
                     op->complete(bytes, err);
                     (*op)();
+                    return 1;
                 }
-                // ready_ was 0: initiator still owns the op, will re-post
+                // Not ready - loop to get next completion
             }
         }
         else if (!result)
         {
             if (last_error != WAIT_TIMEOUT)
             {
-                ec.assign(static_cast<int>(last_error), system::system_category());
-                break;
+                // THROW directly - no error_code
+                detail::throw_system_error(system::error_code(
+                    static_cast<int>(last_error), system::system_category()));
             }
-            // Only break on timeout if caller requested non-infinite wait
-            if (timeout != INFINITE)
-                break;
-            // Otherwise continue looping (we used capped timeout)
-            continue;
+            // Timeout - break if finite, continue if INFINITE (capped timeout)
+            if (timeout_ms != INFINITE)
+                return 0;
         }
         else if (key == shutdown_key)
         {
-            // Clear posted flag; we consumed the event
             ::InterlockedExchange(&stop_event_posted_, 0);
-
             if (stopped())
             {
-                // Cascade wake to next blocked thread
                 if (::InterlockedExchange(&stop_event_posted_, 1) == 0)
                     ::PostQueuedCompletionStatus(iocp_, 0, shutdown_key, nullptr);
-                break;
+                return 0;
             }
+            // Not stopped (restarted) - continue immediately without
+            // checking timeout, since shutdown_key doesn't count as work
+            continue;
         }
     }
-    return count;
-}
-
-std::size_t
-win_iocp_scheduler::
-do_wait(unsigned long timeout, system::error_code& ec)
-{
-    ec.clear();
-
-    if (stopped())
-        return 0;
-
-    // Check if there's any work; if not, return
-    if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
-        return 0;
-
-    DWORD bytes;
-    ULONG_PTR key;
-    LPOVERLAPPED overlapped;
-
-    BOOL result = ::GetQueuedCompletionStatus(
-        iocp_, &bytes, &key, &overlapped, timeout);
-
-    if (!result)
-    {
-        DWORD err = ::GetLastError();
-        if (err == WAIT_TIMEOUT)
-            return 0;
-        if (overlapped == nullptr)
-        {
-            ec.assign(static_cast<int>(err), system::system_category());
-            return 0;
-        }
-    }
-
-    if (key == shutdown_key)
-    {
-        // Clear posted flag; we consumed the event
-        ::InterlockedExchange(&stop_event_posted_, 0);
-
-        if (stopped())
-        {
-            // Cascade wake to next blocked thread
-            if (::InterlockedExchange(&stop_event_posted_, 1) == 0)
-                ::PostQueuedCompletionStatus(iocp_, 0, shutdown_key, nullptr);
-        }
-        return 0;
-    }
-
-    // Re-post without executing - wait_one just checks for availability
-    if (overlapped != nullptr && (key == handler_key || key == socket_key))
-    {
-        ::PostQueuedCompletionStatus(iocp_, bytes, key, overlapped);
-        return 1;
-    }
-
-    return 0;
 }
 
 } // namespace detail
 } // namespace corosio
 } // namespace boost
 
-#endif // _WIN32
+#endif

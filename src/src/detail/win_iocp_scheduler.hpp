@@ -11,22 +11,18 @@
 #define BOOST_COROSIO_DETAIL_WIN_IOCP_SCHEDULER_HPP
 
 #include <boost/corosio/detail/config.hpp>
-
-#ifdef _WIN32
-
-#if defined(_WIN32_WINNT) && (_WIN32_WINNT < 0x0600)
-#error "corosio requires Windows Vista or later (_WIN32_WINNT >= 0x0600)"
-#endif
-
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/capy/execution_context.hpp>
 #include <boost/capy/intrusive_list.hpp>
 #include <boost/system/error_code.hpp>
 
+#include "src/detail/win_mutex.hpp"
+
 #include <chrono>
 #include <cstdint>
-#include <mutex>
 #include <thread>
+
+#include "src/detail/windows.hpp"
 
 namespace boost {
 namespace corosio {
@@ -35,7 +31,7 @@ namespace detail {
 // IOCP completion keys
 constexpr std::uintptr_t shutdown_key = 0;
 constexpr std::uintptr_t handler_key = 1;
-constexpr std::uintptr_t socket_key = 2;
+constexpr std::uintptr_t overlapped_key = 2;
 
 using op_queue = capy::intrusive_list<capy::execution_context::handler>;
 
@@ -62,15 +58,13 @@ public:
     void on_work_started() noexcept override;
     void on_work_finished() noexcept override;
     bool running_in_this_thread() const noexcept override;
+    bool has_outstanding_work() const noexcept override;
     void stop() override;
     bool stopped() const noexcept override;
     void restart() override;
     std::size_t run() override;
     std::size_t run_one() override;
-    std::size_t run_one(long usec) override;
     std::size_t wait_one(long usec) override;
-    std::size_t run_for(std::chrono::steady_clock::duration rel_time) override;
-    std::size_t run_until(std::chrono::steady_clock::time_point abs_time) override;
     std::size_t poll() override;
     std::size_t poll_one() override;
 
@@ -81,9 +75,8 @@ public:
     void work_finished() const noexcept;
 
 private:
-    std::size_t do_run(unsigned long timeout, std::size_t max_handlers,
-        system::error_code& ec);
-    std::size_t do_wait(unsigned long timeout, system::error_code& ec);
+    void post_deferred_completions(op_queue& ops);
+    std::size_t do_one(unsigned long timeout_ms);
 
     void* iocp_;
     mutable long outstanding_work_;
@@ -96,7 +89,7 @@ private:
     // Signals do_run() to drain completed_ops_ fallback queue
     mutable long dispatch_required_;
 
-    mutable std::mutex dispatch_mutex_;                                    // protects completed_ops_
+    mutable win_mutex dispatch_mutex_;                                      // protects completed_ops_
     mutable op_queue completed_ops_;                                       // fallback when PQCS fails (no auto-destroy)
     std::thread timer_thread_;                                             // placeholder for timer support
 };
@@ -104,7 +97,5 @@ private:
 } // namespace detail
 } // namespace corosio
 } // namespace boost
-
-#endif // _WIN32
 
 #endif

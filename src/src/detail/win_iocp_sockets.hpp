@@ -11,22 +11,18 @@
 #define BOOST_COROSIO_DETAIL_WIN_IOCP_SOCKETS_HPP
 
 #include <boost/corosio/detail/config.hpp>
-
-#ifdef _WIN32
-
 #include <boost/corosio/detail/socket_impl.hpp>
-
 #include <boost/capy/affine.hpp>
 #include <boost/capy/execution_context.hpp>
 #include <boost/capy/intrusive_list.hpp>
 
+#include "src/detail/windows.hpp"
 #include "src/detail/win_overlapped_op.hpp"
+#include "src/detail/win_mutex.hpp"
 #include "src/detail/win_wsa_init.hpp"
 
-#include <Ws2tcpip.h>
 #include <MSWSock.h>
-
-#include <mutex>
+#include <Ws2tcpip.h>
 
 namespace boost {
 namespace corosio {
@@ -212,7 +208,7 @@ private:
     void load_extension_functions();
 
     win_iocp_scheduler& sched_;
-    std::mutex mutex_;
+    win_mutex mutex_;
     capy::intrusive_list<win_socket_impl> list_;
     void* iocp_;
     LPFN_CONNECTEX connect_ex_ = nullptr;
@@ -222,7 +218,5 @@ private:
 } // namespace detail
 } // namespace corosio
 } // namespace boost
-
-#endif // _WIN32
 
 #endif
