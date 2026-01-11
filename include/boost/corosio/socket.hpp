@@ -125,8 +125,8 @@ private:
         std::stop_token,
         std::error_code*);
 
-    struct impl;
-    impl& impl_;
+    class socket_impl;
+    socket_impl& impl_;
 };
 
 } // namespace corosio

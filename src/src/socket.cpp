@@ -8,79 +8,28 @@
 //
 
 #include <boost/corosio/socket.hpp>
-#include <boost/capy/executor.hpp>
-
-#include <atomic>
-#include <optional>
-#include <stop_token>
+#include "src/win_iocp_sockets.hpp"
 
 namespace boost {
 namespace corosio {
 
-struct socket::impl final
-{
-    struct read_op
-        : capy::executor_work
-    {
-        // Small invocable for stop_callback - avoids std::function overhead
-        struct canceller
-        {
-            read_op* op;
-            void operator()() const { op->cancel(); }
-        };
-
-        capy::coro h;
-        capy::any_dispatcher d;
-        std::atomic<bool> cancelled{false};
-        std::error_code* ec_out = nullptr;
-        std::optional<std::stop_callback<canceller>> stop_cb;
-
-        void operator()() override
-        {
-            // Clear the stop callback before resuming
-            stop_cb.reset();
-
-            // Set error code if cancelled
-            if (ec_out && cancelled.load(std::memory_order_acquire))
-                *ec_out = std::make_error_code(std::errc::operation_canceled);
-
-            d(h).resume();
-        }
-
-        void destroy() override
-        {
-            stop_cb.reset();
-            // do not delete; owned by socket
-        }
-
-        void cancel()
-        {
-            cancelled.store(true, std::memory_order_release);
-        }
-
-        void start(std::stop_token token)
-        {
-            cancelled.store(false, std::memory_order_release);
-            stop_cb.reset();
-
-            if (token.stop_possible())
-                stop_cb.emplace(token, canceller{this});
-        }
-    };
-
-    read_op rd;
-};
-
 socket::
 ~socket()
 {
+    auto& svc = impl_.svc_;
+    svc.unregister_socket(&impl_);
     delete &impl_;
 }
 
 socket::
 socket(
-    capy::execution_context&)
-    : impl_(*new impl)
+    capy::execution_context& ctx)
+    : impl_([&ctx]() -> socket_impl& {
+        auto& svc = ctx.use_service<win_iocp_sockets>();
+        auto* impl = new socket_impl(svc);
+        svc.register_socket(impl);
+        return *impl;
+    }())
 {
 }
 
@@ -88,7 +37,7 @@ void
 socket::
 cancel() const
 {
-    impl_.rd.cancel();
+    impl_.cancel();
 }
 
 void
