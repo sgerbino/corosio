@@ -7,24 +7,28 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
-#ifndef BOOST_COROSIO_WIN_IOCP_SOCKETS_HPP
-#define BOOST_COROSIO_WIN_IOCP_SOCKETS_HPP
+#ifndef BOOST_COROSIO_DETAIL_WIN_IOCP_SOCKETS_HPP
+#define BOOST_COROSIO_DETAIL_WIN_IOCP_SOCKETS_HPP
 
 #include <boost/corosio/detail/config.hpp>
 
 #ifdef _WIN32
 
+#include <boost/capy/affine.hpp>
+#include <boost/capy/coro.hpp>
 #include <boost/capy/execution_context.hpp>
 #include <boost/capy/executor.hpp>
 #include <boost/capy/intrusive_list.hpp>
 
 #include <atomic>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <system_error>
 
 namespace boost {
 namespace corosio {
+namespace detail {
 
 class win_iocp_sockets;
 
@@ -110,6 +114,13 @@ public:
         rd.cancel();
     }
 
+    /** Release this implementation back to the service.
+
+        Unregisters from the service and deallocates.
+        After calling this, the socket_impl is destroyed.
+    */
+    void release();
+
     read_op rd;
 
 private:
@@ -120,15 +131,15 @@ private:
 
 /** Windows IOCP socket management service.
 
-    This service maintains a list of all socket implementations and
-    coordinates their lifecycle with the IOCP. It provides:
+    This service owns all socket implementations and coordinates their
+    lifecycle with the IOCP. It provides:
 
-    - Socket registration with the IOCP handle
-    - Graceful shutdown - cancels all pending operations when io_context stops
+    - Socket implementation allocation and deallocation (with future recycling)
+    - IOCP handle association
+    - Graceful shutdown - destroys all implementations when io_context stops
 
     @par Thread Safety
-    Registration and unregistration are NOT thread-safe. Sockets must be
-    created and destroyed from threads running the io_context.
+    All public member functions are thread-safe.
 
     @note Only available on Windows platforms.
 */
@@ -154,27 +165,28 @@ public:
 
     /** Shut down the service.
 
-        Cancels all pending operations on registered sockets.
+        Destroys all socket implementations.
         Called automatically when the execution_context is destroyed.
     */
     void shutdown() override;
 
-    /** Register a socket with the service.
+    /** Create a new socket implementation.
 
-        Adds the socket to the tracked list and associates its handle
-        with the IOCP if applicable.
+        Allocates a socket_impl, registers it with the service,
+        and associates it with the IOCP.
 
-        @param impl Pointer to the socket implementation.
+        @return Reference to the newly created implementation.
     */
-    void register_socket(socket_impl* impl);
+    socket_impl& create_impl();
 
-    /** Unregister a socket from the service.
+    /** Destroy a socket implementation.
 
-        Removes the socket from the tracked list.
+        Unregisters the implementation from the service and deallocates it.
+        Future versions may recycle implementations instead of deleting.
 
-        @param impl Pointer to the socket implementation.
+        @param impl Reference to the implementation to destroy.
     */
-    void unregister_socket(socket_impl* impl);
+    void destroy_impl(socket_impl& impl);
 
     /** Return the IOCP handle.
 
@@ -183,10 +195,12 @@ public:
     void* native_handle() const noexcept { return iocp_; }
 
 private:
-    capy::intrusive_list<socket_impl> sockets_;
+    std::mutex mutex_;
+    capy::intrusive_list<socket_impl> list_;
     void* iocp_;
 };
 
+} // namespace detail
 } // namespace corosio
 } // namespace boost
 

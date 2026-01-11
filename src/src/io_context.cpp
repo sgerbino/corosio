@@ -9,7 +9,7 @@
 
 #include <boost/corosio/io_context.hpp>
 
-#include "src/win_iocp_scheduler.hpp"
+#include "src/detail/win_iocp_scheduler.hpp"
 
 namespace boost {
 namespace corosio {
@@ -23,7 +23,7 @@ io_context()
 io_context::
 io_context(
     unsigned concurrency_hint)
-    : sched_(use_service<win_iocp_scheduler>())
+    : sched_(use_service<detail::win_iocp_scheduler>())
 {
     (void)concurrency_hint;
 }

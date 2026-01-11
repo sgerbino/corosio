@@ -7,8 +7,8 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
-#ifndef BOOST_COROSIO_WIN_IOCP_SCHEDULER_HPP
-#define BOOST_COROSIO_WIN_IOCP_SCHEDULER_HPP
+#ifndef BOOST_COROSIO_DETAIL_WIN_IOCP_SCHEDULER_HPP
+#define BOOST_COROSIO_DETAIL_WIN_IOCP_SCHEDULER_HPP
 
 #include <boost/corosio/detail/config.hpp>
 
@@ -23,6 +23,7 @@
 
 namespace boost {
 namespace corosio {
+namespace detail {
 
 /** Windows IOCP-based scheduler service.
 
@@ -42,7 +43,7 @@ namespace corosio {
     @par Usage
     @code
     io_context ctx;
-    auto& sched = ctx.use_service<win_iocp_scheduler>();
+    auto& sched = ctx.use_service<detail::win_iocp_scheduler>();
     // ... post work via scheduler interface
     ctx.run();  // Processes work via IOCP
     @endcode
@@ -52,11 +53,11 @@ namespace corosio {
     @see detail::scheduler
 */
 class win_iocp_scheduler
-    : public detail::scheduler
+    : public scheduler
     , public capy::execution_context::service
 {
 public:
-    using key_type = detail::scheduler;
+    using key_type = scheduler;
 
     /** Constructs a Windows IOCP scheduler.
 
@@ -225,6 +226,7 @@ private:
     std::atomic<bool> stopped_{false};
 };
 
+} // namespace detail
 } // namespace corosio
 } // namespace boost
 

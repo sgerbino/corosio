@@ -8,7 +8,9 @@
 //
 
 #include <boost/corosio/socket.hpp>
-#include "src/win_iocp_sockets.hpp"
+#include "src/detail/win_iocp_sockets.hpp"
+
+#include <cassert>
 
 namespace boost {
 namespace corosio {
@@ -16,28 +18,44 @@ namespace corosio {
 socket::
 ~socket()
 {
-    auto& svc = impl_.svc_;
-    svc.unregister_socket(&impl_);
-    delete &impl_;
+    close();
 }
 
 socket::
 socket(
     capy::execution_context& ctx)
-    : impl_([&ctx]() -> socket_impl& {
-        auto& svc = ctx.use_service<win_iocp_sockets>();
-        auto* impl = new socket_impl(svc);
-        svc.register_socket(impl);
-        return *impl;
-    }())
+    : ctx_(&ctx)
+    , impl_(nullptr)
 {
 }
 
 void
 socket::
-cancel() const
+open()
 {
-    impl_.cancel();
+    if (impl_)
+        return; // Already open
+
+    impl_ = &ctx_->use_service<detail::win_iocp_sockets>().create_impl();
+}
+
+void
+socket::
+close()
+{
+    if (!impl_)
+        return; // Already closed
+
+    impl_->release();
+    impl_ = nullptr;
+}
+
+void
+socket::
+cancel()
+{
+    assert(impl_ != nullptr);
+    impl_->cancel();
 }
 
 void
@@ -48,11 +66,12 @@ do_read_some(
     std::stop_token token,
     std::error_code* ec)
 {
-    impl_.rd.h = h;
-    impl_.rd.d = d;
-    impl_.rd.ec_out = ec;
-    impl_.rd.start(token);
-    //reactor_->submit(&impl_.rd);
+    assert(impl_ != nullptr);
+    impl_->rd.h = h;
+    impl_->rd.d = d;
+    impl_->rd.ec_out = ec;
+    impl_->rd.start(token);
+    //reactor_->submit(&impl_->rd);
 }
 
 } // namespace corosio

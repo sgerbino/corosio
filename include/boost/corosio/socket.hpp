@@ -11,6 +11,7 @@
 #define BOOST_COROSIO_SOCKET_HPP
 
 #include <boost/corosio/detail/config.hpp>
+#include <boost/corosio/detail/except.hpp>
 #include <boost/capy/affine.hpp>
 #include <boost/capy/execution_context.hpp>
 
@@ -23,15 +24,13 @@
 
 namespace boost {
 namespace corosio {
+namespace detail { class socket_impl; }
 
-/** A simulated asynchronous socket for benchmarking coroutine I/O.
+/** An asynchronous socket for coroutine I/O.
 
     This class models an asynchronous socket that provides I/O operations
     returning awaitable types. It demonstrates the affine awaitable protocol
     where the awaitable receives the caller's executor for completion dispatch.
-
-    @note This is a simulation for benchmarking purposes. Real implementations
-    would integrate with OS-level async I/O facilities.
 
     @see async_read_some_t
 */
@@ -95,7 +94,79 @@ struct socket
 
     BOOST_COROSIO_DECL
     explicit socket(
-        capy::execution_context& ioc);
+        capy::execution_context& ctx);
+
+    /** Move constructor.
+
+        Transfers ownership of the socket from other.
+        After the move, other.is_open() == false.
+
+        @param other The socket to move from.
+    */
+    socket(socket&& other) noexcept
+        : ctx_(other.ctx_)
+        , impl_(other.impl_)
+    {
+        other.impl_ = nullptr;
+    }
+
+    /** Move assignment.
+
+        Transfers ownership of the socket from other.
+        If this socket was open, it is closed first.
+        After the move, other.is_open() == false.
+
+        @throws std::logic_error if other is on a different execution context.
+
+        @param other The socket to move from.
+
+        @return *this
+    */
+    socket& operator=(socket&& other)
+    {
+        if (this != &other)
+        {
+            if (ctx_ != other.ctx_)
+                detail::throw_logic_error(
+                    "cannot move socket across execution contexts");
+            close();
+            impl_ = other.impl_;
+            other.impl_ = nullptr;
+        }
+        return *this;
+    }
+
+    socket(socket const&) = delete;
+    socket& operator=(socket const&) = delete;
+
+    /** Open the socket.
+
+        Allocates the internal implementation if not already open.
+        This must be called before initiating I/O operations.
+
+        @note This is idempotent - calling on an already-open socket is a no-op.
+    */
+    BOOST_COROSIO_DECL
+    void open();
+
+    /** Close the socket.
+
+        Releases the internal implementation. Pending operations are cancelled.
+        The socket can be reopened by calling open() again.
+
+        @note This is idempotent - calling on an already-closed socket is a no-op.
+    */
+    BOOST_COROSIO_DECL
+    void close();
+
+    /** Check if the socket is open.
+
+        @return true if the socket has an allocated implementation.
+    */
+    bool is_open() const noexcept
+    {
+        return impl_ != nullptr;
+    }
 
     /** Initiates an asynchronous read operation.
 
@@ -104,6 +175,8 @@ struct socket
                      completes with operation_canceled error.
 
         @return An awaitable that completes with std::error_code.
+
+        @pre is_open() == true
     */
     async_read_some_t
     async_read_some()
@@ -115,18 +188,22 @@ struct socket
 
         Pending operations will complete with operation_canceled error.
         This method is thread-safe.
+
+        @pre is_open() == true
     */
-    void cancel() const;
+    BOOST_COROSIO_DECL
+    void cancel();
 
 private:
+    BOOST_COROSIO_DECL
     void do_read_some(
         std::coroutine_handle<>,
         capy::any_dispatcher,
         std::stop_token,
         std::error_code*);
 
-    class socket_impl;
-    socket_impl& impl_;
+    capy::execution_context* ctx_;
+    detail::socket_impl* impl_ = nullptr;
 };
 
 } // namespace corosio

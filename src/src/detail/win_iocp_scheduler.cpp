@@ -7,7 +7,7 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
-#include "src/win_iocp_scheduler.hpp"
+#include "src/detail/win_iocp_scheduler.hpp"
 
 #ifdef _WIN32
 
@@ -19,12 +19,15 @@
 #define NOMINMAX
 #endif
 
+#include <boost/corosio/detail/except.hpp>
+
 #include <Windows.h>
 
-#include <system_error>
+extern "C" __declspec(dllimport) unsigned long __stdcall GetLastError();
 
 namespace boost {
 namespace corosio {
+namespace detail {
 
 namespace {
 
@@ -33,6 +36,14 @@ constexpr ULONG_PTR work_key = 1;
 
 // Completion key used to signal shutdown
 constexpr ULONG_PTR shutdown_key = 0;
+
+inline system::error_code
+last_error() noexcept
+{
+    return system::error_code(
+        static_cast<int>(GetLastError()),
+        system::system_category());
+}
 
 // Stack frame for tracking nested scheduler contexts
 struct scheduler_context
@@ -73,12 +84,7 @@ win_iocp_scheduler(
         0))
 {
     if (iocp_ == nullptr)
-    {
-        throw std::system_error(
-            static_cast<int>(GetLastError()),
-            std::system_category(),
-            "CreateIoCompletionPort failed");
-    }
+        detail::throw_system_error(last_error(), "CreateIoCompletionPort failed");
 }
 
 win_iocp_scheduler::
@@ -421,6 +427,7 @@ poll_one(system::error_code& ec)
     return do_run(0, 1, ec);
 }
 
+} // namespace detail
 } // namespace corosio
 } // namespace boost
 

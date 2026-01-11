@@ -11,12 +11,12 @@
 #define BOOST_COROSIO_IO_CONTEXT_HPP
 
 #include <boost/corosio/detail/config.hpp>
+#include <boost/corosio/detail/except.hpp>
 #include <boost/corosio/detail/unique_ptr.hpp>
 #include <boost/capy/coro.hpp>
 #include <boost/capy/executor.hpp>
 #include <boost/capy/execution_context.hpp>
 #include <boost/system/error_code.hpp>
-#include <boost/system/system_error.hpp>
 
 #include <chrono>
 #include <concepts>
@@ -27,20 +27,6 @@ namespace boost {
 namespace corosio {
 
 namespace detail {
-
-inline void
-throw_error(boost::system::error_code const& ec)
-{
-    if (ec)
-        throw boost::system::system_error(ec);
-}
-
-inline void
-throw_error(boost::system::error_code const& ec, char const* what)
-{
-    if (ec)
-        throw boost::system::system_error(ec, what);
-}
 
 struct scheduler
 {
@@ -173,7 +159,8 @@ public:
     {
         boost::system::error_code ec;
         std::size_t n = sched_.run(ec);
-        detail::throw_error(ec);
+        if (ec)
+            detail::throw_system_error(ec);
         return n;
     }
 
@@ -191,7 +178,8 @@ public:
     {
         boost::system::error_code ec;
         std::size_t n = sched_.run_one(ec);
-        detail::throw_error(ec);
+        if (ec)
+            detail::throw_system_error(ec);
         return n;
     }
 
@@ -211,7 +199,8 @@ public:
     {
         boost::system::error_code ec;
         std::size_t n = sched_.run_one(usec, ec);
-        detail::throw_error(ec);
+        if (ec)
+            detail::throw_system_error(ec);
         return n;
     }
 
@@ -232,7 +221,8 @@ public:
     {
         boost::system::error_code ec;
         std::size_t n = sched_.wait_one(usec, ec);
-        detail::throw_error(ec);
+        if (ec)
+            detail::throw_system_error(ec);
         return n;
     }
 
@@ -284,7 +274,8 @@ public:
     {
         boost::system::error_code ec;
         std::size_t n = sched_.poll(ec);
-        detail::throw_error(ec);
+        if (ec)
+            detail::throw_system_error(ec);
         return n;
     }
 
@@ -302,7 +293,8 @@ public:
     {
         boost::system::error_code ec;
         std::size_t n = sched_.poll_one(ec);
-        detail::throw_error(ec);
+        if (ec)
+            detail::throw_system_error(ec);
         return n;
     }
 
