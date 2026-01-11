@@ -291,7 +291,7 @@ public:
         @param ep The endpoint to connect to.
         @return An awaitable that completes with system::error_code.
     */
-    connect_awaitable connect(tcp::endpoint ep)
+    auto connect(tcp::endpoint ep)
     {
         assert(impl_ != nullptr);
         return connect_awaitable(*this, ep);
@@ -303,8 +303,7 @@ public:
         @return An awaitable that completes with (error_code, bytes_transferred).
     */
     template<class MutableBufferSequence>
-    auto
-    read_some(MutableBufferSequence const& buffers)
+    auto read_some(MutableBufferSequence const& buffers)
     {
         assert(impl_ != nullptr);
         return read_some_awaitable<MutableBufferSequence>(*this, buffers);
@@ -316,8 +315,7 @@ public:
         @return An awaitable that completes with (error_code, bytes_transferred).
     */
     template<class ConstBufferSequence>
-    auto
-    write_some(ConstBufferSequence const& buffers)
+    auto write_some(ConstBufferSequence const& buffers)
     {
         assert(impl_ != nullptr);
         return write_some_awaitable<ConstBufferSequence>(*this, buffers);

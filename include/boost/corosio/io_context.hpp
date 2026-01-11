@@ -361,17 +361,17 @@ public:
         return std::noop_coroutine();
     }
 
-    /** Post a work item for deferred execution.
+    /** Post a coroutine for deferred execution.
 
-        The work item will be executed during a subsequent call to
+        The coroutine will be resumed during a subsequent call to
         `io_context::run()`.
 
-        @param w The work item to post. Ownership is transferred.
+        @param h The coroutine handle to post.
     */
     void
-    post(capy::executor_work* w) const
+    post(capy::coro h) const
     {
-        ctx_->sched_.post(w);
+        ctx_->sched_.post(h);
     }
 
     /** Queue a coroutine for deferred execution.

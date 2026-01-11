@@ -22,24 +22,79 @@ namespace corosio {
 
 static_assert(capy::is_execution_context<io_context>);
 
-// Simple work item for testing
-struct test_work : capy::executor_work
+// Coroutine that increments a counter when resumed
+struct counter_coro
 {
-    int& counter;
-
-    explicit test_work(int& c) : counter(c) {}
-
-    void operator()() override
+    struct promise_type
     {
-        ++counter;
-        delete this;
-    }
+        int* counter_ = nullptr;
 
-    void destroy() override
-    {
-        delete this;
-    }
+        counter_coro get_return_object()
+        {
+            return {std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+
+        void return_void()
+        {
+            if (counter_)
+                ++(*counter_);
+        }
+
+        void unhandled_exception() { std::terminate(); }
+    };
+
+    std::coroutine_handle<promise_type> h;
+
+    operator capy::coro() const { return h; }
 };
+
+inline counter_coro make_coro(int& counter)
+{
+    auto c = []() -> counter_coro { co_return; }();
+    c.h.promise().counter_ = &counter;
+    return c;
+}
+
+// Coroutine that checks running_in_this_thread when resumed
+struct check_coro
+{
+    struct promise_type
+    {
+        bool* result_ = nullptr;
+        io_context::executor_type* ex_ = nullptr;
+
+        check_coro get_return_object()
+        {
+            return {std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+
+        void return_void()
+        {
+            if (result_ && ex_)
+                *result_ = ex_->running_in_this_thread();
+        }
+
+        void unhandled_exception() { std::terminate(); }
+    };
+
+    std::coroutine_handle<promise_type> h;
+
+    operator capy::coro() const { return h; }
+};
+
+inline check_coro make_check_coro(bool& result, io_context::executor_type& ex)
+{
+    auto c = []() -> check_coro { co_return; }();
+    c.h.promise().result_ = &result;
+    c.h.promise().ex_ = &ex;
+    return c;
+}
 
 struct io_context_test
 {
@@ -78,9 +133,9 @@ struct io_context_test
         int counter = 0;
 
         // Post some work
-        ex.post(new test_work(counter));
-        ex.post(new test_work(counter));
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
+        ex.post(make_coro(counter));
+        ex.post(make_coro(counter));
 
         // Run should execute all work
         std::size_t n = ioc.run();
@@ -95,8 +150,8 @@ struct io_context_test
         auto ex = ioc.get_executor();
         int counter = 0;
 
-        ex.post(new test_work(counter));
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
+        ex.post(make_coro(counter));
 
         // run_one should execute exactly one
         std::size_t n = ioc.run_one();
@@ -123,8 +178,8 @@ struct io_context_test
         BOOST_TEST(n == 0);
 
         // Add work
-        ex.post(new test_work(counter));
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
+        ex.post(make_coro(counter));
 
         // Poll should execute all ready work
         n = ioc.poll();
@@ -143,8 +198,8 @@ struct io_context_test
         std::size_t n = ioc.poll_one();
         BOOST_TEST(n == 0);
 
-        ex.post(new test_work(counter));
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
+        ex.post(make_coro(counter));
 
         // poll_one should execute exactly one
         n = ioc.poll_one();
@@ -174,7 +229,7 @@ struct io_context_test
         BOOST_TEST(ioc.stopped());
 
         // Post work after stop
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
 
         // Run should return immediately when stopped
         std::size_t n = ioc.run();
@@ -209,7 +264,7 @@ struct io_context_test
 
         // With work posted
         auto ex = ioc.get_executor();
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
 
         n = ioc.run_one(100000); // 100ms timeout
         BOOST_TEST(n == 1);
@@ -228,7 +283,7 @@ struct io_context_test
         BOOST_TEST(n == 0);
 
         // Post work
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
 
         // wait_one should indicate work available but not execute
         n = ioc.wait_one(100000); // 100ms
@@ -258,7 +313,7 @@ struct io_context_test
         BOOST_TEST(ms < 15); // Should return immediately when no work
 
         // run_for with work
-        ex.post(new test_work(counter));
+        ex.post(make_coro(counter));
         n = ioc.run_for(std::chrono::milliseconds(100));
         BOOST_TEST(n == 1);
         BOOST_TEST(counter == 1);
@@ -275,24 +330,7 @@ struct io_context_test
 
         // Post work that checks running_in_this_thread
         bool during = false;
-        struct check_work : capy::executor_work
-        {
-            bool& result;
-            io_context::executor_type ex;
-
-            check_work(bool& r, io_context::executor_type e)
-                : result(r), ex(e) {}
-
-            void operator()() override
-            {
-                result = ex.running_in_this_thread();
-                delete this;
-            }
-
-            void destroy() override { delete this; }
-        };
-
-        ex.post(new check_work(during, ex));
+        ex.post(make_check_coro(during, ex));
         ioc.run();
 
         BOOST_TEST(during == true);
