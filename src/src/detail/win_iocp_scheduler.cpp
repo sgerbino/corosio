@@ -25,8 +25,6 @@
 #include <WinSock2.h>
 #include <Windows.h>
 
-extern "C" __declspec(dllimport) unsigned long __stdcall GetLastError();
-
 namespace boost {
 namespace corosio {
 namespace detail {
@@ -42,7 +40,8 @@ constexpr ULONG_PTR work_key = 1;
 // Completion key used to identify socket I/O completions
 constexpr ULONG_PTR socket_key = 2;
 
-inline system::error_code
+inline
+system::error_code
 last_error() noexcept
 {
     return system::error_code(
@@ -65,7 +64,8 @@ struct thread_context_guard
 {
     scheduler_context frame_;
 
-    explicit thread_context_guard(win_iocp_scheduler const* ctx) noexcept
+    explicit thread_context_guard(
+        win_iocp_scheduler const* ctx) noexcept
         : frame_{ctx, context_stack.get()}
     {
         context_stack.set(&frame_);
@@ -85,14 +85,6 @@ win_iocp_scheduler(
     unsigned)
     : iocp_(nullptr)
 {
-    // Initialize WinSock
-    WSADATA wsaData;
-    int result = ::WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0)
-        detail::throw_system_error(
-            system::error_code(result, system::system_category()),
-            "WSAStartup failed");
-
     // Create IOCP
     iocp_ = ::CreateIoCompletionPort(
         INVALID_HANDLE_VALUE,
@@ -101,20 +93,14 @@ win_iocp_scheduler(
         0);
 
     if (iocp_ == nullptr)
-    {
-        ::WSACleanup();
-        detail::throw_system_error(last_error(), "CreateIoCompletionPort failed");
-    }
+        detail::throw_system_error(last_error());
 }
 
 win_iocp_scheduler::
 ~win_iocp_scheduler()
 {
     if (iocp_ != nullptr)
-    {
         ::CloseHandle(iocp_);
-    }
-    ::WSACleanup();
 }
 
 void

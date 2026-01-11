@@ -14,6 +14,8 @@
 
 #ifdef _WIN32
 
+#include "src/detail/win_wsa_init.hpp"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -259,7 +261,8 @@ private:
     @note Only available on Windows platforms.
 */
 class win_iocp_sockets
-    : public capy::execution_context::service
+    : private win_wsa_init
+    , public capy::execution_context::service
 {
 public:
     using key_type = win_iocp_sockets;
