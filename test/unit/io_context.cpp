@@ -20,6 +20,8 @@
 namespace boost {
 namespace corosio {
 
+static_assert(capy::is_execution_context<io_context>);
+
 // Simple work item for testing
 struct test_work : capy::executor_work
 {

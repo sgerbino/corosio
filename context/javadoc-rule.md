@@ -48,6 +48,8 @@ Write documentation comments following these conventions.
 */
 ```
 
+Constructors and destructors don't have Thread Safety sections
+
 ## Section Order
 
 1. Brief + extended description

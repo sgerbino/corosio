@@ -104,6 +104,37 @@ public:
     */
     void post(capy::executor_work* w) const override;
 
+    /** Queue a coroutine for deferred execution.
+
+        This is semantically identical to `post`, but conveys that
+        `h` is a continuation of the current call context.
+
+        @param h The coroutine handle to defer.
+
+        @par Thread Safety
+        When isUnsafe is false, this function is thread-safe.
+    */
+    void defer(capy::coro h) const override;
+
+    /** Informs the scheduler that work is beginning.
+
+        This increments the outstanding work count. Must be paired
+        with on_work_finished().
+
+        @par Thread Safety
+        When isUnsafe is false, this function is thread-safe.
+    */
+    void on_work_started() noexcept override;
+
+    /** Informs the scheduler that work has completed.
+
+        This decrements the outstanding work count.
+
+        @par Thread Safety
+        When isUnsafe is false, this function is thread-safe.
+    */
+    void on_work_finished() noexcept override;
+
     /** Check if the current thread is running this scheduler.
 
         @return true if run() is being called on this thread.

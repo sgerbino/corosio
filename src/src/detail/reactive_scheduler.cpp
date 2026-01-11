@@ -240,11 +240,51 @@ post(capy::executor_work* w) const
 }
 
 template<bool isUnsafe>
+void
+reactive_scheduler<isUnsafe>::
+defer(capy::coro h) const
+{
+    post(h);
+}
+
+template<bool isUnsafe>
 bool
 reactive_scheduler<isUnsafe>::
 running_in_this_thread() const noexcept
 {
     return find_thread_info(this) != nullptr;
+}
+
+template<bool isUnsafe>
+void
+reactive_scheduler<isUnsafe>::
+on_work_started() noexcept
+{
+    if constexpr (!isUnsafe)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++outstanding_work_;
+    }
+    else
+    {
+        ++outstanding_work_;
+    }
+}
+
+template<bool isUnsafe>
+void
+reactive_scheduler<isUnsafe>::
+on_work_finished() noexcept
+{
+    if constexpr (!isUnsafe)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --outstanding_work_;
+    }
+    else
+    {
+        --outstanding_work_;
+    }
 }
 
 template<bool isUnsafe>

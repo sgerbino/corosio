@@ -106,6 +106,46 @@ public:
     */
     void post(capy::executor_work* w) const override;
 
+    /** Queue a coroutine for deferred execution.
+
+        This is semantically identical to `post`, but conveys that
+        `h` is a continuation of the current call context.
+
+        @param h The coroutine handle to defer.
+
+        @par Thread Safety
+        This function is thread-safe.
+    */
+    void defer(capy::coro h) const override
+    {
+        post(h);
+    }
+
+    /** Informs the scheduler that work is beginning.
+
+        This increments the outstanding work count. Must be paired
+        with on_work_finished().
+
+        @par Thread Safety
+        This function is thread-safe.
+    */
+    void on_work_started() noexcept override
+    {
+        outstanding_work_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /** Informs the scheduler that work has completed.
+
+        This decrements the outstanding work count.
+
+        @par Thread Safety
+        This function is thread-safe.
+    */
+    void on_work_finished() noexcept override
+    {
+        outstanding_work_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
     /** Check if the current thread is running this scheduler.
 
         @return true if run() is being called on this thread.
@@ -246,6 +286,7 @@ private:
 
     void* iocp_;
     mutable std::atomic<std::size_t> pending_{0};
+    mutable std::atomic<std::size_t> outstanding_work_{0};
     std::atomic<bool> stopped_{false};
 };
 
