@@ -1,0 +1,326 @@
+//
+// Copyright (c) 2025 Vinnie Falco (vinnie.falco@gmail.com)
+//
+// Distributed under the Boost Software License, Version 1.0. (See accompanying
+// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+//
+// Official repository: https://github.com/cppalliance/corosio
+//
+
+= Design Rationale
+
+This page explains the key design decisions in Corosio and the tradeoffs
+they represent. Understanding these decisions helps users make informed
+choices about when to use Corosio and how to extend it.
+
+== Coroutine-First Design
+
+Corosio is designed from the ground up for coroutines. Unlike frameworks
+that adapt callback-based operations for coroutines, every I/O operation
+in Corosio returns an awaitable.
+
+=== Why Not Callbacks?
+
+Traditional callback-based frameworks like Boost.Asio use templates
+extensively:
+
+[source,cpp]
+----
+// Callback-based: templates everywhere
+template<class Executor, class Handler>
+void async_read(basic_socket<Protocol, Executor>& s,
+                MutableBufferSequence const& buffers,
+                Handler&& handler);
+----
+
+This creates several problems:
+
+* N×M template instantiations for N operations × M executor/handler combinations
+* Binary size growth that can reach megabytes
+* Compile times measured in minutes for moderate codebases
+* Nested move-construction overhead at runtime
+
+=== The Coroutine Alternative
+
+Corosio's coroutine-first approach provides:
+
+[source,cpp]
+----
+// Coroutine-first: uniform types
+capy::task<void> read_data(corosio::socket& s, buffer buf);
+----
+
+This approach provides several benefits:
+
+* Clean public interfaces: No templates, no allocators, just `task`
+* Hidden platform types: I/O state lives in translation units
+* Fast compilation: Type erasure at boundaries
+* ABI stability: Platform-specific types never appear in headers
+
+== Affine Awaitable Protocol
+
+The central innovation in Corosio is the *affine awaitable protocol*,
+which propagates executor affinity through coroutine chains without
+embedding executor types in public interfaces.
+
+=== The Lost Context Problem
+
+Consider this scenario:
+
+[source,cpp]
+----
+capy::task<void> ui_handler()
+{
+    auto data = co_await fetch();  // Completes on network thread
+    update_ui(data);               // Where are we now?
+}
+----
+
+When `fetch()` completes, the coroutine might resume on a different thread
+than expected. This is the scheduler affinity problem.
+
+=== The Solution: Forward Propagation
+
+Corosio solves this by passing the dispatcher forward through `await_suspend`:
+
+[source,cpp]
+----
+template<capy::dispatcher Dispatcher>
+auto await_suspend(std::coroutine_handle<> h, Dispatcher const& d)
+{
+    // Store dispatcher, start I/O
+    // When complete, resume via: d(h)
+}
+----
+
+The dispatcher flows from caller to callee through `await_transform`, not
+through backward queries. When I/O completes, the awaitable resumes the
+coroutine through the stored dispatcher, guaranteeing it runs on the
+correct executor.
+
+== Type Erasure Strategy
+
+Corosio uses type erasure strategically to balance performance against
+API simplicity.
+
+=== Where Type Erasure Happens
+
+[cols="1,1,2"]
+|===
+|Component |Erasure |Rationale
+
+|Executor at call site
+|None
+|Full type preserved for inlining
+
+|Executor in coroutine chain
+|`any_executor const*`
+|Single pointer, no templates
+
+|Buffer sequences
+|`buffers_param`
+|One implementation, not N×M
+
+|Platform I/O state
+|Preallocated in socket
+|Hidden from headers entirely
+|===
+
+=== The Encapsulation Tradeoff
+
+We pay one pointer indirection per I/O operation for translation unit
+hiding. This addresses the template tax while keeping overhead negligible
+compared to actual I/O latency:
+
+* Network RTT: 100,000+ ns
+* Disk access: 10,000+ ns
+* Dispatch overhead: 4–60 ns (depth dependent)
+
+The indirection cost (~1-2 ns) is invisible in I/O-bound workloads.
+
+== Platform I/O Hiding
+
+Platform-specific types (`OVERLAPPED`, `io_uring_sqe`, file descriptors)
+do not appear in public headers.
+
+=== How It Works
+
+Each socket preallocates its operation state:
+
+[source,cpp]
+----
+struct socket
+{
+    struct state : work
+    {
+        coro h_;
+        any_executor const* ex_;
+        // OVERLAPPED, HANDLE, etc. — hidden here
+    };
+
+    std::unique_ptr<state> op_;  // Allocated once
+};
+----
+
+The state structure:
+
+1. Inherits from `work`, enabling intrusive queuing
+2. Stores coroutine handle and executor reference for completion
+3. Contains platform-specific members invisible to callers
+4. Is allocated once at socket construction, not per-operation
+
+=== Comparison with Frame Embedding
+
+An alternative approach embeds operation state in the coroutine frame:
+
+[source,cpp]
+----
+// Hypothetical: types exposed, state in frame
+template<class Socket>
+task<size_t> async_read(Socket& s, buffer buf) {
+    typename Socket::read_op op{s, buf};  // In frame
+    co_await op;
+}
+----
+
+This eliminates indirection but exposes platform types in headers. We
+chose encapsulation for the following reasons:
+
+* ABI stability across library versions
+* Fast compilation with minimal header parsing
+* Single implementation per operation (not N×M)
+* Clean refactoring by changing one translation unit
+
+== Executor Model
+
+Corosio uses the term *executor* rather than *scheduler* deliberately.
+
+=== Why Not Scheduler?
+
+In `std::execution`, schedulers are designed for heterogeneous computing:
+selecting GPU vs CPU algorithms, managing completion domains, dispatching
+to hardware accelerators.
+
+Networking has different needs:
+
+* Strand serialization for ordering guarantees
+* I/O completion contexts (IOCP, epoll, io_uring)
+* Thread affinity to ensure handlers run on correct threads
+
+By using "executor" we signal this is a distinct concept tailored to
+networking's requirements.
+
+=== Executor Operations
+
+An executor supports three operations:
+
+[cols="1,3"]
+|===
+|Operation |Behavior
+
+|`dispatch(h)`
+|Run inline if allowed, else queue. Use when crossing context boundaries.
+
+|`post(h)`
+|Always queue. Use when guaranteed asynchrony is required.
+
+|`defer(h)`
+|Queue as continuation (optimization hint).
+|===
+
+For coroutines, **symmetric transfer** is preferred when caller and callee
+share the same executor. The compiler generates tail calls between frames
+with zero executor involvement.
+
+== Allocation Strategy
+
+With proper recycling, both callbacks and coroutines achieve zero
+steady-state allocations.
+
+=== Frame Pooling
+
+Coroutine frames are pooled per-I/O-object:
+
+[source,cpp]
+----
+// In socket's frame allocator
+void* allocate(std::size_t n)
+{
+    // 1. Try thread-local free list
+    // 2. Try global pool (mutex-protected)
+    // 3. Fall back to heap
+}
+----
+
+After the first iteration, frames are recycled without syscalls.
+
+=== Why Per-Object Pools?
+
+* **Locality**: Operations on the same socket produce similar frame sizes
+* **Lifetime**: Socket outlives its operations; allocator follows naturally
+* **Cache efficiency**: Thread-local lists avoid cross-thread coordination
+
+== Comparison with std::execution
+
+Corosio diverges significantly from `std::execution` (P2300).
+
+=== Different Design Drivers
+
+[cols="1,1,1"]
+|===
+|Aspect |std::execution |Corosio
+
+|Primary use case
+|GPU/parallel algorithms
+|Networking/I/O
+
+|Context flow
+|Backward queries
+|Forward propagation
+
+|Algorithm customization
+|Domain transforms
+|Not needed (one impl per platform)
+
+|Type exposure
+|`connect_result_t` in APIs
+|Hidden in translation units
+|===
+
+=== What We Need That They Don't Have
+
+Corosio requires features absent from std::execution:
+
+* Strand serialization
+* Platform I/O integration (IOCP, io_uring)
+* Buffer lifetime management
+
+=== What They Have That We Don't Need
+
+std::execution provides features unnecessary for networking:
+
+* Domain-based algorithm dispatch
+* Completion domain queries
+* Sender transforms
+
+== When to Use Corosio
+
+Corosio is well-suited for projects where:
+
+* Coroutines are the primary programming model
+* Public APIs must hide implementation details
+* Compile time and binary size matter
+* ABI stability is required across library boundaries
+* Clean, simple interfaces are prioritized
+
+Consider alternatives for projects where:
+
+* You need callback-based APIs for C compatibility
+* Maximum performance with zero abstraction is required
+* You're already invested in the Asio ecosystem
+
+== References
+
+* https://github.com/cppalliance/wg21-papers/blob/master/coro-first-io.md[Coroutine-First I/O Paper]
+* https://github.com/cppalliance/wg21-papers/blob/master/affine-awaitables.md[Affine Awaitables Proposal]
+* xref:concepts/affine-awaitables.adoc[Affine Awaitables] — Protocol details
