@@ -16,11 +16,6 @@ namespace detail {
 
 namespace {
 
-//------------------------------------------------------------------------------
-// Thread-local call stack with private queue
-//------------------------------------------------------------------------------
-
-// Thread info contains the scheduler key and private queue
 struct thread_info_impl
 {
     scheduler const* key;
@@ -28,10 +23,8 @@ struct thread_info_impl
     thread_info_impl* next;
 };
 
-// Thread-local head of the context stack
 capy::thread_local_ptr<thread_info_impl> context_stack;
 
-// Find thread_info for a specific scheduler (for post fast-path)
 thread_info_impl*
 find_thread_info(scheduler const* sched) noexcept
 {
@@ -41,7 +34,6 @@ find_thread_info(scheduler const* sched) noexcept
     return nullptr;
 }
 
-// RAII guard that pushes/pops a frame onto the context stack
 struct thread_context_guard
 {
     thread_info_impl frame_;
@@ -54,8 +46,6 @@ struct thread_context_guard
 
     ~thread_context_guard() noexcept
     {
-        // Note: private_queue should be empty here (flushed by work_cleanup)
-        // But queue destructor will destroy() any stragglers
         context_stack.set(frame_.next);
     }
 
@@ -65,19 +55,11 @@ struct thread_context_guard
 
 } // namespace
 
-//------------------------------------------------------------------------------
-// thread_info definition (matches forward declaration in header)
-//------------------------------------------------------------------------------
-
 template<bool isUnsafe>
 struct reactive_scheduler<isUnsafe>::thread_info
 {
     thread_info_impl* impl;
 };
-
-//------------------------------------------------------------------------------
-// work_cleanup - flushes private queue after each handler (matching Asio)
-//------------------------------------------------------------------------------
 
 template<bool isUnsafe>
 struct work_cleanup
@@ -88,7 +70,6 @@ struct work_cleanup
 
     ~work_cleanup()
     {
-        // Flush private queue back to main queue
         if (!this_thread_->private_queue.empty())
         {
             if constexpr (!isUnsafe)
@@ -99,10 +80,6 @@ struct work_cleanup
         }
     }
 };
-
-//------------------------------------------------------------------------------
-// task_cleanup - re-inserts task sentinel after reactor runs
-//------------------------------------------------------------------------------
 
 template<bool isUnsafe>
 struct task_cleanup
@@ -122,10 +99,6 @@ struct task_cleanup
         sched_->queue_.push(&sched_->task_operation_);
     }
 };
-
-//------------------------------------------------------------------------------
-// reactive_scheduler implementation
-//------------------------------------------------------------------------------
 
 template<bool isUnsafe>
 reactive_scheduler<isUnsafe>::
@@ -150,7 +123,6 @@ shutdown()
     std::unique_lock<std::mutex> lock(mutex_);
     shutdown_ = true;
 
-    // Destroy all pending work items (except task_operation_ sentinel)
     while (auto* w = queue_.pop())
     {
         if (w != &task_operation_)
@@ -158,21 +130,6 @@ shutdown()
     }
 
     outstanding_work_ = 0;
-}
-
-template<bool isUnsafe>
-void
-reactive_scheduler<isUnsafe>::
-init_task()
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!shutdown_ && !task_)
-    {
-        // TODO: task_ = &use_service<reactor>(context());
-        // For now, just insert the sentinel
-        queue_.push(&task_operation_);
-        cv_.notify_one();
-    }
 }
 
 template<bool isUnsafe>
@@ -210,18 +167,15 @@ void
 reactive_scheduler<isUnsafe>::
 post(capy::execution_context::handler* h) const
 {
-    // Fast path: if one_thread_ and we're inside run(), use private queue
     if (one_thread_)
     {
         if (auto* info = find_thread_info(this))
         {
-            // Push to thread-local private queue (no lock, no alloc!)
             info->private_queue.push(h);
             return;
         }
     }
 
-    // Normal path: lock and push to main queue
     if constexpr (!isUnsafe)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -245,14 +199,6 @@ reactive_scheduler<isUnsafe>::
 defer(capy::coro h) const
 {
     post(h);
-}
-
-template<bool isUnsafe>
-bool
-reactive_scheduler<isUnsafe>::
-running_in_this_thread() const noexcept
-{
-    return find_thread_info(this) != nullptr;
 }
 
 template<bool isUnsafe>
@@ -288,6 +234,14 @@ on_work_finished() noexcept
 }
 
 template<bool isUnsafe>
+bool
+reactive_scheduler<isUnsafe>::
+running_in_this_thread() const noexcept
+{
+    return find_thread_info(this) != nullptr;
+}
+
+template<bool isUnsafe>
 void
 reactive_scheduler<isUnsafe>::
 stop()
@@ -303,13 +257,6 @@ stop()
     }
 
     cv_.notify_all();
-
-    // TODO: Interrupt reactor when implemented
-    // if (task_ && !task_interrupted_)
-    // {
-    //     task_interrupted_ = true;
-    //     task_->interrupt();
-    // }
 }
 
 template<bool isUnsafe>
@@ -347,72 +294,6 @@ restart()
 template<bool isUnsafe>
 std::size_t
 reactive_scheduler<isUnsafe>::
-do_run(
-    std::unique_lock<std::mutex>& lock,
-    thread_info& this_thread,
-    std::size_t max_handlers)
-{
-    std::size_t count = 0;
-
-    while (count < max_handlers && !stopped_)
-    {
-        if (queue_.empty())
-            break;
-
-        auto* work = queue_.pop();
-
-        // Check if this is the task (reactor) sentinel
-        if (work == &task_operation_)
-        {
-            // TODO: When reactor is implemented, this will run the reactor
-            // if (task_)
-            // {
-            //     bool more_handlers = !queue_.empty();
-            //     task_interrupted_ = more_handlers;
-            //     lock.unlock();
-            //     {
-            //         task_cleanup<isUnsafe> on_exit{...};
-            //         task_->run(more_handlers ? 0 : -1,
-            //             this_thread.impl->private_queue);
-            //     }
-            //     continue;
-            // }
-
-            // For now, just re-insert sentinel and continue
-            queue_.push(&task_operation_);
-            continue;
-        }
-
-        --outstanding_work_;
-
-        lock.unlock();
-
-        {
-            work_cleanup<isUnsafe> on_exit{
-                const_cast<reactive_scheduler*>(this),
-                &lock,
-                this_thread.impl};
-            (void)on_exit;
-
-            // Execute handler (may post to private_queue)
-            (*work)();
-        }
-        // work_cleanup flushes private_queue → queue_
-
-        ++count;
-
-        if constexpr (!isUnsafe)
-        {
-            lock.lock();
-        }
-    }
-
-    return count;
-}
-
-template<bool isUnsafe>
-std::size_t
-reactive_scheduler<isUnsafe>::
 run()
 {
     thread_context_guard guard(this);
@@ -423,7 +304,6 @@ run()
 
     while (!stopped_)
     {
-        // Wait for work or stop
         cv_.wait(lock, [this] {
             return stopped_ || !queue_.empty();
         });
@@ -450,7 +330,6 @@ run_one()
 
     std::unique_lock<std::mutex> lock(mutex_);
 
-    // Wait for work or stop
     cv_.wait(lock, [this] {
         return stopped_ || !queue_.empty();
     });
@@ -471,7 +350,6 @@ run_one(long usec)
 
     std::unique_lock<std::mutex> lock(mutex_);
 
-    // Wait for work, stop, or timeout
     bool ready = cv_.wait_for(lock, std::chrono::microseconds(usec), [this] {
         return stopped_ || !queue_.empty();
     });
@@ -492,7 +370,6 @@ wait_one(long usec)
     if (stopped_)
         return 0;
 
-    // Wait for work, stop, or timeout
     bool ready = cv_.wait_for(lock, std::chrono::microseconds(usec), [this] {
         return stopped_ || !queue_.empty();
     });
@@ -500,7 +377,6 @@ wait_one(long usec)
     if (!ready || stopped_)
         return 0;
 
-    // Don't execute, just report availability
     return queue_.empty() ? 0 : 1;
 }
 
@@ -530,7 +406,6 @@ run_until(std::chrono::steady_clock::time_point abs_time)
         if (now >= abs_time)
             break;
 
-        // Wait for work, stop, or timeout
         bool ready = cv_.wait_until(lock, abs_time, [this] {
             return stopped_ || !queue_.empty();
         });
@@ -572,12 +447,69 @@ poll_one()
     return do_run(lock, this_thread, 1);
 }
 
-//------------------------------------------------------------------------------
-// Explicit template instantiations
-//------------------------------------------------------------------------------
+template<bool isUnsafe>
+void
+reactive_scheduler<isUnsafe>::
+init_task()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!shutdown_ && !task_)
+    {
+        queue_.push(&task_operation_);
+        cv_.notify_one();
+    }
+}
 
-template class reactive_scheduler<false>;  // Thread-safe version
-template class reactive_scheduler<true>;   // Unsafe (single-thread) version
+template<bool isUnsafe>
+std::size_t
+reactive_scheduler<isUnsafe>::
+do_run(
+    std::unique_lock<std::mutex>& lock,
+    thread_info& this_thread,
+    std::size_t max_handlers)
+{
+    std::size_t count = 0;
+
+    while (count < max_handlers && !stopped_)
+    {
+        if (queue_.empty())
+            break;
+
+        auto* work = queue_.pop();
+
+        if (work == &task_operation_)
+        {
+            queue_.push(&task_operation_);
+            continue;
+        }
+
+        --outstanding_work_;
+
+        lock.unlock();
+
+        {
+            work_cleanup<isUnsafe> on_exit{
+                const_cast<reactive_scheduler*>(this),
+                &lock,
+                this_thread.impl};
+            (void)on_exit;
+
+            (*work)();
+        }
+
+        ++count;
+
+        if constexpr (!isUnsafe)
+        {
+            lock.lock();
+        }
+    }
+
+    return count;
+}
+
+template class reactive_scheduler<false>;
+template class reactive_scheduler<true>;
 
 } // namespace detail
 } // namespace corosio

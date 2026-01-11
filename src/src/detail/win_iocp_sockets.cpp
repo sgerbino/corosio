@@ -19,19 +19,6 @@ namespace boost {
 namespace corosio {
 namespace detail {
 
-namespace {
-
-// Completion key for socket I/O operations
-constexpr ULONG_PTR socket_key = 2;
-
-} // namespace
-
-//------------------------------------------------------------------------------
-// win_socket_impl
-
-//------------------------------------------------------------------------------
-// accept_op
-
 void
 accept_op::
 operator()()
@@ -49,11 +36,9 @@ operator()()
                 static_cast<int>(error), system::system_category());
     }
 
-    // Transfer accepted socket on success
     if (success && transfer_fn && peer_socket && sockets_svc && 
         accepted_socket != INVALID_SOCKET)
     {
-        // Update accepted socket context
         ::setsockopt(
             accepted_socket,
             SOL_SOCKET,
@@ -61,14 +46,12 @@ operator()()
             reinterpret_cast<char*>(&listen_socket),
             sizeof(SOCKET));
 
-        // Call the transfer function to set up peer
         transfer_fn(peer_socket, sockets_svc, peer_impl, accepted_socket);
         accepted_socket = INVALID_SOCKET;
         peer_impl = nullptr;
     }
     else
     {
-        // Clean up on failure
         if (accepted_socket != INVALID_SOCKET)
         {
             ::closesocket(accepted_socket);
@@ -85,37 +68,10 @@ operator()()
     d(h).resume();
 }
 
-//------------------------------------------------------------------------------
-// win_socket_impl
-
-void
 win_socket_impl::
-cancel() noexcept
+win_socket_impl(win_iocp_sockets& svc) noexcept
+    : svc_(svc)
 {
-    if (socket_ != INVALID_SOCKET)
-    {
-        // Cancel all pending I/O on this socket
-        ::CancelIoEx(
-            reinterpret_cast<HANDLE>(socket_),
-            nullptr);
-    }
-
-    // Mark operations as cancelled
-    conn_.request_cancel();
-    rd_.request_cancel();
-    wr_.request_cancel();
-    acc_.request_cancel();
-}
-
-void
-win_socket_impl::
-close_socket() noexcept
-{
-    if (socket_ != INVALID_SOCKET)
-    {
-        ::closesocket(socket_);
-        socket_ = INVALID_SOCKET;
-    }
 }
 
 void
@@ -142,7 +98,6 @@ connect(
     op.ec_out = ec;
     op.start(token);
 
-    // ConnectEx requires the socket to be bound first
     sockaddr_in bind_addr{};
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_addr.s_addr = INADDR_ANY;
@@ -157,7 +112,6 @@ connect(
         return;
     }
 
-    // Get the ConnectEx function pointer
     auto connect_ex = svc_.connect_ex();
     if (!connect_ex)
     {
@@ -166,20 +120,17 @@ connect(
         return;
     }
 
-    // Prepare the target address
     sockaddr_in addr = endpoint.to_sockaddr();
 
-    // Notify scheduler of pending I/O
     svc_.work_started();
 
-    // Start the async connect
     BOOL result = connect_ex(
         socket_,
         reinterpret_cast<sockaddr*>(&addr),
         sizeof(addr),
-        nullptr,  // No send buffer
-        0,        // No send buffer size
-        nullptr,  // No bytes sent out param
+        nullptr,
+        0,
+        nullptr,
         &op);
 
     if (!result)
@@ -187,17 +138,14 @@ connect(
         DWORD err = ::WSAGetLastError();
         if (err != ERROR_IO_PENDING)
         {
-            // Immediate failure - no IOCP completion will occur
             svc_.work_finished();
             op.error = err;
             svc_.post(&op);
             return;
         }
-        // ERROR_IO_PENDING means the operation is in progress
     }
     else
     {
-        // Synchronous completion with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
         svc_.work_finished();
         op.error = 0;
         svc_.post(&op);
@@ -222,7 +170,6 @@ read_some(
     op.bytes_out = bytes_out;
     op.start(token);
 
-    // Fill WSABUF array from the buffer sequence
     buffers::mutable_buffer bufs[read_op::max_buffers];
     op.wsabuf_count = static_cast<DWORD>(
         param.copy_to(bufs, read_op::max_buffers));
@@ -235,35 +182,30 @@ read_some(
 
     op.flags = 0;
 
-    // Notify scheduler of pending I/O
     svc_.work_started();
 
-    // Start the async read
     int result = ::WSARecv(
         socket_,
         op.wsabufs,
         op.wsabuf_count,
-        nullptr,      // Bytes received (not used with overlapped)
+        nullptr,
         &op.flags,
         &op,
-        nullptr);     // No completion routine
+        nullptr);
 
     if (result == SOCKET_ERROR)
     {
         DWORD err = ::WSAGetLastError();
         if (err != WSA_IO_PENDING)
         {
-            // Immediate failure - no IOCP completion will occur
             svc_.work_finished();
             op.error = err;
             svc_.post(&op);
             return;
         }
-        // WSA_IO_PENDING means the operation is in progress
     }
     else
     {
-        // Synchronous completion with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
         svc_.work_finished();
         op.bytes_transferred = static_cast<DWORD>(op.InternalHigh);
         op.error = 0;
@@ -289,7 +231,6 @@ write_some(
     op.bytes_out = bytes_out;
     op.start(token);
 
-    // Fill WSABUF array from the buffer sequence
     buffers::const_buffer bufs[write_op::max_buffers];
     op.wsabuf_count = static_cast<DWORD>(
         param.copy_to(bufs, write_op::max_buffers));
@@ -301,35 +242,30 @@ write_some(
         op.wsabufs[i].len = static_cast<ULONG>(bufs[i].size());
     }
 
-    // Notify scheduler of pending I/O
     svc_.work_started();
 
-    // Start the async write
     int result = ::WSASend(
         socket_,
         op.wsabufs,
         op.wsabuf_count,
-        nullptr,      // Bytes sent (not used with overlapped)
-        0,            // Flags
+        nullptr,
+        0,
         &op,
-        nullptr);     // No completion routine
+        nullptr);
 
     if (result == SOCKET_ERROR)
     {
         DWORD err = ::WSAGetLastError();
         if (err != WSA_IO_PENDING)
         {
-            // Immediate failure - no IOCP completion will occur
             svc_.work_finished();
             op.error = err;
             svc_.post(&op);
             return;
         }
-        // WSA_IO_PENDING means the operation is in progress
     }
     else
     {
-        // Synchronous completion with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
         svc_.work_finished();
         op.bytes_transferred = static_cast<DWORD>(op.InternalHigh);
         op.error = 0;
@@ -337,8 +273,33 @@ write_some(
     }
 }
 
-//------------------------------------------------------------------------------
-// win_iocp_sockets
+void
+win_socket_impl::
+cancel() noexcept
+{
+    if (socket_ != INVALID_SOCKET)
+    {
+        ::CancelIoEx(
+            reinterpret_cast<HANDLE>(socket_),
+            nullptr);
+    }
+
+    conn_.request_cancel();
+    rd_.request_cancel();
+    wr_.request_cancel();
+    acc_.request_cancel();
+}
+
+void
+win_socket_impl::
+close_socket() noexcept
+{
+    if (socket_ != INVALID_SOCKET)
+    {
+        ::closesocket(socket_);
+        socket_ = INVALID_SOCKET;
+    }
+}
 
 win_iocp_sockets::
 win_iocp_sockets(
@@ -360,7 +321,6 @@ shutdown()
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Destroy all socket implementations
     for (auto* impl = list_.pop_front(); impl != nullptr;
          impl = list_.pop_front())
     {
@@ -399,10 +359,8 @@ system::error_code
 win_iocp_sockets::
 open_socket(win_socket_impl& impl)
 {
-    // Close existing socket if any
     impl.close_socket();
 
-    // Create an overlapped IPv4 TCP socket
     SOCKET sock = ::WSASocketW(
         AF_INET,
         SOCK_STREAM,
@@ -418,7 +376,6 @@ open_socket(win_socket_impl& impl)
             system::system_category());
     }
 
-    // Associate the socket with the IOCP
     HANDLE result = ::CreateIoCompletionPort(
         reinterpret_cast<HANDLE>(sock),
         static_cast<HANDLE>(iocp_),
@@ -434,61 +391,12 @@ open_socket(win_socket_impl& impl)
             system::system_category());
     }
 
-    // Disable IOCP notification for synchronous completions
-    // This prevents spurious completions when operations complete inline
     ::SetFileCompletionNotificationModes(
         reinterpret_cast<HANDLE>(sock),
         FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 
     impl.socket_ = sock;
     return {};
-}
-
-void
-win_iocp_sockets::
-load_extension_functions()
-{
-    // Create a temporary socket to load extension functions
-    SOCKET sock = ::WSASocketW(
-        AF_INET,
-        SOCK_STREAM,
-        IPPROTO_TCP,
-        nullptr,
-        0,
-        WSA_FLAG_OVERLAPPED);
-
-    if (sock == INVALID_SOCKET)
-        return;
-
-    DWORD bytes = 0;
-
-    // Load ConnectEx
-    GUID connect_ex_guid = WSAID_CONNECTEX;
-    ::WSAIoctl(
-        sock,
-        SIO_GET_EXTENSION_FUNCTION_POINTER,
-        &connect_ex_guid,
-        sizeof(connect_ex_guid),
-        &connect_ex_,
-        sizeof(connect_ex_),
-        &bytes,
-        nullptr,
-        nullptr);
-
-    // Load AcceptEx
-    GUID accept_ex_guid = WSAID_ACCEPTEX;
-    ::WSAIoctl(
-        sock,
-        SIO_GET_EXTENSION_FUNCTION_POINTER,
-        &accept_ex_guid,
-        sizeof(accept_ex_guid),
-        &accept_ex_,
-        sizeof(accept_ex_),
-        &bytes,
-        nullptr,
-        nullptr);
-
-    ::closesocket(sock);
 }
 
 void
@@ -510,6 +418,50 @@ win_iocp_sockets::
 work_finished() noexcept
 {
     sched_.work_finished();
+}
+
+void
+win_iocp_sockets::
+load_extension_functions()
+{
+    SOCKET sock = ::WSASocketW(
+        AF_INET,
+        SOCK_STREAM,
+        IPPROTO_TCP,
+        nullptr,
+        0,
+        WSA_FLAG_OVERLAPPED);
+
+    if (sock == INVALID_SOCKET)
+        return;
+
+    DWORD bytes = 0;
+
+    GUID connect_ex_guid = WSAID_CONNECTEX;
+    ::WSAIoctl(
+        sock,
+        SIO_GET_EXTENSION_FUNCTION_POINTER,
+        &connect_ex_guid,
+        sizeof(connect_ex_guid),
+        &connect_ex_,
+        sizeof(connect_ex_),
+        &bytes,
+        nullptr,
+        nullptr);
+
+    GUID accept_ex_guid = WSAID_ACCEPTEX;
+    ::WSAIoctl(
+        sock,
+        SIO_GET_EXTENSION_FUNCTION_POINTER,
+        &accept_ex_guid,
+        sizeof(accept_ex_guid),
+        &accept_ex_,
+        sizeof(accept_ex_),
+        &bytes,
+        nullptr,
+        nullptr);
+
+    ::closesocket(sock);
 }
 
 } // namespace detail

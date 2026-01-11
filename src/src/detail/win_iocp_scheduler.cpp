@@ -32,15 +32,6 @@ namespace detail {
 
 namespace {
 
-// Completion key used to signal shutdown
-constexpr ULONG_PTR shutdown_key = 0;
-
-// Completion key used to identify posted work items
-constexpr ULONG_PTR work_key = 1;
-
-// Completion key used to identify socket I/O completions
-constexpr ULONG_PTR socket_key = 2;
-
 inline
 system::error_code
 last_error() noexcept
@@ -50,17 +41,14 @@ last_error() noexcept
         system::system_category());
 }
 
-// Stack frame for tracking nested scheduler contexts
 struct scheduler_context
 {
     win_iocp_scheduler const* key;
     scheduler_context* next;
 };
 
-// Thread-local head of the context stack
 capy::thread_local_ptr<scheduler_context> context_stack;
 
-// RAII guard that pushes/pops a frame
 struct thread_context_guard
 {
     scheduler_context frame_;
@@ -86,7 +74,6 @@ win_iocp_scheduler(
     unsigned)
     : iocp_(nullptr)
 {
-    // Create IOCP
     iocp_ = ::CreateIoCompletionPort(
         INVALID_HANDLE_VALUE,
         nullptr,
@@ -108,14 +95,12 @@ void
 win_iocp_scheduler::
 shutdown()
 {
-    // Post a shutdown signal to wake any blocked threads
     ::PostQueuedCompletionStatus(
         iocp_,
         0,
         shutdown_key,
         nullptr);
 
-    // Drain and destroy all pending work items
     DWORD bytes;
     ULONG_PTR key;
     LPOVERLAPPED overlapped;
@@ -125,11 +110,11 @@ shutdown()
         &bytes,
         &key,
         &overlapped,
-        0)) // Non-blocking
+        0))
     {
         if (overlapped != nullptr)
         {
-            if (key == work_key)
+            if (key == handler_key)
             {
                 pending_.fetch_sub(1, std::memory_order_relaxed);
                 auto* work = reinterpret_cast<capy::execution_context::handler*>(overlapped);
@@ -142,7 +127,6 @@ shutdown()
                 op->destroy();
             }
         }
-        // Ignore shutdown signals during drain
     }
 }
 
@@ -161,7 +145,6 @@ post(capy::coro h) const
 
         void operator()() override
         {
-            // delete before dispatch to enable work recycling
             auto h = h_;
             delete this;
             h.resume();
@@ -180,25 +163,33 @@ void
 win_iocp_scheduler::
 post(capy::execution_context::handler* h) const
 {
-    // Increment pending count before posting
     pending_.fetch_add(1, std::memory_order_relaxed);
 
-    // Post the handler to the IOCP
-    // We use the OVERLAPPED* field to carry the handler pointer
     BOOL result = ::PostQueuedCompletionStatus(
         iocp_,
         0,
-        work_key,
+        handler_key,
         reinterpret_cast<LPOVERLAPPED>(h));
 
     if (!result)
     {
-        // Posting failed - decrement pending and destroy handler
         pending_.fetch_sub(1, std::memory_order_relaxed);
         h->destroy();
-
-        // Claude: do we throw ::GetLastError?
     }
+}
+
+void
+win_iocp_scheduler::
+on_work_started() noexcept
+{
+    outstanding_work_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+win_iocp_scheduler::
+on_work_finished() noexcept
+{
+    outstanding_work_.fetch_sub(1, std::memory_order_relaxed);
 }
 
 bool
@@ -216,7 +207,6 @@ win_iocp_scheduler::
 stop()
 {
     stopped_.store(true, std::memory_order_release);
-    // Post a shutdown signal to wake any blocked threads
     ::PostQueuedCompletionStatus(
         iocp_,
         0,
@@ -240,6 +230,144 @@ restart()
 
 std::size_t
 win_iocp_scheduler::
+run()
+{
+    system::error_code ec;
+    std::size_t total = 0;
+
+    while (!stopped())
+    {
+        if (pending_.load(std::memory_order_relaxed) == 0)
+            break;
+
+        std::size_t n = do_run(INFINITE, static_cast<std::size_t>(-1), ec);
+        if (ec)
+            detail::throw_system_error(ec);
+        if (n == 0)
+            break;
+        total += n;
+    }
+
+    return total;
+}
+
+std::size_t
+win_iocp_scheduler::
+run_one()
+{
+    if (pending_.load(std::memory_order_relaxed) == 0)
+        return 0;
+    system::error_code ec;
+    std::size_t n = do_run(INFINITE, 1, ec);
+    if (ec)
+        detail::throw_system_error(ec);
+    return n;
+}
+
+std::size_t
+win_iocp_scheduler::
+run_one(long usec)
+{
+    unsigned long timeout_ms = static_cast<unsigned long>((usec + 999) / 1000);
+    system::error_code ec;
+    std::size_t n = do_run(timeout_ms, 1, ec);
+    if (ec)
+        detail::throw_system_error(ec);
+    return n;
+}
+
+std::size_t
+win_iocp_scheduler::
+wait_one(long usec)
+{
+    unsigned long timeout_ms = static_cast<unsigned long>((usec + 999) / 1000);
+    system::error_code ec;
+    std::size_t n = do_wait(timeout_ms, ec);
+    if (ec)
+        detail::throw_system_error(ec);
+    return n;
+}
+
+std::size_t
+win_iocp_scheduler::
+run_for(std::chrono::steady_clock::duration rel_time)
+{
+    auto end_time = std::chrono::steady_clock::now() + rel_time;
+    return run_until(end_time);
+}
+
+std::size_t
+win_iocp_scheduler::
+run_until(std::chrono::steady_clock::time_point abs_time)
+{
+    system::error_code ec;
+    std::size_t total = 0;
+
+    while (!stopped())
+    {
+        if (pending_.load(std::memory_order_relaxed) == 0)
+            break;
+
+        auto now = std::chrono::steady_clock::now();
+        if (now >= abs_time)
+            break;
+
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            abs_time - now);
+        unsigned long timeout = static_cast<unsigned long>(remaining.count());
+        if (timeout == 0)
+            timeout = 1;
+
+        std::size_t n = do_run(timeout, static_cast<std::size_t>(-1), ec);
+        total += n;
+
+        if (ec)
+            detail::throw_system_error(ec);
+        if (n == 0)
+            break;
+    }
+
+    return total;
+}
+
+std::size_t
+win_iocp_scheduler::
+poll()
+{
+    system::error_code ec;
+    std::size_t n = do_run(0, static_cast<std::size_t>(-1), ec);
+    if (ec)
+        detail::throw_system_error(ec);
+    return n;
+}
+
+std::size_t
+win_iocp_scheduler::
+poll_one()
+{
+    system::error_code ec;
+    std::size_t n = do_run(0, 1, ec);
+    if (ec)
+        detail::throw_system_error(ec);
+    return n;
+}
+
+void
+win_iocp_scheduler::
+work_started() const noexcept
+{
+    pending_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+win_iocp_scheduler::
+work_finished() const noexcept
+{
+    pending_.fetch_sub(1, std::memory_order_relaxed);
+}
+
+std::size_t
+win_iocp_scheduler::
 do_run(unsigned long timeout, std::size_t max_handlers,
     system::error_code& ec)
 {
@@ -252,8 +380,6 @@ do_run(unsigned long timeout, std::size_t max_handlers,
 
     while (count < max_handlers && !stopped())
     {
-        // Check pending before potentially blocking with INFINITE timeout
-        // After first handler, only block if more work is pending
         unsigned long actual_timeout = timeout;
         if (count > 0 && timeout != 0)
         {
@@ -272,22 +398,18 @@ do_run(unsigned long timeout, std::size_t max_handlers,
         {
             DWORD err = ::GetLastError();
             if (err == WAIT_TIMEOUT)
-                break; // Timeout is not an error
+                break;
             if (overlapped == nullptr)
             {
-                // Real error
                 ec.assign(static_cast<int>(err), system::system_category());
                 break;
             }
-            // Completion with error - still process it
         }
 
         if (key == shutdown_key)
         {
-            // Only honor shutdown if actually stopped
             if (stopped())
             {
-                // Re-post for other threads and exit
                 ::PostQueuedCompletionStatus(
                     iocp_,
                     0,
@@ -295,22 +417,19 @@ do_run(unsigned long timeout, std::size_t max_handlers,
                     nullptr);
                 break;
             }
-            // Otherwise ignore stale shutdown signal and continue
             continue;
         }
 
         if (overlapped != nullptr)
         {
-            if (key == work_key)
+            if (key == handler_key)
             {
-                // Posted work item
                 pending_.fetch_sub(1, std::memory_order_relaxed);
                 (*reinterpret_cast<capy::execution_context::handler*>(overlapped))();
                 ++count;
             }
             else if (key == socket_key)
             {
-                // Socket I/O completion
                 pending_.fetch_sub(1, std::memory_order_relaxed);
                 auto* op = static_cast<overlapped_op*>(overlapped);
                 DWORD err = result ? 0 : ::GetLastError();
@@ -347,7 +466,7 @@ do_wait(unsigned long timeout, system::error_code& ec)
     {
         DWORD err = ::GetLastError();
         if (err == WAIT_TIMEOUT)
-            return 0; // Timeout is not an error
+            return 0;
         if (overlapped == nullptr)
         {
             ec.assign(static_cast<int>(err), system::system_category());
@@ -357,22 +476,18 @@ do_wait(unsigned long timeout, system::error_code& ec)
 
     if (key == shutdown_key)
     {
-        // Only honor shutdown if actually stopped
         if (stopped())
         {
-            // Re-post for other threads
             ::PostQueuedCompletionStatus(
                 iocp_,
                 0,
                 shutdown_key,
                 nullptr);
         }
-        // Otherwise ignore stale shutdown signal
         return 0;
     }
 
-    // Put the completion back for later execution
-    if (overlapped != nullptr && (key == work_key || key == socket_key))
+    if (overlapped != nullptr && (key == handler_key || key == socket_key))
     {
         ::PostQueuedCompletionStatus(
             iocp_,
@@ -383,135 +498,6 @@ do_wait(unsigned long timeout, system::error_code& ec)
     }
 
     return 0;
-}
-
-std::size_t
-win_iocp_scheduler::
-run()
-{
-    system::error_code ec;
-    std::size_t total = 0;
-
-    while (!stopped())
-    {
-        // Check if there's any pending work before blocking
-        if (pending_.load(std::memory_order_relaxed) == 0)
-            break;
-
-        std::size_t n = do_run(INFINITE, static_cast<std::size_t>(-1), ec);
-        if (ec)
-            detail::throw_system_error(ec);
-        if (n == 0)
-            break;
-        total += n;
-    }
-
-    return total;
-}
-
-std::size_t
-win_iocp_scheduler::
-run_one()
-{
-    // Check if there's any pending work before blocking
-    if (pending_.load(std::memory_order_relaxed) == 0)
-        return 0;
-    system::error_code ec;
-    std::size_t n = do_run(INFINITE, 1, ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
-}
-
-std::size_t
-win_iocp_scheduler::
-run_one(long usec)
-{
-    // Convert microseconds to milliseconds (round up)
-    unsigned long timeout_ms = static_cast<unsigned long>((usec + 999) / 1000);
-    system::error_code ec;
-    std::size_t n = do_run(timeout_ms, 1, ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
-}
-
-std::size_t
-win_iocp_scheduler::
-wait_one(long usec)
-{
-    // Convert microseconds to milliseconds (round up)
-    unsigned long timeout_ms = static_cast<unsigned long>((usec + 999) / 1000);
-    system::error_code ec;
-    std::size_t n = do_wait(timeout_ms, ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
-}
-
-std::size_t
-win_iocp_scheduler::
-run_for(std::chrono::steady_clock::duration rel_time)
-{
-    auto end_time = std::chrono::steady_clock::now() + rel_time;
-    return run_until(end_time);
-}
-
-std::size_t
-win_iocp_scheduler::
-run_until(std::chrono::steady_clock::time_point abs_time)
-{
-    system::error_code ec;
-    std::size_t total = 0;
-
-    while (!stopped())
-    {
-        // Check if there's any pending work before blocking
-        if (pending_.load(std::memory_order_relaxed) == 0)
-            break;
-
-        auto now = std::chrono::steady_clock::now();
-        if (now >= abs_time)
-            break;
-
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            abs_time - now);
-        unsigned long timeout = static_cast<unsigned long>(remaining.count());
-        if (timeout == 0)
-            timeout = 1; // Minimum 1ms to avoid pure poll
-
-        std::size_t n = do_run(timeout, static_cast<std::size_t>(-1), ec);
-        total += n;
-
-        if (ec)
-            detail::throw_system_error(ec);
-        if (n == 0)
-            break;
-    }
-
-    return total;
-}
-
-std::size_t
-win_iocp_scheduler::
-poll()
-{
-    system::error_code ec;
-    std::size_t n = do_run(0, static_cast<std::size_t>(-1), ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
-}
-
-std::size_t
-win_iocp_scheduler::
-poll_one()
-{
-    system::error_code ec;
-    std::size_t n = do_run(0, 1, ec);
-    if (ec)
-        detail::throw_system_error(ec);
-    return n;
 }
 
 } // namespace detail

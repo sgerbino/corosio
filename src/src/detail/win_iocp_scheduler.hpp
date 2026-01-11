@@ -20,10 +20,16 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 
 namespace boost {
 namespace corosio {
 namespace detail {
+
+// IOCP completion keys
+constexpr std::uintptr_t shutdown_key = 0;
+constexpr std::uintptr_t handler_key = 1;
+constexpr std::uintptr_t socket_key = 2;
 
 class win_iocp_scheduler
     : public scheduler
@@ -32,34 +38,19 @@ class win_iocp_scheduler
 public:
     using key_type = scheduler;
 
-     win_iocp_scheduler(
+    win_iocp_scheduler(
         capy::execution_context& ctx,
         unsigned concurrency_hint = 0);
-
     ~win_iocp_scheduler();
-
     win_iocp_scheduler(win_iocp_scheduler const&) = delete;
     win_iocp_scheduler& operator=(win_iocp_scheduler const&) = delete;
 
     void shutdown() override;
     void post(capy::coro h) const override;
     void post(capy::execution_context::handler* h) const override;
-
-    void defer(capy::coro h) const override
-    {
-        post(h);
-    }
-
-    void on_work_started() noexcept override
-    {
-        outstanding_work_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    void on_work_finished() noexcept override
-    {
-        outstanding_work_.fetch_sub(1, std::memory_order_relaxed);
-    }
-
+    void defer(capy::coro h) const override { post(h); }
+    void on_work_started() noexcept override;
+    void on_work_finished() noexcept override;
     bool running_in_this_thread() const noexcept override;
     void stop() override;
     bool stopped() const noexcept override;
@@ -74,16 +65,8 @@ public:
     std::size_t poll_one() override;
 
     void* native_handle() const noexcept { return iocp_; }
-
-    void work_started() const noexcept
-    {
-        pending_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    void work_finished() const noexcept
-    {
-        pending_.fetch_sub(1, std::memory_order_relaxed);
-    }
+    void work_started() const noexcept;
+    void work_finished() const noexcept;
 
 private:
     std::size_t do_run(unsigned long timeout, std::size_t max_handlers,

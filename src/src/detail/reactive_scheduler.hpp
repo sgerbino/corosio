@@ -36,14 +36,11 @@ public:
     explicit reactive_scheduler(
         capy::execution_context& ctx,
         unsigned concurrency_hint);
-
     ~reactive_scheduler();
-
     reactive_scheduler(reactive_scheduler const&) = delete;
     reactive_scheduler& operator=(reactive_scheduler const&) = delete;
 
     void shutdown() override;
-    void init_task();
     void post(capy::coro h) const override;
     void post(capy::execution_context::handler* h) const override;
     void defer(capy::coro h) const override;
@@ -61,6 +58,8 @@ public:
     std::size_t run_until(std::chrono::steady_clock::time_point abs_time) override;
     std::size_t poll() override;
     std::size_t poll_one() override;
+
+    void init_task();
 
 private:
     struct thread_info;

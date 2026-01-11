@@ -8,7 +8,10 @@
 //
 
 #include <boost/corosio/socket.hpp>
+
+#ifdef _WIN32
 #include "src/detail/win_iocp_sockets.hpp"
+#endif
 
 #include <boost/corosio/detail/except.hpp>
 
@@ -16,6 +19,16 @@
 
 namespace boost {
 namespace corosio {
+namespace {
+
+#ifdef _WIN32
+using socket_service = detail::win_iocp_sockets;
+using socket_impl_type = detail::win_socket_impl;
+#else
+#error "Unsupported platform"
+#endif
+
+} // namespace
 
 socket::
 ~socket()
@@ -38,7 +51,7 @@ open()
     if (impl_)
         return; // Already open
 
-    auto& svc = ctx_->use_service<detail::win_iocp_sockets>();
+    auto& svc = ctx_->use_service<socket_service>();
     auto& impl = svc.create_impl();
     impl_ = &impl;
 
@@ -67,7 +80,7 @@ socket::
 cancel()
 {
     assert(impl_ != nullptr);
-    static_cast<detail::win_socket_impl*>(impl_)->cancel();
+    static_cast<socket_impl_type*>(impl_)->cancel();
 }
 
 } // namespace corosio

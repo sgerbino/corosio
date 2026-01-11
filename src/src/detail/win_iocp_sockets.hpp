@@ -95,26 +95,15 @@ class win_socket_impl
     friend class win_iocp_sockets;
 
 public:
-    explicit win_socket_impl(
-        win_iocp_sockets& svc) noexcept
-        : svc_(svc)
-    {
-    }
+    explicit win_socket_impl(win_iocp_sockets& svc) noexcept;
 
-    SOCKET native_handle() const noexcept { return socket_; }
-    bool is_open() const noexcept { return socket_ != INVALID_SOCKET; }
-    void cancel() noexcept;
-    void close_socket() noexcept;
     void release() override;
-    void set_socket(SOCKET s) noexcept { socket_ = s; }
-
     void connect(
         std::coroutine_handle<>,
         capy::any_dispatcher,
         tcp::endpoint,
         std::stop_token,
         system::error_code*) override;
-
     void read_some(
         std::coroutine_handle<>,
         capy::any_dispatcher,
@@ -122,7 +111,6 @@ public:
         std::stop_token,
         system::error_code*,
         std::size_t*) override;
-
     void write_some(
         std::coroutine_handle<>,
         capy::any_dispatcher,
@@ -131,13 +119,18 @@ public:
         system::error_code*,
         std::size_t*) override;
 
+    SOCKET native_handle() const noexcept { return socket_; }
+    bool is_open() const noexcept { return socket_ != INVALID_SOCKET; }
+    void cancel() noexcept;
+    void close_socket() noexcept;
+    void set_socket(SOCKET s) noexcept { socket_ = s; }
+
     connect_op conn_;
     read_op rd_;
     write_op wr_;
     accept_op acc_;
 
 private:
-    friend class win_iocp_sockets;
     win_iocp_sockets& svc_;
     SOCKET socket_ = INVALID_SOCKET;
 };
