@@ -243,7 +243,6 @@ struct io_context_test
     testRunFor()
     {
         io_context ioc;
-        int counter = 0;
 
         // run_for with no work
         auto start = std::chrono::steady_clock::now();
@@ -261,10 +260,8 @@ struct io_context_test
         io_context ioc;
         auto ex = ioc.get_executor();
 
-        // Not running yet
-        // Note: The current implementation may always return true for the
-        // creating thread, so this test documents the behavior
-        bool before = ex.running_in_this_thread();
+        // Not running yet - should return false
+        BOOST_TEST(ex.running_in_this_thread() == false);
 
         // Post work that checks running_in_this_thread
         bool during = false;
