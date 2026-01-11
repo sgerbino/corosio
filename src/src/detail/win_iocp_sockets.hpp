@@ -33,12 +33,13 @@
 #include <boost/capy/executor.hpp>
 #include <boost/capy/intrusive_list.hpp>
 
+#include <boost/system/error_code.hpp>
+
 #include <atomic>
 #include <cstddef>
 #include <mutex>
 #include <optional>
 #include <stop_token>
-#include <system_error>
 
 namespace boost {
 namespace corosio {
@@ -71,7 +72,7 @@ struct overlapped_op
 
     capy::coro h;
     capy::any_dispatcher d;
-    std::error_code* ec_out = nullptr;
+    system::error_code* ec_out = nullptr;
     std::size_t* bytes_out = nullptr;
     DWORD error = 0;
     DWORD bytes_transferred = 0;
@@ -99,10 +100,10 @@ struct overlapped_op
         if (ec_out)
         {
             if (cancelled.load(std::memory_order_acquire))
-                *ec_out = std::make_error_code(std::errc::operation_canceled);
+                *ec_out = make_error_code(system::errc::operation_canceled);
             else if (error != 0)
-                *ec_out = std::error_code(
-                    static_cast<int>(error), std::system_category());
+                *ec_out = system::error_code(
+                    static_cast<int>(error), system::system_category());
         }
 
         if (bytes_out)
@@ -292,7 +293,7 @@ public:
         @param impl The socket implementation to initialize.
         @return Error code, or success.
     */
-    std::error_code open_socket(socket_impl& impl);
+    system::error_code open_socket(socket_impl& impl);
 
     /** Return the IOCP handle. */
     void* native_handle() const noexcept { return iocp_; }

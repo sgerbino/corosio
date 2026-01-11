@@ -87,7 +87,7 @@ open()
     auto& svc = ctx_->use_service<detail::win_iocp_sockets>();
     impl_ = &svc.create_impl();
 
-    std::error_code ec = svc.open_socket(*impl_);
+    system::error_code ec = svc.open_socket(*impl_);
     if (ec)
     {
         impl_->release();
@@ -108,7 +108,7 @@ bind(endpoint ep)
         sizeof(addr)) == SOCKET_ERROR)
     {
         detail::throw_system_error(
-            std::error_code(::WSAGetLastError(), std::system_category()),
+            system::error_code(::WSAGetLastError(), system::system_category()),
             "acceptor::bind");
     }
 }
@@ -122,7 +122,7 @@ listen(int backlog)
     if (::listen(impl_->native_handle(), backlog) == SOCKET_ERROR)
     {
         detail::throw_system_error(
-            std::error_code(::WSAGetLastError(), std::system_category()),
+            system::error_code(::WSAGetLastError(), system::system_category()),
             "acceptor::listen");
     }
 }
@@ -207,7 +207,7 @@ do_accept(
     capy::any_dispatcher d,
     socket& peer,
     std::stop_token token,
-    std::error_code* ec)
+    system::error_code* ec)
 {
     assert(impl_ != nullptr);
 

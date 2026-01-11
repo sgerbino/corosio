@@ -15,11 +15,12 @@
 #include <boost/capy/execution_context.hpp>
 #include <boost/url/ipv4_address.hpp>
 
+#include <boost/system/error_code.hpp>
+
 #include <coroutine>
 #include <cstdint>
 #include <cstring>
 #include <stop_token>
-#include <system_error>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -153,7 +154,7 @@ public:
         acceptor& a_;
         socket* peer_;
         std::stop_token token_;
-        mutable std::error_code ec_;
+        mutable system::error_code ec_;
 
         accept_awaitable(acceptor& a, socket& peer) noexcept
             : a_(a)
@@ -166,10 +167,10 @@ public:
             return token_.stop_requested();
         }
 
-        std::error_code await_resume() const noexcept
+        system::error_code await_resume() const noexcept
         {
             if (token_.stop_requested())
-                return std::make_error_code(std::errc::operation_canceled);
+                return make_error_code(system::errc::operation_canceled);
             return ec_;
         }
 
@@ -229,7 +230,7 @@ public:
     /** Initiate an asynchronous accept operation.
 
         @param peer The socket to accept the connection into.
-        @return An awaitable that completes with std::error_code.
+        @return An awaitable that completes with system::error_code.
     */
     accept_awaitable accept(socket& peer)
     {
@@ -249,7 +250,7 @@ private:
         capy::any_dispatcher,
         socket&,
         std::stop_token,
-        std::error_code*);
+        system::error_code*);
 
     // Static callback for accept completion - transfers accepted socket to peer
     BOOST_COROSIO_DECL

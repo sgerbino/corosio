@@ -42,7 +42,7 @@ open()
     auto& svc = ctx_->use_service<detail::win_iocp_sockets>();
     impl_ = &svc.create_impl();
 
-    std::error_code ec = svc.open_socket(*impl_);
+    system::error_code ec = svc.open_socket(*impl_);
     if (ec)
     {
         impl_->release();
@@ -77,7 +77,7 @@ do_connect(
     capy::any_dispatcher d,
     tcp::endpoint endpoint,
     std::stop_token token,
-    std::error_code* ec)
+    system::error_code* ec)
 {
     assert(impl_ != nullptr);
 
@@ -159,7 +159,7 @@ do_read_some(
     capy::any_dispatcher d,
     buffers_param<true>& param,
     std::stop_token token,
-    std::error_code* ec,
+    system::error_code* ec,
     std::size_t* bytes_out)
 {
     assert(impl_ != nullptr);
@@ -229,7 +229,7 @@ do_write_some(
     capy::any_dispatcher d,
     buffers_param<false>& param,
     std::stop_token token,
-    std::error_code* ec,
+    system::error_code* ec,
     std::size_t* bytes_out)
 {
     assert(impl_ != nullptr);

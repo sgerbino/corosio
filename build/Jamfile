@@ -38,6 +38,7 @@ lib boost_corosio
     <library>/boost/capy//boost_capy
     <library>/boost/buffers//boost_buffers
     <library>/boost/url//boost_url
+    <library>/boost/system//boost_system
     <target-os>windows:<library>ws2_32
     <include>$(COROSIO_ROOT)/include
     <include>$(COROSIO_ROOT)/src
@@ -45,6 +46,7 @@ lib boost_corosio
     <library>/boost/capy//boost_capy
     <library>/boost/buffers//boost_buffers
     <library>/boost/url//boost_url
+    <library>/boost/system//boost_system
     <target-os>windows:<library>ws2_32
     <include>$(COROSIO_ROOT)/include
   ;

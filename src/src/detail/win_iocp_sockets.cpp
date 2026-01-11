@@ -43,10 +43,10 @@ operator()()
     if (ec_out)
     {
         if (cancelled.load(std::memory_order_acquire))
-            *ec_out = std::make_error_code(std::errc::operation_canceled);
+            *ec_out = make_error_code(system::errc::operation_canceled);
         else if (error != 0)
-            *ec_out = std::error_code(
-                static_cast<int>(error), std::system_category());
+            *ec_out = system::error_code(
+                static_cast<int>(error), system::system_category());
     }
 
     // Transfer accepted socket on success
@@ -183,7 +183,7 @@ destroy_impl(socket_impl& impl)
     delete &impl;
 }
 
-std::error_code
+system::error_code
 win_iocp_sockets::
 open_socket(socket_impl& impl)
 {
@@ -201,9 +201,9 @@ open_socket(socket_impl& impl)
 
     if (sock == INVALID_SOCKET)
     {
-        return std::error_code(
+        return system::error_code(
             ::WSAGetLastError(),
-            std::system_category());
+            system::system_category());
     }
 
     // Associate the socket with the IOCP
@@ -217,9 +217,9 @@ open_socket(socket_impl& impl)
     {
         DWORD err = ::GetLastError();
         ::closesocket(sock);
-        return std::error_code(
+        return system::error_code(
             static_cast<int>(err),
-            std::system_category());
+            system::system_category());
     }
 
     // Disable IOCP notification for synchronous completions

@@ -17,11 +17,12 @@
 #include <boost/capy/affine.hpp>
 #include <boost/capy/execution_context.hpp>
 
+#include <boost/system/error_code.hpp>
+
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
 #include <stop_token>
-#include <system_error>
 
 namespace boost {
 namespace corosio {
@@ -58,7 +59,7 @@ public:
         socket& s_;
         tcp::endpoint endpoint_;
         std::stop_token token_;
-        mutable std::error_code ec_;
+        mutable system::error_code ec_;
 
         connect_awaitable(socket& s, tcp::endpoint ep) noexcept
             : s_(s)
@@ -71,10 +72,10 @@ public:
             return token_.stop_requested();
         }
 
-        std::error_code await_resume() const noexcept
+        system::error_code await_resume() const noexcept
         {
             if (token_.stop_requested())
-                return std::make_error_code(std::errc::operation_canceled);
+                return make_error_code(system::errc::operation_canceled);
             return ec_;
         }
 
@@ -109,7 +110,7 @@ public:
         socket& s_;
         MutableBufferSequence buffers_;
         std::stop_token token_;
-        mutable std::error_code ec_;
+        mutable system::error_code ec_;
         mutable std::size_t bytes_transferred_ = 0;
 
         read_some_awaitable(socket& s, MutableBufferSequence buffers) noexcept
@@ -123,10 +124,10 @@ public:
             return token_.stop_requested();
         }
 
-        std::pair<std::error_code, std::size_t> await_resume() const noexcept
+        std::pair<system::error_code, std::size_t> await_resume() const noexcept
         {
             if (token_.stop_requested())
-                return {std::make_error_code(std::errc::operation_canceled), 0};
+                return {make_error_code(system::errc::operation_canceled), 0};
             return {ec_, bytes_transferred_};
         }
 
@@ -163,7 +164,7 @@ public:
         socket& s_;
         ConstBufferSequence buffers_;
         std::stop_token token_;
-        mutable std::error_code ec_;
+        mutable system::error_code ec_;
         mutable std::size_t bytes_transferred_ = 0;
 
         write_some_awaitable(socket& s, ConstBufferSequence buffers) noexcept
@@ -177,10 +178,10 @@ public:
             return token_.stop_requested();
         }
 
-        std::pair<std::error_code, std::size_t> await_resume() const noexcept
+        std::pair<system::error_code, std::size_t> await_resume() const noexcept
         {
             if (token_.stop_requested())
-                return {std::make_error_code(std::errc::operation_canceled), 0};
+                return {make_error_code(system::errc::operation_canceled), 0};
             return {ec_, bytes_transferred_};
         }
 
@@ -277,7 +278,7 @@ public:
     /** Initiate an asynchronous connect operation.
 
         @param ep The endpoint to connect to.
-        @return An awaitable that completes with std::error_code.
+        @return An awaitable that completes with system::error_code.
     */
     connect_awaitable connect(tcp::endpoint ep)
     {
@@ -329,7 +330,7 @@ private:
         capy::any_dispatcher,
         tcp::endpoint,
         std::stop_token,
-        std::error_code*);
+        system::error_code*);
 
     BOOST_COROSIO_DECL
     void do_read_some(
@@ -337,7 +338,7 @@ private:
         capy::any_dispatcher,
         buffers_param<true>&,
         std::stop_token,
-        std::error_code*,
+        system::error_code*,
         std::size_t*);
 
     BOOST_COROSIO_DECL
@@ -346,7 +347,7 @@ private:
         capy::any_dispatcher,
         buffers_param<false>&,
         std::stop_token,
-        std::error_code*,
+        system::error_code*,
         std::size_t*);
 
     capy::execution_context* ctx_;

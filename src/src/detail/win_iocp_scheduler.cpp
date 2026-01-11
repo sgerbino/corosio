@@ -22,6 +22,7 @@
 
 #include <boost/corosio/detail/except.hpp>
 
+#include <WinSock2.h>
 #include <Windows.h>
 
 extern "C" __declspec(dllimport) unsigned long __stdcall GetLastError();
@@ -82,14 +83,28 @@ win_iocp_scheduler::
 win_iocp_scheduler(
     capy::execution_context&,
     unsigned)
-    : iocp_(CreateIoCompletionPort(
+    : iocp_(nullptr)
+{
+    // Initialize WinSock
+    WSADATA wsaData;
+    int result = ::WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (result != 0)
+        detail::throw_system_error(
+            system::error_code(result, system::system_category()),
+            "WSAStartup failed");
+
+    // Create IOCP
+    iocp_ = ::CreateIoCompletionPort(
         INVALID_HANDLE_VALUE,
         nullptr,
         0,
-        0))
-{
+        0);
+
     if (iocp_ == nullptr)
+    {
+        ::WSACleanup();
         detail::throw_system_error(last_error(), "CreateIoCompletionPort failed");
+    }
 }
 
 win_iocp_scheduler::
@@ -97,8 +112,9 @@ win_iocp_scheduler::
 {
     if (iocp_ != nullptr)
     {
-        CloseHandle(iocp_);
+        ::CloseHandle(iocp_);
     }
+    ::WSACleanup();
 }
 
 void
