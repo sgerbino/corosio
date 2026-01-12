@@ -11,6 +11,7 @@
 
 #include "src/detail/win_iocp_sockets.hpp"
 #include "src/detail/win_iocp_scheduler.hpp"
+#include "src/detail/endpoint_convert.hpp"
 
 namespace boost {
 namespace corosio {
@@ -117,7 +118,7 @@ connect(
         return;
     }
 
-    sockaddr_in addr = ep.to_sockaddr_in();
+    sockaddr_in addr = detail::to_sockaddr_in(ep);
 
     svc_.work_started();
 

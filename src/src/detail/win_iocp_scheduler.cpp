@@ -460,7 +460,7 @@ do_one(unsigned long timeout_ms)
             {
                 // overlapped_op*
                 auto* op = static_cast<overlapped_op*>(overlapped);
-                if (::InterlockedCompareExchange(&op->ready_, 1, 0) == 1)
+                if (::InterlockedCompareExchange(&op->ready_, 1, 0) == 0)
                 {
                     work_guard g{this};
                     DWORD err = result ? 0 : last_error;
