@@ -61,7 +61,7 @@ public:
         @return An awaitable that completes with a pair of
             `{error_code, bytes_transferred}`. Returns success with the
             number of bytes read, or an error code on failure including:
-            - connection_reset: Peer closed the connection
+            - capy::error::eof: End of stream reached
             - operation_canceled: Cancelled via stop_token or cancel()
 
         @par Preconditions

@@ -11,10 +11,10 @@
 #include <boost/capy/task.hpp>
 #include <boost/capy/async_run.hpp>
 #include <boost/capy/buffers.hpp>
+#include <boost/capy/error.hpp>
 #include <boost/url/ipv4_address.hpp>
 
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 #include <string>
 
@@ -63,34 +63,16 @@ do_request(
         total_sent += n;
     }
 
-    // Read and print the response
-    char buf[4096];
-    for (;;)
+    // Read the entire response into a string
+    std::string response;
+    auto [read_ec, n] = co_await corosio::read(s, response);
+    if (read_ec && read_ec != capy::error::eof)
     {
-        auto [read_ec, n] = co_await corosio::read(
-            s, boost::capy::mutable_buffer(buf, sizeof(buf)));
-
-        if (read_ec)
-        {
-            // connection_reset is expected when server closes the connection
-            if (read_ec == boost::system::errc::connection_reset)
-            {
-                // Print any remaining data before EOF
-                if (n > 0)
-                    std::cout.write(buf, static_cast<std::streamsize>(n));
-            }
-            else
-            {
-                std::cerr << "Read error: " << read_ec.message() << "\n";
-            }
-            break;
-        }
-
-        // Print received data (buffer is completely filled)
-        std::cout.write(buf, static_cast<std::streamsize>(n));
+        std::cerr << "Read error: " << read_ec.message() << "\n";
+        co_return;
     }
 
-    std::cout << std::endl;
+    std::cout << response << std::endl;
 }
 
 int
@@ -101,7 +83,7 @@ main(int argc, char* argv[])
         std::cerr <<
             "Usage: http_client <ip-address> <port>\n"
             "Example:\n"
-            "    http_client 93.184.215.14 80\n";
+            "    http_client 35.190.118.110 80\n";
         return EXIT_FAILURE;
     }
 

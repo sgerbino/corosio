@@ -94,7 +94,7 @@ auto [ec, n] = co_await s.read_some(
 
 if (ec)
 {
-    if (ec == boost::system::errc::connection_reset)
+    if (ec == capy::error::eof)
         std::cout << "Peer closed connection\n";
     else
         std::cerr << "Read error: " << ec.message() << "\n";
@@ -124,8 +124,7 @@ read_exactly(corosio::socket& s, char* buf, std::size_t len)
             co_return {ec, total};
 
         if (n == 0)
-            co_return {boost::system::errc::make_error_code(
-                boost::system::errc::connection_reset), total};
+            co_return {make_error_code(capy::error::eof), total};
 
         total += n;
     }
@@ -214,18 +213,16 @@ auto [ec, n] = co_await s.read_some(buf);
 
 if (ec)
 {
-    switch (ec.value())
+    if (ec == capy::error::eof)
     {
-    case boost::system::errc::connection_reset:
-    case boost::system::errc::broken_pipe:
-        // Normal disconnect
-        break;
-
-    case boost::system::errc::operation_canceled:
+        // Normal disconnect (end of stream)
+    }
+    else if (ec == boost::system::errc::operation_canceled)
+    {
         // We called cancel()
-        break;
-
-    default:
+    }
+    else
+    {
         // Log unexpected error
         std::cerr << "Socket error: " << ec.message() << "\n";
     }

@@ -14,6 +14,7 @@
 #include <boost/capy/any_dispatcher.hpp>
 #include <boost/capy/concept/affine_awaitable.hpp>
 #include <boost/capy/coro.hpp>
+#include <boost/capy/error.hpp>
 #include <boost/capy/execution_context.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -81,11 +82,11 @@ struct overlapped_op
             else if (error != 0)
                 *ec_out = system::error_code(
                     static_cast<int>(error), system::system_category());
-            else if (is_read_operation() && bytes_transferred == 0)
-            {
-                // EOF: 0 bytes transferred with no error indicates end of stream
-                *ec_out = make_error_code(system::errc::broken_pipe);
-            }
+        else if (is_read_operation() && bytes_transferred == 0)
+        {
+            // EOF: 0 bytes transferred with no error indicates end of stream
+            *ec_out = make_error_code(capy::error::eof);
+        }
         }
 
         if (bytes_out)

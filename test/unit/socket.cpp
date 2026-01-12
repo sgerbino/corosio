@@ -11,11 +11,21 @@
 #include <boost/corosio/socket.hpp>
 
 #include <boost/corosio/io_context.hpp>
+#include <boost/capy/buffers.hpp>
+#include <boost/capy/concept/read_stream.hpp>
+#include <boost/capy/concept/write_stream.hpp>
 
 #include "test_suite.hpp"
 
 namespace boost {
 namespace corosio {
+
+//------------------------------------------------
+// Verify socket satisfies stream concepts
+//------------------------------------------------
+
+static_assert(capy::read_stream<socket, capy::mutable_buffer>);
+static_assert(capy::write_stream<socket, capy::const_buffer>);
 
 //------------------------------------------------
 // Socket-specific tests

@@ -40,7 +40,7 @@ capy::task<void> handle_client(corosio::socket client)
 
         if (read_ec)
         {
-            if (read_ec != boost::system::errc::connection_reset)
+            if (read_ec != capy::error::eof)
                 std::cerr << "Read error: " << read_ec.message() << "\n";
             co_return;
         }
