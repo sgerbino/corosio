@@ -241,4 +241,4 @@ serialized (e.g., through the executor's strand semantics if available).
 
 == Next Steps
 
-* xref:concepts/buffers.adoc[Buffer Sequences] — The buffers_param interface
+* xref:concepts/buffers.adoc[Buffer Sequences] — The any_bufref interface

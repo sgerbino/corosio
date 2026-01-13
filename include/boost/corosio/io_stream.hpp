@@ -13,7 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_object.hpp>
 #include <boost/corosio/io_result.hpp>
-#include <boost/corosio/buffers_param.hpp>
+#include <boost/corosio/any_bufref.hpp>
 #include <boost/capy/any_dispatcher.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -32,7 +32,7 @@ public:
         virtual void read_some(
             std::coroutine_handle<>,
             capy::any_dispatcher,
-            buffers_param&,
+            any_bufref&,
             std::stop_token,
             system::error_code*,
             std::size_t*) = 0;
@@ -40,7 +40,7 @@ public:
         virtual void write_some(
             std::coroutine_handle<>,
             capy::any_dispatcher,
-            buffers_param&,
+            any_bufref&,
             std::stop_token,
             system::error_code*,
             std::size_t*) = 0;
@@ -143,7 +143,7 @@ protected:
             std::coroutine_handle<> h,
             Dispatcher const& d) -> std::coroutine_handle<>
         {
-            buffers_param_impl param(buffers_);
+            any_bufref param(buffers_);
             ios_.get().read_some(h, d, param, token_, &ec_, &bytes_transferred_);
             return std::noop_coroutine();
         }
@@ -155,7 +155,7 @@ protected:
             std::stop_token token) -> std::coroutine_handle<>
         {
             token_ = std::move(token);
-            buffers_param_impl param(buffers_);
+            any_bufref param(buffers_);
             ios_.get().read_some(h, d, param, token_, &ec_, &bytes_transferred_);
             return std::noop_coroutine();
         }
@@ -195,7 +195,7 @@ protected:
             std::coroutine_handle<> h,
             Dispatcher const& d) -> std::coroutine_handle<>
         {
-            buffers_param_impl param(buffers_);
+            any_bufref param(buffers_);
             ios_.get().write_some(h, d, param, token_, &ec_, &bytes_transferred_);
             return std::noop_coroutine();
         }
@@ -207,7 +207,7 @@ protected:
             std::stop_token token) -> std::coroutine_handle<>
         {
             token_ = std::move(token);
-            buffers_param_impl param(buffers_);
+            any_bufref param(buffers_);
             ios_.get().write_some(h, d, param, token_, &ec_, &bytes_transferred_);
             return std::noop_coroutine();
         }

@@ -11,7 +11,7 @@
 
 Corosio socket operations accept any buffer sequence compatible with
 Boost.Buffers. Internally, the socket implementation uses a type-erased
-interface (`buffers_param`) to avoid templating the implementation on
+interface (`any_bufref`) to avoid templating the implementation on
 buffer types.
 
 == Buffer Types
@@ -66,9 +66,9 @@ std::array<boost::buffers::const_buffer, 2> write_bufs = {
 auto [ec2, n2] = co_await s.write_some(write_bufs);
 ----
 
-== The buffers_param Interface
+== The any_bufref Interface
 
-Internally, Corosio uses `buffers_param` to type-erase buffer sequences.
+Internally, Corosio uses `any_bufref` to type-erase buffer sequences.
 This allows the socket implementation to remain non-templated while
 accepting any buffer sequence type.
 
@@ -76,26 +76,16 @@ The interface is simple:
 
 [source,cpp]
 ----
-template<bool IsMutable>
-class buffers_param
+class any_bufref
 {
 public:
-    using buffer_type = std::conditional_t<IsMutable,
-        buffers::mutable_buffer, buffers::const_buffer>;
-
-    virtual ~buffers_param() = default;
+    // Construct from any const buffer sequence
+    template<capy::const_buffer_sequence BufferSequence>
+    explicit any_bufref(BufferSequence const& bs) noexcept;
 
     // Copy buffers to an array (e.g., WSABUF array)
-    virtual std::size_t copy_to(buffer_type* dest, std::size_t n) = 0;
+    std::size_t copy_to(capy::mutable_buffer* dest, std::size_t n);
 };
-----
-
-The `buffers_param_impl` adapter wraps any buffer sequence:
-
-[source,cpp]
-----
-template<class Buffers>
-class buffers_param_impl final : public buffers_param</*IsMutable*/>;
 ----
 
 == Why Type Erasure?
@@ -115,7 +105,7 @@ With type erasure, the implementation is fixed:
 [source,cpp]
 ----
 // With type erasure - single implementation
-void socket_impl::read_some(buffers_param<true>& bufs, ...);
+void socket_impl::read_some(any_bufref& bufs, ...);
 ----
 
 The cost is a virtual call when iterating buffers, which is negligible

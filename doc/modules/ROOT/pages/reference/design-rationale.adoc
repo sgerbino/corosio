@@ -118,7 +118,7 @@ API simplicity.
 |Single pointer, no templates
 
 |Buffer sequences
-|`buffers_param`
+|`any_bufref`
 |One implementation, not N×M
 
 |Platform I/O state
