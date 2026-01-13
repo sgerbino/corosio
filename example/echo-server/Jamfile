@@ -7,5 +7,12 @@
 # Official repository: https://github.com/cppalliance/corosio
 #
 
-build-project client ;
-build-project echo-server ;
+project
+    : requirements
+      <library>/boost/corosio//boost_corosio
+      <include>.
+    ;
+
+exe echo_server :
+    [ glob *.cpp ]
+    ;
