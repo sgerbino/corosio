@@ -12,6 +12,7 @@
 
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_object.hpp>
+#include <boost/corosio/io_result.hpp>
 #include <boost/corosio/buffers_param.hpp>
 #include <boost/capy/any_dispatcher.hpp>
 #include <boost/system/error_code.hpp>
@@ -130,7 +131,7 @@ protected:
             return token_.stop_requested();
         }
 
-        std::pair<system::error_code, std::size_t> await_resume() const noexcept
+        io_result<std::size_t> await_resume() const noexcept
         {
             if (token_.stop_requested())
                 return {make_error_code(system::errc::operation_canceled), 0};
@@ -182,7 +183,7 @@ protected:
             return token_.stop_requested();
         }
 
-        std::pair<system::error_code, std::size_t> await_resume() const noexcept
+        io_result<std::size_t> await_resume() const noexcept
         {
             if (token_.stop_requested())
                 return {make_error_code(system::errc::operation_canceled), 0};

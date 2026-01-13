@@ -22,6 +22,7 @@ namespace corosio = boost::corosio;
 namespace capy = boost::capy;
 
 // Coroutine that performs the HTTP GET request
+// Demonstrates the concise exception-based pattern using .value()
 capy::task<void>
 do_request(
     corosio::io_context& ioc,
@@ -31,39 +32,24 @@ do_request(
     corosio::socket s(ioc);
     s.open();
 
-    // Connect to the server
-    auto ec = co_await s.connect(
-        corosio::endpoint(addr, port));
-    if (ec)
-    {
-        std::cerr << "Connect error: " << ec.message() << "\n";
-        co_return;
-    }
+    // Connect to the server (throws on error)
+    (co_await s.connect(corosio::endpoint(addr, port))).value();
 
-    // Build the HTTP request
+    // Build and send the HTTP request
     std::string request =
         "GET / HTTP/1.1\r\n"
         "Host: " + addr.to_string() + "\r\n"
         "Connection: close\r\n"
         "\r\n";
+    (co_await corosio::write(
+        s, capy::const_buffer(request.data(), request.size()))).value();
 
-    // Send the request
-    auto [write_ec, bytes_written] = co_await corosio::write(
-        s, capy::const_buffer(request.data(), request.size()));
-    if (write_ec)
-    {
-        std::cerr << "Write error: " << write_ec.message() << "\n";
-        co_return;
-    }
-
-    // Read the entire response into a string
+    // Read the entire response
     std::string response;
-    auto [read_ec, n] = co_await corosio::read(s, response);
-    if (read_ec && read_ec != capy::error::eof)
-    {
-        std::cerr << "Read error: " << read_ec.message() << "\n";
-        co_return;
-    }
+    auto [ec, n] = co_await corosio::read(s, response);
+    // EOF is expected when server closes connection
+    if (ec && ec != capy::error::eof)
+        throw boost::system::system_error(ec);
 
     std::cout << response << std::endl;
 }

@@ -12,6 +12,7 @@
 
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_stream.hpp>
+#include <boost/corosio/io_result.hpp>
 #include <boost/corosio/buffers_param.hpp>
 #include <boost/corosio/consuming_buffers.hpp>
 #include <boost/capy/buffers.hpp>
@@ -43,10 +44,9 @@ namespace corosio {
     @param ios The I/O stream to read from.
     @param buffers The buffer sequence to read data into.
 
-    @return An awaitable that completes with a pair of
-        `{error_code, bytes_transferred}`. Returns success with the
-        total number of bytes read (equal to buffer_size unless EOF),
-        or an error code on failure including:
+    @return An awaitable that completes with `io_result<std::size_t>`.
+        Returns success with the total number of bytes read (equal to
+        buffer_size unless EOF), or an error code on failure including:
         - capy::error::eof: End of stream reached
         - operation_canceled: Cancelled via stop_token or cancel()
 
@@ -56,6 +56,7 @@ namespace corosio {
     @par Example
     @code
     char buf[1024];
+    // Using structured bindings
     auto [ec, n] = co_await corosio::read(s, capy::mutable_buffer(buf, sizeof(buf)));
     if (ec)
     {
@@ -65,7 +66,9 @@ namespace corosio {
             std::cerr << "Read error: " << ec.message() << "\n";
         co_return;
     }
-    // buf is now completely filled with n bytes (n == sizeof(buf))
+
+    // Or using exceptions
+    auto bytes = (co_await corosio::read(s, buf)).value();
     @endcode
 
     @note This function differs from `read_some()` in that it
@@ -74,7 +77,7 @@ namespace corosio {
         after reading any amount of data.
 */
 template<capy::mutable_buffer_sequence MutableBufferSequence>
-capy::task<std::pair<system::error_code, std::size_t>>
+capy::task<io_result<std::size_t>>
 read(io_stream& ios, MutableBufferSequence const& buffers)
 {
     consuming_buffers<MutableBufferSequence> consuming(buffers);
@@ -119,10 +122,9 @@ read(io_stream& ios, MutableBufferSequence const& buffers)
     @param ios The I/O stream to read from.
     @param s The string to append data to. Existing content is preserved.
 
-    @return An awaitable that completes with a pair of
-        `{error_code, bytes_transferred}`. The `bytes_transferred` value
-        represents only the new bytes read, not including any content
-        that was already in the string. Returns:
+    @return An awaitable that completes with `io_result<std::size_t>`.
+        The `n` value represents only the new bytes read, not including
+        any content that was already in the string. Returns:
         - capy::error::eof with bytes read: End of stream reached
         - errc::value_too_large: String reached max_size() and more data available
         - operation_canceled: Cancelled via stop_token or cancel()
@@ -134,6 +136,7 @@ read(io_stream& ios, MutableBufferSequence const& buffers)
     @par Example
     @code
     std::string content;
+    // Using structured bindings
     auto [ec, n] = co_await corosio::read(s, content);
     if (ec && ec != capy::error::eof)
     {
@@ -141,13 +144,16 @@ read(io_stream& ios, MutableBufferSequence const& buffers)
         co_return;
     }
     std::cout << "Read " << n << " bytes, total size: " << content.size() << "\n";
+
+    // Or using exceptions (note: EOF also throws)
+    auto bytes = (co_await corosio::read(s, content)).value();
     @endcode
 
     @note Existing string content is preserved. To read into an empty
         string, call `s.clear()` before invoking this function.
 */
 inline
-capy::task<std::pair<system::error_code, std::size_t>>
+capy::task<io_result<std::size_t>>
 read(io_stream& ios, std::string& s)
 {
     std::size_t const base = s.size();

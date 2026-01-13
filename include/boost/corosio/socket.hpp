@@ -13,6 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/except.hpp>
 #include <boost/corosio/io_stream.hpp>
+#include <boost/corosio/io_result.hpp>
 #include <boost/corosio/buffers_param.hpp>
 #include <boost/corosio/endpoint.hpp>
 #include <boost/capy/any_dispatcher.hpp>
@@ -54,7 +55,8 @@ namespace corosio {
     socket s(ioc);
     s.open();
 
-    auto ec = co_await s.connect(
+    // Using structured bindings
+    auto [ec] = co_await s.connect(
         endpoint(urls::ipv4_address::loopback(), 8080));
     if (ec)
         co_return;
@@ -62,6 +64,10 @@ namespace corosio {
     char buf[1024];
     auto [read_ec, n] = co_await s.read_some(
         capy::mutable_buffer(buf, sizeof(buf)));
+
+    // Or using exceptions
+    (co_await s.connect(endpoint)).value();
+    auto bytes = (co_await s.read_some(buf)).value();
     @endcode
 */
 class socket : public io_stream
@@ -84,11 +90,11 @@ class socket : public io_stream
             return token_.stop_requested();
         }
 
-        system::error_code await_resume() const noexcept
+        io_result<> await_resume() const noexcept
         {
             if (token_.stop_requested())
-                return make_error_code(system::errc::operation_canceled);
-            return ec_;
+                return {make_error_code(system::errc::operation_canceled)};
+            return {ec_};
         }
 
         template<capy::dispatcher Dispatcher>
@@ -222,7 +228,7 @@ public:
 
         @param ep The remote endpoint to connect to.
 
-        @return An awaitable that completes with `system::error_code`.
+        @return An awaitable that completes with `io_result<>`.
             Returns success (default error_code) on successful connection,
             or an error code on failure including:
             - connection_refused: No server listening at endpoint
@@ -232,6 +238,16 @@ public:
 
         @par Preconditions
         The socket must be open (`is_open() == true`).
+
+        @par Example
+        @code
+        // Using structured bindings
+        auto [ec] = co_await s.connect(endpoint);
+        if (ec) { ... }
+
+        // Using exceptions
+        (co_await s.connect(endpoint)).value();
+        @endcode
     */
     auto connect(endpoint ep)
     {

@@ -16,5 +16,6 @@ project boost/corosio/test/unit
       <toolset>gcc:<cxxflags>-fcoroutines
     ;
 
+run io_result.cpp ;
 run platform_reactor.cpp ;
 run socket.cpp ;
