@@ -39,7 +39,7 @@ socket::
 socket::
 socket(
     capy::execution_context& ctx)
-    : ctx_(&ctx)
+    : io_stream(ctx)
 {
 }
 

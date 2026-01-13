@@ -11,6 +11,7 @@
 #define BOOST_COROSIO_IO_OBJECT_HPP
 
 #include <boost/corosio/detail/config.hpp>
+#include <boost/capy/execution_context.hpp>
 
 namespace boost {
 namespace corosio {
@@ -40,10 +41,28 @@ public:
         virtual void release() = 0;
     };
 
+    /** Return the execution context.
+
+        @return Reference to the execution context that owns this socket.
+    */
+    auto
+    context() const noexcept ->
+        capy::execution_context&
+    {
+        return *ctx_;
+    }
+
 protected:
     virtual ~io_object() = default;
-    io_object() = default;
-    
+
+    explicit
+    io_object(
+        capy::execution_context& ctx) noexcept
+        : ctx_(&ctx)
+    {
+    }
+
+    capy::execution_context* ctx_ = nullptr;
     io_object_impl* impl_ = nullptr;
 };
 

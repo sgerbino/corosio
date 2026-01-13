@@ -39,7 +39,7 @@ acceptor::
 acceptor::
 acceptor(
     capy::execution_context& ctx)
-    : ctx_(&ctx)
+    : io_object(ctx)
 {
 }
 

@@ -27,25 +27,6 @@ namespace corosio {
 class io_stream : public io_object
 {
 public:
-    struct io_stream_impl : io_object_impl
-    {
-        virtual void read_some(
-            std::coroutine_handle<>,
-            capy::any_dispatcher,
-            any_bufref&,
-            std::stop_token,
-            system::error_code*,
-            std::size_t*) = 0;
-
-        virtual void write_some(
-            std::coroutine_handle<>,
-            capy::any_dispatcher,
-            any_bufref&,
-            std::stop_token,
-            system::error_code*,
-            std::size_t*) = 0;
-    };
-
     /** Initiate an asynchronous read operation.
 
         Reads available data into the provided buffer sequence. The
@@ -212,6 +193,34 @@ protected:
             return std::noop_coroutine();
         }
     };
+
+public:
+    struct io_stream_impl : io_object_impl
+    {
+        virtual void read_some(
+            std::coroutine_handle<>,
+            capy::any_dispatcher,
+            any_bufref&,
+            std::stop_token,
+            system::error_code*,
+            std::size_t*) = 0;
+
+        virtual void write_some(
+            std::coroutine_handle<>,
+            capy::any_dispatcher,
+            any_bufref&,
+            std::stop_token,
+            system::error_code*,
+            std::size_t*) = 0;
+    };
+
+protected:
+    explicit
+    io_stream(
+        capy::execution_context& ctx) noexcept
+        : io_object(ctx)
+    {
+    }
 
 private:
     io_stream_impl& get() const noexcept

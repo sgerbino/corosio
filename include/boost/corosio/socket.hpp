@@ -72,6 +72,26 @@ namespace corosio {
 */
 class socket : public io_stream
 {
+    friend class acceptor;
+
+    struct socket_impl;
+
+    inline socket_impl& get() const noexcept
+    {
+        return *static_cast<socket_impl*>(impl_);
+    }
+
+public:
+    struct socket_impl : io_stream_impl
+    {
+        virtual void connect(
+            std::coroutine_handle<>,
+            capy::any_dispatcher,
+            endpoint,
+            std::stop_token,
+            system::error_code*) = 0;
+    };
+
     struct connect_awaitable
     {
         socket& s_;
@@ -154,7 +174,7 @@ public:
         @param other The socket to move from.
     */
     socket(socket&& other) noexcept
-        : ctx_(other.ctx_)
+        : io_stream(other.context())
     {
         impl_ = other.impl_;
         other.impl_ = nullptr;
@@ -261,37 +281,6 @@ public:
     */
     BOOST_COROSIO_DECL
     void cancel();
-
-    /** Return the execution context.
-
-        @return Reference to the execution context that owns this socket.
-    */
-    auto
-    context() const noexcept ->
-        capy::execution_context&
-    {
-        return *ctx_;
-    }
-
-    struct socket_impl : io_stream_impl
-    {
-        virtual void connect(
-            std::coroutine_handle<>,
-            capy::any_dispatcher,
-            endpoint,
-            std::stop_token,
-            system::error_code*) = 0;
-    };
-    
-private:
-    friend class acceptor;
-
-    inline socket_impl& get() const noexcept
-    {
-        return *static_cast<socket_impl*>(impl_);
-    }
-
-    capy::execution_context* ctx_;
 };
 
 } // namespace corosio

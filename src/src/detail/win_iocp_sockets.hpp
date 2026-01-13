@@ -95,12 +95,14 @@ public:
     explicit win_socket_impl(win_iocp_sockets& svc) noexcept;
 
     void release() override;
+
     void connect(
         std::coroutine_handle<>,
         capy::any_dispatcher,
         endpoint,
         std::stop_token,
         system::error_code*) override;
+
     void read_some(
         std::coroutine_handle<>,
         capy::any_dispatcher,
@@ -108,6 +110,7 @@ public:
         std::stop_token,
         system::error_code*,
         std::size_t*) override;
+
     void write_some(
         std::coroutine_handle<>,
         capy::any_dispatcher,
@@ -150,6 +153,7 @@ public:
     explicit win_acceptor_impl(win_iocp_sockets& svc) noexcept;
 
     void release() override;
+
     void accept(
         std::coroutine_handle<>,
         capy::any_dispatcher,

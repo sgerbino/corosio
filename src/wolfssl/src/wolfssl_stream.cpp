@@ -678,7 +678,8 @@ struct wolfssl_stream_impl_
 
 wolfssl_stream::
 wolfssl_stream(io_stream& stream)
-    : s_(stream)
+    : io_stream(stream.context())
+    , s_(stream)
 {
     construct();
 }

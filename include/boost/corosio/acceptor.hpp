@@ -154,7 +154,7 @@ public:
         @param other The acceptor to move from.
     */
     acceptor(acceptor&& other) noexcept
-        : ctx_(other.ctx_)
+        : io_object(other.context())
     {
         impl_ = other.impl_;
         other.impl_ = nullptr;
