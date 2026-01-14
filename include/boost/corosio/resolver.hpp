@@ -316,7 +316,7 @@ public:
     BOOST_COROSIO_DECL
     void cancel();
 
-private:
+public:
     struct resolver_impl : io_object_impl
     {
         virtual void resolve(
@@ -330,6 +330,7 @@ private:
             resolver_results*) = 0;
     };
 
+private:
     inline resolver_impl& get() const noexcept
     {
         return *static_cast<resolver_impl*>(impl_);

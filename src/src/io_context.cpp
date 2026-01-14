@@ -12,7 +12,7 @@
 #ifdef _WIN32
 #include "src/detail/win_iocp_scheduler.hpp"
 #else
-#include "src/detail/reactive_scheduler.hpp"
+#include "src/detail/posix_scheduler.hpp"
 #endif
 
 #include <thread>
@@ -23,7 +23,7 @@ namespace corosio {
 #ifdef _WIN32
 using scheduler_type = detail::win_iocp_scheduler;
 #else
-using scheduler_type = detail::reactive_scheduler<false>;
+using scheduler_type = detail::posix_scheduler;
 #endif
 
 io_context::
