@@ -24,8 +24,6 @@ namespace test {
 
 //------------------------------------------------
 // Mocket-specific tests
-// Note: Due to IOCP scheduler limitations with sequential
-// io_context lifecycles, all tests run in a single io_context.
 //------------------------------------------------
 
 struct mocket_test
@@ -108,15 +106,7 @@ struct mocket_test
     run()
     {
         testComprehensive();
-        // BUG: testCloseWithUnconsumedData creates a second io_context which
-        // triggers a bug in capy::run_async. The bug is that run_async destroys
-        // coroutine frames immediately after posting them to the scheduler,
-        // but for async dispatchers the coroutine is only queued, not complete.
-        // The recycling_frame_allocator reuses the freed memory for new coroutines,
-        // causing the scheduler to resume wrong/corrupted coroutine frames.
-        // This needs to be fixed in capy::run_async to not destroy frames for
-        // async dispatchers until the coroutine actually completes.
-        // testCloseWithUnconsumedData();
+        testCloseWithUnconsumedData();
     }
 };
 

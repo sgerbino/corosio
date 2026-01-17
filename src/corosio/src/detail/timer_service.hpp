@@ -20,11 +20,28 @@ namespace boost {
 namespace corosio {
 namespace detail {
 
+struct scheduler;
+
 class timer_service : public capy::execution_context::service
 {
 public:
     using clock_type = std::chrono::steady_clock;
     using time_point = clock_type::time_point;
+
+    // Nested callback type - context + function pointer
+    class callback
+    {
+        void* ctx_ = nullptr;
+        void(*fn_)(void*) = nullptr;
+
+    public:
+        callback() = default;
+        callback(void* ctx, void(*fn)(void*)) noexcept
+            : ctx_(ctx), fn_(fn) {}
+
+        explicit operator bool() const noexcept { return fn_ != nullptr; }
+        void operator()() const { if (fn_) fn_(ctx_); }
+    };
 
     // Create timer implementation
     virtual timer::timer_impl* create_impl() = 0;
@@ -36,9 +53,17 @@ public:
     // Process expired timers - scheduler calls this after wait
     virtual std::size_t process_expired() = 0;
 
+    // Callback for when earliest timer changes
+    virtual void set_on_earliest_changed(callback cb) = 0;
+
 protected:
     timer_service() = default;
 };
+
+// Get or create the timer service for the given context
+timer_service&
+get_timer_service(
+    capy::execution_context& ctx, scheduler& sched);
 
 } // namespace detail
 } // namespace corosio

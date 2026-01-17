@@ -11,6 +11,11 @@
 #include <boost/corosio/timer.hpp>
 
 #include <boost/corosio/io_context.hpp>
+#include <boost/capy/cond.hpp>
+#include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/task.hpp>
+
+#include <chrono>
 
 #include "test_suite.hpp"
 
@@ -19,18 +24,21 @@ namespace corosio {
 
 //------------------------------------------------
 // Timer-specific tests
-// Focus: timer construction and basic interface
+// Focus: timer construction, expiry, wait, and cancellation
 //------------------------------------------------
 
 struct timer_test
 {
+    //--------------------------------------------
+    // Construction and move semantics
+    //--------------------------------------------
+
     void
     testConstruction()
     {
         io_context ioc;
         timer t(ioc);
 
-        // Timer constructed successfully
         BOOST_TEST_PASS();
     }
 
@@ -39,10 +47,11 @@ struct timer_test
     {
         io_context ioc;
         timer t1(ioc);
+        t1.expires_after(std::chrono::milliseconds(100));
+        auto expiry = t1.expiry();
 
-        // Move construct
         timer t2(std::move(t1));
-        BOOST_TEST_PASS();
+        BOOST_TEST(t2.expiry() == expiry);
     }
 
     void
@@ -52,17 +61,620 @@ struct timer_test
         timer t1(ioc);
         timer t2(ioc);
 
-        // Move assign
+        t1.expires_after(std::chrono::milliseconds(100));
+        auto expiry = t1.expiry();
+
         t2 = std::move(t1);
+        BOOST_TEST(t2.expiry() == expiry);
+    }
+
+    void
+    testMoveAssignCrossContextThrows()
+    {
+        io_context ioc1;
+        io_context ioc2;
+        timer t1(ioc1);
+        timer t2(ioc2);
+
+        BOOST_TEST_THROWS(t2 = std::move(t1), std::logic_error);
+    }
+
+    //--------------------------------------------
+    // Expiry setting and retrieval
+    //--------------------------------------------
+
+    void
+    testDefaultExpiry()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        auto expiry = t.expiry();
+        BOOST_TEST(expiry == timer::time_point{});
+    }
+
+    void
+    testExpiresAfter()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        auto before = timer::clock_type::now();
+        t.expires_after(std::chrono::milliseconds(100));
+        auto after = timer::clock_type::now();
+
+        auto expiry = t.expiry();
+        BOOST_TEST(expiry >= before + std::chrono::milliseconds(100));
+        BOOST_TEST(expiry <= after + std::chrono::milliseconds(100));
+    }
+
+    void
+    testExpiresAfterDifferentDurations()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        auto before = timer::clock_type::now();
+        t.expires_after(std::chrono::seconds(1));
+        auto expiry = t.expiry();
+        BOOST_TEST(expiry >= before + std::chrono::seconds(1));
+
+        before = timer::clock_type::now();
+        t.expires_after(std::chrono::microseconds(500000));
+        expiry = t.expiry();
+        BOOST_TEST(expiry >= before + std::chrono::microseconds(500000));
+
+        before = timer::clock_type::now();
+        t.expires_after(std::chrono::hours(0));
+        expiry = t.expiry();
+        BOOST_TEST(expiry <= before + std::chrono::milliseconds(10));
+    }
+
+    void
+    testExpiresAt()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        auto target = timer::clock_type::now() + std::chrono::milliseconds(200);
+        t.expires_at(target);
+
+        BOOST_TEST(t.expiry() == target);
+    }
+
+    void
+    testExpiresAtPast()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        auto target = timer::clock_type::now() - std::chrono::seconds(1);
+        t.expires_at(target);
+
+        BOOST_TEST(t.expiry() == target);
+    }
+
+    void
+    testExpiresAtReplace()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        auto first = timer::clock_type::now() + std::chrono::seconds(10);
+        t.expires_at(first);
+        BOOST_TEST(t.expiry() == first);
+
+        auto second = timer::clock_type::now() + std::chrono::seconds(5);
+        t.expires_at(second);
+        BOOST_TEST(t.expiry() == second);
+    }
+
+    //--------------------------------------------
+    // Async wait tests
+    //--------------------------------------------
+
+    void
+    testWaitBasic()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        bool completed = false;
+        system::error_code result_ec;
+
+        t.expires_after(std::chrono::milliseconds(10));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                result_ec = ec;
+                completed = true;
+            }());
+
+        ioc.run();
+        BOOST_TEST(completed);
+        BOOST_TEST(!result_ec);
+    }
+
+    void
+    testWaitTimingAccuracy()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        auto start = timer::clock_type::now();
+        timer::duration elapsed;
+
+        t.expires_after(std::chrono::milliseconds(50));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                elapsed = timer::clock_type::now() - start;
+                (void)ec;
+            }());
+
+        ioc.run();
+
+        BOOST_TEST(elapsed >= std::chrono::milliseconds(50));
+        BOOST_TEST(elapsed < std::chrono::milliseconds(200));
+    }
+
+    void
+    testWaitExpiredTimer()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        bool completed = false;
+        system::error_code result_ec;
+
+        t.expires_at(timer::clock_type::now() - std::chrono::seconds(1));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                result_ec = ec;
+                completed = true;
+            }());
+
+        ioc.run();
+        BOOST_TEST(completed);
+        BOOST_TEST(!result_ec);
+    }
+
+    void
+    testWaitZeroDuration()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        bool completed = false;
+        system::error_code result_ec;
+
+        t.expires_after(std::chrono::milliseconds(0));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                result_ec = ec;
+                completed = true;
+            }());
+
+        ioc.run();
+        BOOST_TEST(completed);
+        BOOST_TEST(!result_ec);
+    }
+
+    //--------------------------------------------
+    // Cancellation tests
+    //--------------------------------------------
+
+    void
+    testCancel()
+    {
+        io_context ioc;
+        timer t(ioc);
+        timer cancel_timer(ioc);
+
+        bool completed = false;
+        system::error_code result_ec;
+
+        t.expires_after(std::chrono::seconds(60));
+        cancel_timer.expires_after(std::chrono::milliseconds(10));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                result_ec = ec;
+                completed = true;
+            }());
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                co_await cancel_timer.wait();
+                t.cancel();
+            }());
+
+        ioc.run();
+        BOOST_TEST(completed);
+        BOOST_TEST(result_ec == capy::cond::canceled);
+    }
+
+    void
+    testCancelNoWaiters()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        t.expires_after(std::chrono::seconds(60));
+
+        t.cancel();
+        BOOST_TEST_PASS();
+    }
+
+    void
+    testCancelMultipleTimes()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        t.expires_after(std::chrono::seconds(60));
+
+        t.cancel();
+        t.cancel();
+        t.cancel();
+        BOOST_TEST_PASS();
+    }
+
+    void
+    testExpiresAtCancelsWaiter()
+    {
+        io_context ioc;
+        timer t(ioc);
+        timer delay_timer(ioc);
+
+        bool completed = false;
+        system::error_code result_ec;
+
+        t.expires_after(std::chrono::seconds(60));
+        delay_timer.expires_after(std::chrono::milliseconds(10));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                result_ec = ec;
+                completed = true;
+            }());
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                co_await delay_timer.wait();
+                t.expires_after(std::chrono::seconds(30));
+            }());
+
+        ioc.run_for(std::chrono::milliseconds(100));
+        BOOST_TEST(completed);
+        BOOST_TEST(result_ec == capy::cond::canceled);
+    }
+
+    //--------------------------------------------
+    // Multiple timer tests
+    //--------------------------------------------
+
+    void
+    testMultipleTimersDifferentExpiry()
+    {
+        io_context ioc;
+        timer t1(ioc);
+        timer t2(ioc);
+        timer t3(ioc);
+
+        int order = 0;
+        int t1_order = 0, t2_order = 0, t3_order = 0;
+
+        t1.expires_after(std::chrono::milliseconds(30));
+        t2.expires_after(std::chrono::milliseconds(10));
+        t3.expires_after(std::chrono::milliseconds(20));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t1.wait();
+                t1_order = ++order;
+                (void)ec;
+            }());
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t2.wait();
+                t2_order = ++order;
+                (void)ec;
+            }());
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t3.wait();
+                t3_order = ++order;
+                (void)ec;
+            }());
+
+        ioc.run();
+
+        BOOST_TEST_EQ(t2_order, 1);
+        BOOST_TEST_EQ(t3_order, 2);
+        BOOST_TEST_EQ(t1_order, 3);
+    }
+
+    void
+    testMultipleTimersSameExpiry()
+    {
+        io_context ioc;
+        timer t1(ioc);
+        timer t2(ioc);
+
+        bool t1_done = false, t2_done = false;
+
+        auto expiry = timer::clock_type::now() + std::chrono::milliseconds(20);
+        t1.expires_at(expiry);
+        t2.expires_at(expiry);
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t1.wait();
+                t1_done = true;
+                (void)ec;
+            }());
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t2.wait();
+                t2_done = true;
+                (void)ec;
+            }());
+
+        ioc.run();
+
+        BOOST_TEST(t1_done);
+        BOOST_TEST(t2_done);
+    }
+
+    //--------------------------------------------
+    // Sequential wait tests
+    //--------------------------------------------
+
+    void
+    testSequentialWaits()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        int wait_count = 0;
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                t.expires_after(std::chrono::milliseconds(5));
+                auto [ec1] = co_await t.wait();
+                BOOST_TEST(!ec1);
+                ++wait_count;
+
+                t.expires_after(std::chrono::milliseconds(5));
+                auto [ec2] = co_await t.wait();
+                BOOST_TEST(!ec2);
+                ++wait_count;
+
+                t.expires_after(std::chrono::milliseconds(5));
+                auto [ec3] = co_await t.wait();
+                BOOST_TEST(!ec3);
+                ++wait_count;
+            }());
+
+        ioc.run();
+        BOOST_TEST_EQ(wait_count, 3);
+    }
+
+    //--------------------------------------------
+    // io_result tests
+    //--------------------------------------------
+
+    void
+    testIoResultSuccess()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        bool result_ok = false;
+
+        t.expires_after(std::chrono::milliseconds(5));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto result = co_await t.wait();
+                result_ok = static_cast<bool>(result);
+            }());
+
+        ioc.run();
+        BOOST_TEST(result_ok);
+    }
+
+    void
+    testIoResultCanceled()
+    {
+        io_context ioc;
+        timer t(ioc);
+        timer cancel_timer(ioc);
+
+        bool result_ok = true;
+        system::error_code result_ec;
+
+        t.expires_after(std::chrono::seconds(60));
+        cancel_timer.expires_after(std::chrono::milliseconds(10));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto result = co_await t.wait();
+                result_ok = static_cast<bool>(result);
+                result_ec = result.ec;
+            }());
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                co_await cancel_timer.wait();
+                t.cancel();
+            }());
+
+        ioc.run();
+        BOOST_TEST(!result_ok);
+        BOOST_TEST(result_ec == capy::cond::canceled);
+    }
+
+    void
+    testIoResultStructuredBinding()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        system::error_code captured_ec;
+
+        t.expires_after(std::chrono::milliseconds(5));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                captured_ec = ec;
+            }());
+
+        ioc.run();
+        BOOST_TEST(!captured_ec);
+    }
+
+    //--------------------------------------------
+    // Edge cases
+    //--------------------------------------------
+
+    void
+    testLongDuration()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        t.expires_after(std::chrono::hours(24 * 365));
+
+        auto expiry = t.expiry();
+        BOOST_TEST(expiry > timer::clock_type::now());
+
+        t.cancel();
+        BOOST_TEST_PASS();
+    }
+
+    void
+    testNegativeDuration()
+    {
+        io_context ioc;
+        timer t(ioc);
+
+        bool completed = false;
+
+        t.expires_after(std::chrono::milliseconds(-100));
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                auto [ec] = co_await t.wait();
+                completed = true;
+                (void)ec;
+            }());
+
+        ioc.run();
+        BOOST_TEST(completed);
+    }
+
+    //--------------------------------------------
+    // Type trait tests
+    //--------------------------------------------
+
+    void
+    testTypeAliases()
+    {
+        static_assert(std::is_same_v<
+            timer::clock_type,
+            std::chrono::steady_clock>);
+
+        static_assert(std::is_same_v<
+            timer::time_point,
+            std::chrono::steady_clock::time_point>);
+
+        static_assert(std::is_same_v<
+            timer::duration,
+            std::chrono::steady_clock::duration>);
+
         BOOST_TEST_PASS();
     }
 
     void
     run()
     {
+        // Construction and move semantics
         testConstruction();
         testMoveConstruct();
         testMoveAssign();
+        testMoveAssignCrossContextThrows();
+
+        // Expiry setting and retrieval
+        testDefaultExpiry();
+        testExpiresAfter();
+        testExpiresAfterDifferentDurations();
+        testExpiresAt();
+        testExpiresAtPast();
+        testExpiresAtReplace();
+
+        // Async wait tests
+        testWaitBasic();
+        testWaitTimingAccuracy();
+        testWaitExpiredTimer();
+        testWaitZeroDuration();
+
+        // Cancellation tests
+        testCancel();
+        testCancelNoWaiters();
+        testCancelMultipleTimes();
+        testExpiresAtCancelsWaiter();
+
+        // Multiple timer tests
+        testMultipleTimersDifferentExpiry();
+        testMultipleTimersSameExpiry();
+
+        // Sequential wait tests
+        testSequentialWaits();
+
+        // io_result tests
+        testIoResultSuccess();
+        testIoResultCanceled();
+        testIoResultStructuredBinding();
+
+        // Edge cases
+        testLongDuration();
+        testNegativeDuration();
+
+        // Type trait tests
+        testTypeAliases();
     }
 };
 

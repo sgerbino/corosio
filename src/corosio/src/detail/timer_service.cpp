@@ -9,7 +9,9 @@
 
 #include "timer_service.hpp"
 
+#include <boost/corosio/detail/scheduler.hpp>
 #include <boost/capy/core/intrusive_list.hpp>
+#include <boost/capy/error.hpp>
 #include <boost/capy/ex/any_dispatcher.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -65,6 +67,7 @@ class timer_service_impl : public timer_service
 public:
     using clock_type = std::chrono::steady_clock;
     using time_point = clock_type::time_point;
+    using key_type = timer_service;
 
 private:
     struct heap_entry
@@ -73,17 +76,21 @@ private:
         timer_impl* timer_;
     };
 
+    scheduler* sched_ = nullptr;
     mutable std::mutex mutex_;
     std::vector<heap_entry> heap_;
     capy::intrusive_list<timer_impl> timers_;
     capy::intrusive_list<timer_impl> free_list_;
+    callback on_earliest_changed_;
 
 public:
-    explicit timer_service_impl(
-        capy::execution_context&)
+    timer_service_impl(capy::execution_context&, scheduler& sched)
         : timer_service()
+        , sched_(&sched)
     {
     }
+
+    scheduler& get_scheduler() noexcept { return *sched_; }
 
     ~timer_service_impl()
     {
@@ -91,6 +98,11 @@ public:
 
     timer_service_impl(timer_service_impl const&) = delete;
     timer_service_impl& operator=(timer_service_impl const&) = delete;
+
+    void set_on_earliest_changed(callback cb) override
+    {
+        on_earliest_changed_ = cb;
+    }
 
     void shutdown() override
     {
@@ -127,31 +139,103 @@ public:
 
     void update_timer(timer_impl& impl, time_point new_time)
     {
-        std::lock_guard lock(mutex_);
-        if (impl.heap_index_ < heap_.size())
-        {
-            // Already in heap, update position
-            time_point old_time = heap_[impl.heap_index_].time_;
-            heap_[impl.heap_index_].time_ = new_time;
+        bool notify = false;
+        bool was_waiting = false;
+        std::coroutine_handle<> h;
+        capy::any_dispatcher d;
+        system::error_code* ec_out = nullptr;
 
-            if (new_time < old_time)
-                up_heap(impl.heap_index_);
-            else
-                down_heap(impl.heap_index_);
-        }
-        else
         {
-            // Not in heap, add it
-            impl.heap_index_ = heap_.size();
-            heap_.push_back({new_time, &impl});
-            up_heap(heap_.size() - 1);
+            std::lock_guard lock(mutex_);
+
+            // If currently waiting, cancel the pending wait
+            if (impl.waiting_)
+            {
+                was_waiting = true;
+                impl.waiting_ = false;
+                h = impl.h_;
+                d = impl.d_;
+                ec_out = impl.ec_out_;
+            }
+
+            if (impl.heap_index_ < heap_.size())
+            {
+                // Already in heap, update position
+                time_point old_time = heap_[impl.heap_index_].time_;
+                heap_[impl.heap_index_].time_ = new_time;
+
+                if (new_time < old_time)
+                    up_heap(impl.heap_index_);
+                else
+                    down_heap(impl.heap_index_);
+            }
+            else
+            {
+                // Not in heap, add it
+                impl.heap_index_ = heap_.size();
+                heap_.push_back({new_time, &impl});
+                up_heap(heap_.size() - 1);
+            }
+
+            // Notify if this timer is now the earliest
+            notify = (impl.heap_index_ == 0);
         }
+
+        // Resume cancelled waiter outside lock
+        if (was_waiting)
+        {
+            if (ec_out)
+                *ec_out = make_error_code(capy::error::canceled);
+            auto resume_h = d(h);
+            // Resume the handle if dispatcher returned it for symmetric transfer
+            if (resume_h.address() == h.address())
+                resume_h.resume();
+            // Call on_work_finished AFTER the coroutine resumes
+            sched_->on_work_finished();
+        }
+
+        if (notify)
+            on_earliest_changed_();
     }
 
     void remove_timer(timer_impl& impl)
     {
         std::lock_guard lock(mutex_);
         remove_timer_impl(impl);
+    }
+
+    void cancel_timer(timer_impl& impl)
+    {
+        std::coroutine_handle<> h;
+        capy::any_dispatcher d;
+        system::error_code* ec_out = nullptr;
+        bool was_waiting = false;
+
+        {
+            std::lock_guard lock(mutex_);
+            remove_timer_impl(impl);
+            if (impl.waiting_)
+            {
+                was_waiting = true;
+                impl.waiting_ = false;
+                h = impl.h_;
+                d = std::move(impl.d_);
+                ec_out = impl.ec_out_;
+            }
+        }
+
+        // Dispatch outside lock
+        if (was_waiting)
+        {
+            if (ec_out)
+                *ec_out = make_error_code(capy::error::canceled);
+            auto resume_h = d(h);
+            // Resume the handle if dispatcher returned it for symmetric transfer
+            if (resume_h.address() == h.address())
+                resume_h.resume();
+            // Call on_work_finished AFTER the coroutine resumes
+            sched_->on_work_finished();
+        }
     }
 
     bool empty() const noexcept override
@@ -168,25 +252,50 @@ public:
 
     std::size_t process_expired() override
     {
-        std::lock_guard lock(mutex_);
-        std::size_t count = 0;
-        auto now = clock_type::now();
-
-        while (!heap_.empty() && heap_[0].time_ <= now)
+        // Collect expired timers while holding lock
+        struct expired_entry
         {
-            timer_impl* t = heap_[0].timer_;
-            remove_timer_impl(*t);
+            std::coroutine_handle<> h;
+            capy::any_dispatcher d;
+            system::error_code* ec_out;
+        };
+        std::vector<expired_entry> expired;
 
-            if (t->waiting_)
+        {
+            std::lock_guard lock(mutex_);
+            auto now = clock_type::now();
+
+            while (!heap_.empty() && heap_[0].time_ <= now)
             {
-                t->waiting_ = false;
-                if (t->ec_out_)
-                    *t->ec_out_ = {};
-                t->d_(t->h_);
-                ++count;
+                timer_impl* t = heap_[0].timer_;
+                remove_timer_impl(*t);
+
+                if (t->waiting_)
+                {
+                    t->waiting_ = false;
+                    expired.push_back({t->h_, std::move(t->d_), t->ec_out_});
+                }
+                // If not waiting, timer is removed but not dispatched -
+                // wait() will handle this by checking expiry
             }
         }
-        return count;
+
+        // Dispatch outside lock
+        for (auto& e : expired)
+        {
+            if (e.ec_out)
+                *e.ec_out = {};
+            auto resume_h = e.d(e.h);
+            // Resume the handle if dispatcher returned it for symmetric transfer
+            // (dispatcher returns our handle if we should resume, noop if it posted)
+            if (resume_h.address() == e.h.address())
+                resume_h.resume();
+            // Call on_work_finished AFTER the coroutine resumes, so it has a
+            // chance to add new work before we potentially trigger stop()
+            sched_->on_work_finished();
+        }
+
+        return expired.size();
     }
 
 private:
@@ -273,11 +382,28 @@ wait(
     std::stop_token token,
     system::error_code* ec)
 {
+    // Check if timer already expired (not in heap anymore)
+    bool already_expired = (heap_index_ == (std::numeric_limits<std::size_t>::max)());
+
+    if (already_expired)
+    {
+        // Timer already expired - dispatch immediately
+        if (ec)
+            *ec = {};
+        // Note: no work tracking needed - we dispatch synchronously
+        auto resume_h = d(h);
+        // Resume the handle if dispatcher returned it for symmetric transfer
+        if (resume_h.address() == h.address())
+            resume_h.resume();
+        return;
+    }
+
     h_ = h;
     d_ = std::move(d);
     token_ = std::move(token);
     ec_out_ = ec;
     waiting_ = true;
+    svc_->get_scheduler().on_work_started();
 }
 
 //------------------------------------------------------------------------------
@@ -289,7 +415,7 @@ wait(
 timer::timer_impl*
 timer_service_create(capy::execution_context& ctx)
 {
-    return ctx.use_service<timer_service_impl>().create_impl();
+    return ctx.find_service<timer_service>()->create_impl();
 }
 
 void
@@ -324,7 +450,13 @@ void
 timer_service_cancel(timer::timer_impl& base) noexcept
 {
     auto& impl = static_cast<timer_impl&>(base);
-    impl.svc_->remove_timer(impl);
+    impl.svc_->cancel_timer(impl);
+}
+
+timer_service&
+get_timer_service(capy::execution_context& ctx, scheduler& sched)
+{
+    return ctx.make_service<timer_service_impl>(sched);
 }
 
 } // namespace detail

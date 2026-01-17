@@ -20,7 +20,7 @@
 
 #include <chrono>
 #include <cstdint>
-#include <thread>
+#include <memory>
 
 #include "src/detail/windows.hpp"
 
@@ -33,8 +33,10 @@ constexpr std::uintptr_t shutdown_key = 0;
 constexpr std::uintptr_t handler_key = 1;
 constexpr std::uintptr_t overlapped_key = 2;
 
-// Forward declaration
+// Forward declarations
 struct overlapped_op;
+class win_timers;
+class timer_service;
 
 class win_iocp_scheduler
     : public scheduler
@@ -71,7 +73,13 @@ public:
     void work_started() const noexcept;
     void work_finished() const noexcept;
 
+    // Timer service integration
+    void set_timer_service(timer_service* svc);
+    void update_timeout();
+
 private:
+    // Static callback thunk - receives 'this' as context
+    static void on_timer_changed(void* ctx);
     void post_deferred_completions(op_queue& ops);
     std::size_t do_one(unsigned long timeout_ms);
 
@@ -88,7 +96,8 @@ private:
 
     mutable win_mutex dispatch_mutex_;                                      // protects completed_ops_
     mutable op_queue completed_ops_;                                       // fallback when PQCS fails (no auto-destroy)
-    std::thread timer_thread_;                                             // placeholder for timer support
+    std::unique_ptr<win_timers> timers_;                                   // timer wakeup mechanism
+    timer_service* timer_svc_ = nullptr;                                   // timer service for processing
 };
 
 } // namespace detail

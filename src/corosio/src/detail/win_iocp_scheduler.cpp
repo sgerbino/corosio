@@ -11,6 +11,8 @@
 
 #include "src/detail/win_iocp_scheduler.hpp"
 #include "src/detail/win_overlapped_op.hpp"
+#include "src/detail/win_timers.hpp"
+#include "src/detail/timer_service.hpp"
 
 #include <boost/corosio/detail/except.hpp>
 #include <boost/capy/core/thread_local_ptr.hpp>
@@ -88,7 +90,7 @@ struct thread_context_guard
 
 win_iocp_scheduler::
 win_iocp_scheduler(
-    capy::execution_context&,
+    capy::execution_context& ctx,
     int concurrency_hint)
     : iocp_(nullptr)
     , outstanding_work_(0)
@@ -106,6 +108,12 @@ win_iocp_scheduler(
 
     if (iocp_ == nullptr)
         detail::throw_system_error(last_error());
+
+    // Create timer wakeup mechanism (tries NT native, falls back to thread)
+    timers_ = make_win_timers(iocp_, &dispatch_required_);
+
+    // Connect timer service to scheduler
+    set_timer_service(&get_timer_service(ctx, *this));
 }
 
 win_iocp_scheduler::
@@ -121,7 +129,9 @@ shutdown()
 {
     ::InterlockedExchange(&shutdown_, 1);
 
-    // TODO: Signal timer thread when timer support is added
+    // Stop timer wakeup mechanism
+    if (timers_)
+        timers_->stop();
 
     // Drain all outstanding operations without invoking handlers
     while (::InterlockedExchangeAdd(&outstanding_work_, 0) > 0)
@@ -159,9 +169,6 @@ shutdown()
             }
         }
     }
-
-    if (timer_thread_.joinable())
-        timer_thread_.join();
 }
 
 void
@@ -432,11 +439,17 @@ do_one(unsigned long timeout_ms)
 {
     for (;;)
     {
-        // Drain fallback queue if needed
+        // Drain fallback queue and process timers if needed
         if (::InterlockedCompareExchange(&dispatch_required_, 0, 1) == 1)
         {
             std::lock_guard<win_mutex> lock(dispatch_mutex_);
             post_deferred_completions(completed_ops_);
+
+            // Process expired timers
+            if (timer_svc_)
+                timer_svc_->process_expired();
+
+            update_timeout();
         }
 
         DWORD bytes = 0;
@@ -472,6 +485,12 @@ do_one(unsigned long timeout_ms)
                 }
                 // Not ready - loop to get next completion
             }
+            else if (key == timer_key)
+            {
+                // Timer fired - set flag to process expired timers
+                ::InterlockedExchange(&dispatch_required_, 1);
+                continue;
+            }
         }
         else if (!result)
         {
@@ -499,6 +518,32 @@ do_one(unsigned long timeout_ms)
             continue;
         }
     }
+}
+
+void
+win_iocp_scheduler::
+on_timer_changed(void* ctx)
+{
+    static_cast<win_iocp_scheduler*>(ctx)->update_timeout();
+}
+
+void
+win_iocp_scheduler::
+set_timer_service(timer_service* svc)
+{
+    timer_svc_ = svc;
+    // Pass 'this' as context - callback routes to correct instance
+    svc->set_on_earliest_changed(timer_service::callback{this, &on_timer_changed});
+    if (timers_)
+        timers_->start();
+}
+
+void
+win_iocp_scheduler::
+update_timeout()
+{
+    if (timer_svc_ && timers_)
+        timers_->update_timeout(timer_svc_->nearest_expiry());
 }
 
 } // namespace detail
