@@ -15,7 +15,7 @@ This glossary defines terms used throughout the Corosio documentation.
 
 Acceptor::
 An I/O object that listens for and accepts incoming TCP connections. See
-`corosio::acceptor`.
+`corosio::acceptor` and xref:../guide/acceptor.adoc[Acceptors Guide].
 
 Affine Awaitable::
 An awaitable type that implements the affine protocol, receiving a dispatcher
@@ -213,6 +213,11 @@ An I/O object for TCP network communication. See `corosio::socket`.
 Stop Token::
 A mechanism for requesting cancellation. See `std::stop_token`.
 
+Strand::
+A serialization mechanism that ensures handlers don't run concurrently.
+Operations posted to a strand execute one at a time, eliminating data
+races without mutexes. See xref:../guide/concurrent-programming.adoc[Concurrent Programming].
+
 Stream::
 A sequence of bytes that can be read or written incrementally.
 
@@ -230,6 +235,10 @@ stack growth.
 
 Task::
 A lazy coroutine that produces a value. See `capy::task<T>`.
+
+TCP Server::
+A framework class for building TCP servers with worker pools. See
+`corosio::tcp_server` and xref:../guide/tcp-server.adoc[TCP Server Guide].
 
 Thread Safety::
 The ability to use an object safely from multiple threads. Individual I/O
@@ -256,6 +265,11 @@ A compact TLS library used by Corosio for secure streams.
 
 Work::
 Pending operations that keep an I/O context running.
+
+Worker Pool::
+A design pattern where a fixed number of worker objects are preallocated
+to handle connections. Provides bounded resource usage and avoids allocation
+during operation. See xref:../guide/tcp-server.adoc[TCP Server].
 
 == See Also
 

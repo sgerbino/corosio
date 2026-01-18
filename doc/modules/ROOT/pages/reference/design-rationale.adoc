@@ -95,8 +95,12 @@ negligible compared to actual I/O latency (microseconds vs. nanoseconds).
 
 ----
 io_object
+    ├── acceptor
+    ├── resolver
+    ├── timer
+    ├── signal_set
     └── io_stream
-            └── socket
+            ├── socket
             └── wolfssl_stream
 ----
 

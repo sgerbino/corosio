@@ -22,6 +22,7 @@ executor without manual dispatch.
 * **io_context** — Event loop for processing asynchronous operations
 * **socket** — Asynchronous TCP socket with connect, read, and write
 * **acceptor** — TCP listener for accepting incoming connections
+* **tcp_server** — Server framework with worker pools
 * **resolver** — Asynchronous DNS resolution
 * **timer** — Asynchronous timer for delays and timeouts
 * **signal_set** — Asynchronous signal handling
@@ -55,6 +56,18 @@ on error instead.
 dispatchers internally. The indirection cost is negligible compared to I/O
 latency.
 
+== Target Audience
+
+Corosio is designed for C++ developers who want to build network applications
+using modern asynchronous programming patterns. This documentation assumes:
+
+* **Familiarity with Boost.Capy** — task types, executors, buffer sequences
+* **Understanding of C++20 coroutines** — `co_await`, `co_return`, awaitables
+* **Basic TCP/IP networking concepts** — clients, servers, ports, connections
+
+If you're new to these topics, see xref:guide/tcp-networking.adoc[TCP/IP Networking]
+and xref:guide/concurrent-programming.adoc[Concurrent Programming] for background.
+
 == Requirements
 
 * C++20 compiler with coroutine support
@@ -71,6 +84,19 @@ latency.
 * Windows (IOCP)
 * Linux (planned: io_uring)
 * macOS (planned: kqueue)
+
+== Code Convention
+
+NOTE: Code examples in this documentation assume these declarations are in effect:
+[source,cpp]
+----
+#include <boost/corosio.hpp>
+#include <boost/capy/task.hpp>
+#include <boost/capy/ex/run_async.hpp>
+
+namespace corosio = boost::corosio;
+namespace capy = boost::capy;
+----
 
 == Quick Example
 
@@ -119,5 +145,7 @@ int main()
 == Next Steps
 
 * xref:quick-start.adoc[Quick Start] — Build a working echo server
+* xref:guide/tcp-networking.adoc[TCP/IP Networking] — Networking fundamentals
+* xref:guide/concurrent-programming.adoc[Concurrent Programming] — Coroutines and strands
 * xref:guide/io-context.adoc[I/O Context] — Understand the event loop
 * xref:guide/sockets.adoc[Sockets] — Learn socket operations in detail

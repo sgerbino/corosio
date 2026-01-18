@@ -1,0 +1,308 @@
+//
+// Copyright (c) 2025 Vinnie Falco (vinnie.falco@gmail.com)
+//
+// Distributed under the Boost Software License, Version 1.0. (See accompanying
+// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+//
+// Official repository: https://github.com/cppalliance/corosio
+//
+
+= TCP/IP Networking
+
+This chapter introduces the networking concepts you need to understand before
+using Corosio. If you're already comfortable with TCP/IP, sockets, and the
+client-server model, you can skip to xref:io-context.adoc[I/O Context].
+
+== The Internet Protocol Suite
+
+The Internet uses a layered protocol architecture. Data passes through these
+layers when sent across a network:
+
+[cols="1,2,2"]
+|===
+| Layer | Purpose | Examples
+
+| Application
+| Your program's logic
+| HTTP, DNS, SMTP
+
+| Transport
+| Reliable delivery between processes
+| TCP, UDP
+
+| Internet
+| Routing packets across networks
+| IP (IPv4, IPv6)
+
+| Link
+| Physical transmission
+| Ethernet, Wi-Fi
+|===
+
+Corosio operates at the Transport layer, providing TCP sockets. Your
+application logic sits above, sending and receiving data through Corosio's
+abstractions.
+
+== TCP: The Transmission Control Protocol
+
+TCP provides _reliable, ordered, byte-stream_ delivery between two endpoints.
+
+=== Reliable
+
+TCP guarantees that data arrives. If a packet is lost, TCP automatically
+retransmits it. Your application never sees missing data.
+
+=== Ordered
+
+Data arrives in the order it was sent. If packets arrive out of order, TCP
+reassembles them before delivering to your application.
+
+=== Byte Stream
+
+TCP delivers a continuous stream of bytes with no inherent message boundaries.
+If you send "Hello" followed by "World", the receiver might read "HelloWorld"
+in one operation, or "Hel" then "loWorld", or any other split.
+
+This has important implications for protocol design. You must define your own
+message framing—typically using:
+
+* **Length prefixes**: Send the message size before the message body
+* **Delimiters**: End each message with a special character (like `\n`)
+* **Fixed-size messages**: All messages have the same length
+
+== The Client-Server Model
+
+Most network applications follow the client-server pattern:
+
+----
+┌────────┐     connect     ┌────────┐
+│ Client │ ───────────────→│ Server │
+└────────┘                 └────────┘
+                               │
+                           listening
+                           on a port
+----
+
+**Server**: Listens on a well-known port, waiting for clients to connect. When
+a client connects, the server creates a new socket for that specific
+connection.
+
+**Client**: Initiates a connection to a server's IP address and port. Once
+connected, the client and server communicate as peers.
+
+=== Connection Lifecycle
+
+A TCP connection goes through these stages:
+
+1. **Server Setup**
+   - Create a socket
+   - Bind to a local address and port
+   - Begin listening for connections
+
+2. **Client Connects**
+   - Create a socket
+   - Connect to the server's address and port
+   - TCP performs a three-way handshake
+
+3. **Data Exchange**
+   - Both sides can send and receive data
+   - Data flows as a bidirectional byte stream
+
+4. **Connection Close**
+   - Either side initiates close
+   - TCP performs a four-way handshake
+   - Resources are released
+
+== Addresses and Ports
+
+Every TCP connection is identified by four values:
+
+* Source IP address
+* Source port
+* Destination IP address
+* Destination port
+
+=== IP Addresses
+
+An IP address identifies a host on the network.
+
+**IPv4 addresses** are 32 bits, written as four decimal numbers separated by
+dots: `192.168.1.100`. There are about 4 billion possible addresses.
+
+**IPv6 addresses** are 128 bits, written as eight groups of hexadecimal digits
+separated by colons: `2001:0db8:0000:0000:0000:0000:0000:0001` (often shortened
+to `2001:db8::1`).
+
+=== Special Addresses
+
+[cols="1,2"]
+|===
+| Address | Meaning
+
+| `127.0.0.1` (IPv4)
+| Loopback—the local machine
+
+| `::1` (IPv6)
+| Loopback—the local machine
+
+| `0.0.0.0` (IPv4)
+| All interfaces (for binding)
+
+| `::` (IPv6)
+| All interfaces (for binding)
+|===
+
+=== Ports
+
+A port is a 16-bit number (0–65535) that identifies an application on a host.
+Well-known services use standard ports:
+
+[cols="1,2"]
+|===
+| Port | Service
+
+| 80
+| HTTP
+
+| 443
+| HTTPS
+
+| 22
+| SSH
+
+| 25
+| SMTP (email)
+|===
+
+Ports below 1024 typically require administrator privileges to bind.
+
+== Endpoints in Corosio
+
+Corosio represents addresses and ports using the `endpoint` class:
+
+[source,cpp]
+----
+// Port only (all interfaces)
+corosio::endpoint server_ep(8080);
+
+// IPv4 address and port
+corosio::endpoint client_ep(
+    boost::urls::ipv4_address::loopback(), 8080);
+
+// IPv6 address and port
+corosio::endpoint ipv6_ep(
+    boost::urls::ipv6_address::loopback(), 8080);
+----
+
+== Name Resolution
+
+Humans use domain names like `www.example.com`, but TCP requires IP addresses.
+The Domain Name System (DNS) translates names to addresses.
+
+Corosio provides the `resolver` class for asynchronous DNS lookups:
+
+[source,cpp]
+----
+corosio::resolver r(ioc);
+auto [ec, results] = co_await r.resolve("www.example.com", "https");
+
+for (auto const& entry : results)
+{
+    auto ep = entry.get_endpoint();
+    // Try connecting to ep...
+}
+----
+
+A single hostname may resolve to multiple addresses (for load balancing or
+redundancy). Your application should try each address until one succeeds.
+
+== TCP vs UDP
+
+Corosio currently supports only TCP. Here's why TCP is often the right choice:
+
+[cols="1,2,2"]
+|===
+| Property | TCP | UDP
+
+| Reliability
+| Guaranteed delivery
+| Best effort
+
+| Ordering
+| Preserved
+| Not guaranteed
+
+| Connection
+| Connection-oriented
+| Connectionless
+
+| Use cases
+| Web, email, file transfer
+| Video streaming, gaming, DNS
+|===
+
+TCP's reliability and ordering come at the cost of latency (retransmissions
+take time) and overhead (connection setup, acknowledgments). For most
+applications—especially those involving requests and responses—TCP's
+guarantees outweigh these costs.
+
+== What Corosio Provides
+
+Corosio wraps the complexity of TCP programming in a coroutine-friendly API:
+
+* **socket** — Connect to servers, send and receive data
+* **acceptor** — Listen for and accept incoming connections
+* **resolver** — Translate hostnames to IP addresses
+* **endpoint** — Represent addresses and ports
+
+All operations are asynchronous and return awaitables. You don't manage raw
+socket handles or deal with platform-specific APIs directly.
+
+== Common Pitfalls
+
+=== Partial Reads and Writes
+
+TCP's byte-stream nature means `read_some()` may return fewer bytes than you
+requested, and `write_some()` may send fewer bytes than you provided.
+
+Always loop or use composed operations (`read()`, `write()`) when you need
+exact amounts:
+
+[source,cpp]
+----
+// Wrong: might read less than buffer size
+auto [ec, n] = co_await sock.read_some(buf);
+
+// Right: reads until buffer is full or EOF
+auto [ec, n] = co_await corosio::read(sock, buf);
+----
+
+=== Connection Refused
+
+If no server is listening on the target port, connect fails with
+`connection_refused`. Always handle this error—it's common during development
+and when servers restart.
+
+=== Address Already in Use
+
+A server that terminates and immediately restarts may fail to bind because the
+OS keeps the old socket in `TIME_WAIT` state. Production servers typically set
+socket options to allow address reuse.
+
+=== Blocking the Event Loop
+
+Long-running computations in a coroutine block other operations. For CPU-bound
+work, dispatch to a separate thread pool.
+
+== Further Reading
+
+For a deeper understanding of TCP/IP:
+
+* _TCP/IP Illustrated, Volume 1_ by W. Richard Stevens—the classic reference
+* _Unix Network Programming_ by W. Richard Stevens—practical socket programming
+
+== Next Steps
+
+* xref:concurrent-programming.adoc[Concurrent Programming] — Coroutines and strands
+* xref:io-context.adoc[I/O Context] — The event loop
+* xref:sockets.adoc[Sockets] — Socket operations in detail
