@@ -29,12 +29,10 @@ struct io_result_test
         // Default construction
         io_result<> r1;
         BOOST_TEST(!r1.ec);
-        BOOST_TEST(r1);
 
         // With error
         io_result<> r2{make_error_code(system::errc::invalid_argument)};
         BOOST_TEST(r2.ec);
-        BOOST_TEST(!r2);
 
         // Structured binding
         auto [ec] = r1;
@@ -54,20 +52,17 @@ struct io_result_test
         io_result<std::size_t> r1;
         BOOST_TEST(!r1.ec);
         BOOST_TEST_EQ(r1.n, 0u);
-        BOOST_TEST(r1);
 
         // With values
         io_result<std::size_t> r2{{}, 42};
         BOOST_TEST(!r2.ec);
         BOOST_TEST_EQ(r2.n, 42u);
-        BOOST_TEST(r2);
 
         // With error
         io_result<std::size_t> r3{
             make_error_code(system::errc::invalid_argument), 10};
         BOOST_TEST(r3.ec);
         BOOST_TEST_EQ(r3.n, 10u);
-        BOOST_TEST(!r3);
 
         // Structured binding
         auto [ec, n] = r2;
@@ -88,7 +83,6 @@ struct io_result_test
         io_result<std::string> r1{{}, "hello"};
         BOOST_TEST(!r1.ec);
         BOOST_TEST_EQ(r1.value_, "hello");
-        BOOST_TEST(r1);
 
         // Structured binding
         auto [ec, v] = r1;
@@ -101,7 +95,7 @@ struct io_result_test
         // With error
         io_result<std::string> r2{
             make_error_code(system::errc::invalid_argument), "error"};
-        BOOST_TEST(!r2);
+        BOOST_TEST(r2.ec);
         BOOST_TEST_THROWS(r2.value(), boost::system::system_error);
     }
 
@@ -112,7 +106,6 @@ struct io_result_test
         io_result<int, double, std::string> r1{
             {}, std::make_tuple(42, 3.14, std::string("test"))};
         BOOST_TEST(!r1.ec);
-        BOOST_TEST(r1);
 
         // Structured binding
         auto [ec, a, b, c] = r1;
@@ -131,7 +124,7 @@ struct io_result_test
         io_result<int, double> r2{
             make_error_code(system::errc::invalid_argument),
             std::make_tuple(0, 0.0)};
-        BOOST_TEST(!r2);
+        BOOST_TEST(r2.ec);
         BOOST_TEST_THROWS(r2.value(), boost::system::system_error);
     }
 

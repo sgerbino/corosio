@@ -454,7 +454,7 @@ get_test_port() noexcept
 {
     auto port = test_port_base + (next_test_port % test_port_range);
     ++next_test_port;
-    return port;
+    return static_cast<std::uint16_t>(port);
 }
 
 } // namespace

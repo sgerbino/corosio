@@ -40,7 +40,7 @@ await_resume() noexcept
         auto* wait = self_.waiters_;
         self_.waiters_ = wait->next;
         wait->w = &w_;
-        self_.post_.post(wait->h);
+        self_.ex_.post(wait->h);
     }
     else
     {
@@ -88,7 +88,7 @@ push_sync(worker_base& w) noexcept
         auto* wait = waiters_;
         waiters_ = wait->next;
         wait->w = &w;
-        post_.post(wait->h);
+        ex_.post(wait->h);
     }
     else
     {
@@ -112,7 +112,7 @@ tcp_server::do_accept(acceptor& acc)
         if(rv.has_error())
             continue;
         auto& w = rv.value();
-        auto ec = co_await acc.accept(w.socket());
+        auto [ec] = co_await acc.accept(w.socket());
         if(ec)
         {
             co_await push(w);
@@ -135,7 +135,7 @@ void
 tcp_server::start()
 {
     for(auto& t : ports_)
-        capy::run_async(post_)(do_accept(t));
+        capy::run_async(ex_)(do_accept(t));
 }
 
 } // namespace corosio

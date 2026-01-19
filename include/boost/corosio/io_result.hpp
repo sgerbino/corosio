@@ -63,15 +63,6 @@ struct io_result<>
     /** The error code from the operation. */
     system::error_code ec;
 
-    /** Check if the operation succeeded.
-
-        @return `true` if no error occurred.
-    */
-    explicit operator bool() const noexcept
-    {
-        return !ec;
-    }
-
     /** Throw if an error occurred.
 
         @throws system::system_error if `ec` is set.
@@ -113,15 +104,6 @@ struct io_result<std::size_t>
     /** The number of bytes transferred. */
     std::size_t n = 0;
 
-    /** Check if the operation succeeded.
-
-        @return `true` if no error occurred.
-    */
-    explicit operator bool() const noexcept
-    {
-        return !ec;
-    }
-
     /** Get bytes transferred, throwing on error.
 
         @return The number of bytes transferred.
@@ -157,15 +139,6 @@ struct io_result<T>
 
     /** The result value. */
     T value_ = {};
-
-    /** Check if the operation succeeded.
-
-        @return `true` if no error occurred.
-    */
-    explicit operator bool() const noexcept
-    {
-        return !ec;
-    }
 
     /** Get the value, throwing on error.
 
@@ -204,15 +177,6 @@ struct io_result<T, U, Args...>
 
     /** The result values. */
     std::tuple<T, U, Args...> values;
-
-    /** Check if the operation succeeded.
-
-        @return `true` if no error occurred.
-    */
-    explicit operator bool() const noexcept
-    {
-        return !ec;
-    }
 
     /** Get the values, throwing on error.
 
