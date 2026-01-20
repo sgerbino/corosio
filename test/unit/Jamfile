@@ -20,14 +20,7 @@ project boost/corosio/test/unit
       <toolset>gcc:<cxxflags>-fcoroutines
     ;
 
-run acceptor.cpp ;
-run consuming_buffers.cpp ;
-run io_context.cpp ;
-run io_result.cpp ;
-run mocket.cpp ;
-run read.cpp ;
-run signal_set.cpp ;
-run socket.cpp ;
-run tcp_server.cpp ;
-run timer.cpp ;
-run write.cpp ;
+for local f in [ glob-tree-ex . : *.cpp ]
+{
+    run $(f) ;
+}
