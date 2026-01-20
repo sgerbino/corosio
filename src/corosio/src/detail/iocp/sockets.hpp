@@ -28,6 +28,8 @@
 #include "src/detail/iocp/mutex.hpp"
 #include "src/detail/iocp/wsa_init.hpp"
 
+#include <memory>
+
 #include <MSWSock.h>
 #include <Ws2tcpip.h>
 
@@ -38,17 +40,21 @@ namespace detail {
 class win_scheduler;
 class win_sockets;
 class win_socket_impl;
+class win_socket_impl_internal;
 class win_acceptor_impl;
+class win_acceptor_impl_internal;
 
 //------------------------------------------------------------------------------
 
 /** Connect operation state. */
 struct connect_op : overlapped_op
 {
-    win_socket_impl& impl;
+    win_socket_impl_internal& internal;
+    std::shared_ptr<win_socket_impl_internal> internal_ptr;  // Keeps internal alive during I/O
 
-    explicit connect_op(win_socket_impl& impl_) noexcept : impl(impl_) {}
+    explicit connect_op(win_socket_impl_internal& internal_) noexcept : internal(internal_) {}
 
+    void operator()() override;
     void do_cancel() noexcept override;
 };
 
@@ -59,10 +65,12 @@ struct read_op : overlapped_op
     WSABUF wsabufs[max_buffers];
     DWORD wsabuf_count = 0;
     DWORD flags = 0;
-    win_socket_impl& impl;
+    win_socket_impl_internal& internal;
+    std::shared_ptr<win_socket_impl_internal> internal_ptr;  // Keeps internal alive during I/O
 
-    explicit read_op(win_socket_impl& impl_) noexcept : impl(impl_) {}
+    explicit read_op(win_socket_impl_internal& internal_) noexcept : internal(internal_) {}
 
+    void operator()() override;
     bool is_read_operation() const noexcept override { return true; }
     void do_cancel() noexcept override;
 };
@@ -73,10 +81,12 @@ struct write_op : overlapped_op
     static constexpr std::size_t max_buffers = 16;
     WSABUF wsabufs[max_buffers];
     DWORD wsabuf_count = 0;
-    win_socket_impl& impl;
+    win_socket_impl_internal& internal;
+    std::shared_ptr<win_socket_impl_internal> internal_ptr;  // Keeps internal alive during I/O
 
-    explicit write_op(win_socket_impl& impl_) noexcept : impl(impl_) {}
+    explicit write_op(win_socket_impl_internal& internal_) noexcept : internal(internal_) {}
 
+    void operator()() override;
     void do_cancel() noexcept override;
 };
 
@@ -84,9 +94,10 @@ struct write_op : overlapped_op
 struct accept_op : overlapped_op
 {
     SOCKET accepted_socket = INVALID_SOCKET;
-    win_socket_impl* peer_impl = nullptr;  // New impl for accepted socket
+    win_socket_impl* peer_wrapper = nullptr;  // Wrapper for accepted socket
+    std::shared_ptr<win_acceptor_impl_internal> acceptor_ptr;  // Keeps acceptor alive during I/O
     SOCKET listen_socket = INVALID_SOCKET;  // For SO_UPDATE_ACCEPT_CONTEXT
-    io_object::io_object_impl** impl_out = nullptr;  // Output: impl for awaitable
+    io_object::io_object_impl** impl_out = nullptr;  // Output: wrapper for awaitable
     // Buffer for AcceptEx: local + remote addresses
     char addr_buf[2 * (sizeof(sockaddr_in6) + 16)];
 
@@ -99,19 +110,23 @@ struct accept_op : overlapped_op
 
 //------------------------------------------------------------------------------
 
-/** Socket implementation for IOCP-based I/O.
+/** Internal socket state for IOCP-based I/O.
 
-    This class contains the state for a single socket, including
+    This class contains the actual state for a single socket, including
     the native socket handle and pending operations. It derives from
-    intrusive_list::node to allow tracking by the win_sockets service.
+    enable_shared_from_this so operations can extend its lifetime.
 
     @note Internal implementation detail. Users interact with socket class.
 */
-class win_socket_impl
-    : public socket::socket_impl
-    , public capy::intrusive_list<win_socket_impl>::node
+class win_socket_impl_internal
+    : public capy::intrusive_list<win_socket_impl_internal>::node
+    , public std::enable_shared_from_this<win_socket_impl_internal>
 {
     friend class win_sockets;
+    friend class win_socket_impl;
+    friend struct read_op;
+    friend struct write_op;
+    friend struct connect_op;
 
     win_sockets& svc_;
     connect_op conn_;
@@ -120,32 +135,33 @@ class win_socket_impl
     SOCKET socket_ = INVALID_SOCKET;
 
 public:
-    explicit win_socket_impl(win_sockets& svc) noexcept;
+    explicit win_socket_impl_internal(win_sockets& svc) noexcept;
+    ~win_socket_impl_internal();
 
-    void release() override;
+    void release_internal();
 
     void connect(
-        std::coroutine_handle<>,
+        capy::any_coro,
         capy::any_executor_ref,
         endpoint,
         std::stop_token,
-        system::error_code*) override;
+        system::error_code*);
 
     void read_some(
-        std::coroutine_handle<>,
+        capy::any_coro,
         capy::any_executor_ref,
         capy::any_bufref&,
         std::stop_token,
         system::error_code*,
-        std::size_t*) override;
+        std::size_t*);
 
     void write_some(
-        std::coroutine_handle<>,
+        capy::any_coro,
         capy::any_executor_ref,
         capy::any_bufref&,
         std::stop_token,
         system::error_code*,
-        std::size_t*) override;
+        std::size_t*);
 
     SOCKET native_handle() const noexcept { return socket_; }
     bool is_open() const noexcept { return socket_ != INVALID_SOCKET; }
@@ -156,30 +172,90 @@ public:
 
 //------------------------------------------------------------------------------
 
-/** Acceptor implementation for IOCP-based I/O.
+/** Socket implementation wrapper for IOCP-based I/O.
 
-    This class contains the state for a listening socket, including
+    This class is the public-facing socket_impl that holds a shared_ptr
+    to the internal state. The shared_ptr is hidden from the public interface.
+
+    @note Internal implementation detail. Users interact with socket class.
+*/
+class win_socket_impl
+    : public socket::socket_impl
+    , public capy::intrusive_list<win_socket_impl>::node
+{
+    std::shared_ptr<win_socket_impl_internal> internal_;
+
+public:
+    explicit win_socket_impl(std::shared_ptr<win_socket_impl_internal> internal) noexcept
+        : internal_(std::move(internal))
+    {
+    }
+
+    void release() override;
+
+    void connect(
+        std::coroutine_handle<> h,
+        capy::any_executor_ref d,
+        endpoint ep,
+        std::stop_token token,
+        system::error_code* ec) override
+    {
+        internal_->connect(h, d, ep, token, ec);
+    }
+
+    void read_some(
+        std::coroutine_handle<> h,
+        capy::any_executor_ref d,
+        capy::any_bufref& buf,
+        std::stop_token token,
+        system::error_code* ec,
+        std::size_t* bytes) override
+    {
+        internal_->read_some(h, d, buf, token, ec, bytes);
+    }
+
+    void write_some(
+        std::coroutine_handle<> h,
+        capy::any_executor_ref d,
+        capy::any_bufref& buf,
+        std::stop_token token,
+        system::error_code* ec,
+        std::size_t* bytes) override
+    {
+        internal_->write_some(h, d, buf, token, ec, bytes);
+    }
+
+    win_socket_impl_internal* get_internal() const noexcept { return internal_.get(); }
+};
+
+//------------------------------------------------------------------------------
+
+/** Internal acceptor state for IOCP-based I/O.
+
+    This class contains the actual state for a listening socket, including
     the native socket handle and pending accept operation.
 
     @note Internal implementation detail. Users interact with acceptor class.
 */
-class win_acceptor_impl
-    : public acceptor::acceptor_impl
-    , public capy::intrusive_list<win_acceptor_impl>::node
+class win_acceptor_impl_internal
+    : public capy::intrusive_list<win_acceptor_impl_internal>::node
+    , public std::enable_shared_from_this<win_acceptor_impl_internal>
 {
     friend class win_sockets;
+    friend class win_acceptor_impl;
 
 public:
-    explicit win_acceptor_impl(win_sockets& svc) noexcept;
+    explicit win_acceptor_impl_internal(win_sockets& svc) noexcept;
+    ~win_acceptor_impl_internal();
 
-    void release() override;
+    void release_internal();
 
     void accept(
-        std::coroutine_handle<>,
+        capy::any_coro,
         capy::any_executor_ref,
         std::stop_token,
         system::error_code*,
-        io_object::io_object_impl**) override;
+        io_object::io_object_impl**);
 
     SOCKET native_handle() const noexcept { return socket_; }
     bool is_open() const noexcept { return socket_ != INVALID_SOCKET; }
@@ -191,6 +267,42 @@ public:
 private:
     win_sockets& svc_;
     SOCKET socket_ = INVALID_SOCKET;
+};
+
+//------------------------------------------------------------------------------
+
+/** Acceptor implementation wrapper for IOCP-based I/O.
+
+    This class is the public-facing acceptor_impl that holds a shared_ptr
+    to the internal state. The shared_ptr is hidden from the public interface.
+
+    @note Internal implementation detail. Users interact with acceptor class.
+*/
+class win_acceptor_impl
+    : public acceptor::acceptor_impl
+    , public capy::intrusive_list<win_acceptor_impl>::node
+{
+    std::shared_ptr<win_acceptor_impl_internal> internal_;
+
+public:
+    explicit win_acceptor_impl(std::shared_ptr<win_acceptor_impl_internal> internal) noexcept
+        : internal_(std::move(internal))
+    {
+    }
+
+    void release() override;
+
+    void accept(
+        std::coroutine_handle<> h,
+        capy::any_executor_ref d,
+        std::stop_token token,
+        system::error_code* ec,
+        io_object::io_object_impl** impl_out) override
+    {
+        internal_->accept(h, d, token, ec, impl_out);
+    }
+
+    win_acceptor_impl_internal* get_internal() const noexcept { return internal_.get(); }
 };
 
 //------------------------------------------------------------------------------
@@ -235,34 +347,52 @@ public:
     /** Shut down the service. */
     void shutdown() override;
 
-    /** Create a new socket implementation. */
+    /** Create a new socket implementation wrapper.
+        The service owns the returned object.
+    */
     win_socket_impl& create_impl();
 
-    /** Destroy a socket implementation. */
+    /** Destroy a socket implementation wrapper.
+        Removes from tracking list and deletes.
+    */
     void destroy_impl(win_socket_impl& impl);
+
+    /** Unregister a socket implementation from the service list.
+        Called by the internal impl destructor.
+    */
+    void unregister_impl(win_socket_impl_internal& impl);
 
     /** Create and register a socket with the IOCP.
 
-        @param impl The socket implementation to initialize.
+        @param impl The socket implementation internal to initialize.
         @return Error code, or success.
     */
-    system::error_code open_socket(win_socket_impl& impl);
+    system::error_code open_socket(win_socket_impl_internal& impl);
 
-    /** Create a new acceptor implementation. */
+    /** Create a new acceptor implementation wrapper.
+        The service owns the returned object.
+    */
     win_acceptor_impl& create_acceptor_impl();
 
-    /** Destroy an acceptor implementation. */
+    /** Destroy an acceptor implementation wrapper.
+        Removes from tracking list and deletes.
+    */
     void destroy_acceptor_impl(win_acceptor_impl& impl);
+
+    /** Unregister an acceptor implementation from the service list.
+        Called by the internal impl destructor.
+    */
+    void unregister_acceptor_impl(win_acceptor_impl_internal& impl);
 
     /** Create, bind, and listen on an acceptor socket.
 
-        @param impl The acceptor implementation to initialize.
+        @param impl The acceptor implementation internal to initialize.
         @param ep The local endpoint to bind to.
         @param backlog The listen backlog.
         @return Error code, or success.
     */
     system::error_code open_acceptor(
-        win_acceptor_impl& impl,
+        win_acceptor_impl_internal& impl,
         endpoint ep,
         int backlog);
 
@@ -304,8 +434,10 @@ private:
     win_scheduler& sched_;
     overlapped_key overlapped_key_;
     win_mutex mutex_;
-    capy::intrusive_list<win_socket_impl> socket_list_;
-    capy::intrusive_list<win_acceptor_impl> acceptor_list_;
+    capy::intrusive_list<win_socket_impl_internal> socket_list_;
+    capy::intrusive_list<win_acceptor_impl_internal> acceptor_list_;
+    capy::intrusive_list<win_socket_impl> socket_wrapper_list_;
+    capy::intrusive_list<win_acceptor_impl> acceptor_wrapper_list_;
     void* iocp_;
     LPFN_CONNECTEX connect_ex_ = nullptr;
     LPFN_ACCEPTEX accept_ex_ = nullptr;

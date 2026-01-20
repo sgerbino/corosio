@@ -89,15 +89,25 @@ struct overlapped_op
         if (ec_out)
         {
             if (cancelled.load(std::memory_order_acquire))
-                *ec_out = make_error_code(system::errc::operation_canceled);
+            {
+                // Explicit cancellation via cancel() or stop_token
+                *ec_out = capy::error::canceled;
+            }
+            else if (error == ERROR_OPERATION_ABORTED)
+            {
+                // CancelIoEx or socket close caused abort
+                *ec_out = capy::error::canceled;
+            }
             else if (error != 0)
+            {
                 *ec_out = system::error_code(
                     static_cast<int>(error), system::system_category());
+            }
             else if (is_read_operation() && bytes_transferred == 0 && !empty_buffer)
             {
                 // EOF: 0 bytes transferred with no error indicates end of stream
                 // (but not if we intentionally read with an empty buffer)
-                *ec_out = make_error_code(capy::error::eof);
+                *ec_out = capy::error::eof;
             }
         }
 

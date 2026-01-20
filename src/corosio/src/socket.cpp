@@ -54,13 +54,17 @@ open()
         return; // Already open
 
     auto& svc = ctx_->use_service<socket_service>();
-    auto& impl = svc.create_impl();
-    impl_ = &impl;
+    auto& wrapper = svc.create_impl();
+    impl_ = &wrapper;
 
-    system::error_code ec = svc.open_socket(impl);
+#if defined(BOOST_COROSIO_BACKEND_IOCP)
+    system::error_code ec = svc.open_socket(*wrapper.get_internal());
+#elif defined(BOOST_COROSIO_BACKEND_EPOLL)
+    system::error_code ec = svc.open_socket(wrapper);
+#endif
     if (ec)
     {
-        impl.release();
+        wrapper.release();
         impl_ = nullptr;
         detail::throw_system_error(ec, "socket::open");
     }
@@ -73,7 +77,8 @@ close()
     if (!impl_)
         return; // Already closed
 
-    impl_->release();
+    auto* wrapper = static_cast<socket_impl_type*>(impl_);
+    wrapper->release();
     impl_ = nullptr;
 }
 
@@ -82,7 +87,11 @@ socket::
 cancel()
 {
     assert(impl_ != nullptr);
+#if defined(BOOST_COROSIO_BACKEND_IOCP)
+    static_cast<socket_impl_type*>(impl_)->get_internal()->cancel();
+#elif defined(BOOST_COROSIO_BACKEND_EPOLL)
     static_cast<socket_impl_type*>(impl_)->cancel();
+#endif
 }
 
 } // namespace corosio

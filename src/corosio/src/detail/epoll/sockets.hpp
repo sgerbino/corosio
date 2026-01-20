@@ -292,6 +292,16 @@ read_some(
 
     capy::mutable_buffer bufs[epoll_read_op::max_buffers];
     op.iovec_count = static_cast<int>(param.copy_to(bufs, epoll_read_op::max_buffers));
+
+    // Handle empty buffer: complete immediately with 0 bytes
+    if (op.iovec_count == 0)
+    {
+        op.empty_buffer_read = true;
+        op.complete(0, 0);
+        svc_.post(&op);
+        return;
+    }
+
     for (int i = 0; i < op.iovec_count; ++i)
     {
         op.iovecs[i].iov_base = bufs[i].data();
@@ -346,6 +356,15 @@ write_some(
 
     capy::mutable_buffer bufs[epoll_write_op::max_buffers];
     op.iovec_count = static_cast<int>(param.copy_to(bufs, epoll_write_op::max_buffers));
+
+    // Handle empty buffer: complete immediately with 0 bytes
+    if (op.iovec_count == 0)
+    {
+        op.complete(0, 0);
+        svc_.post(&op);
+        return;
+    }
+
     for (int i = 0; i < op.iovec_count; ++i)
     {
         op.iovecs[i].iov_base = bufs[i].data();

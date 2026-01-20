@@ -15,6 +15,126 @@
 #include "src/detail/iocp/scheduler.hpp"
 #include "src/detail/endpoint_convert.hpp"
 
+/*
+    Windows IOCP Socket Implementation Overview
+    ===========================================
+
+    This file implements asynchronous socket I/O using Windows I/O Completion
+    Ports (IOCP). Understanding the following concepts is essential for
+    maintaining this code.
+
+    IOCP Fundamentals
+    -----------------
+    IOCP is a kernel-managed queue for I/O completions. The flow is:
+
+    1. Associate a socket with the IOCP via CreateIoCompletionPort()
+    2. Start async I/O (WSARecv, WSASend, ConnectEx, AcceptEx) passing an
+       OVERLAPPED structure
+    3. The kernel performs the I/O asynchronously
+    4. When complete, the kernel posts a completion packet to the IOCP
+    5. GetQueuedCompletionStatus() dequeues completions for processing
+
+    Our overlapped_op derives from OVERLAPPED, so we can static_cast between
+    them. Each operation type (connect_op, read_op, write_op, accept_op)
+    contains all state needed for that I/O operation.
+
+    Completion Key Dispatch
+    -----------------------
+    Each socket is associated with a completion_key pointer when registered
+    with the IOCP. When a completion arrives, we dispatch through the key's
+    virtual on_completion() method. The overlapped_key handles socket I/O
+    completions by:
+
+    1. Casting the OVERLAPPED* back to overlapped_op*
+    2. Using InterlockedCompareExchange on ready_ to handle races
+    3. Calling complete() to store results, then operator() to resume
+
+    The ready_ flag handles a subtle race: an operation can complete
+    synchronously (returning immediately) but IOCP still posts a completion.
+    The first path to set ready_=1 wins and processes the completion.
+
+    Lifetime Management via shared_ptr (Hidden from Public Interface)
+    -----------------------------------------------------------------
+    The trickiest aspect is ensuring socket state stays alive while I/O is
+    pending. Consider: socket::close() is called while a read is in flight.
+    We must:
+
+    1. Cancel the I/O (CancelIoEx)
+    2. Close the socket handle (closesocket)
+    3. But the internal state CANNOT be destroyed yet - IOCP will still
+       deliver a completion packet for the cancelled I/O
+
+    We use a two-layer design to hide shared_ptr from the public interface:
+
+    1. win_socket_impl (wrapper) - what the socket class sees
+       - Derives from socket::socket_impl
+       - Holds shared_ptr<win_socket_impl_internal>
+       - Owned by win_sockets service (tracked via intrusive_list)
+       - Destroyed by release() which calls svc_.destroy_impl()
+
+    2. win_socket_impl_internal - actual state + operations
+       - Derives from enable_shared_from_this
+       - Contains socket handle, connect_op, read_op, write_op
+       - May outlive the wrapper if operations are pending
+
+    When I/O starts, operations capture shared_from_this() on the internal:
+       conn_.internal_ptr = shared_from_this()
+
+    When socket::close() is called:
+    1. wrapper->release() cancels I/O and closes socket handle
+    2. release() calls svc_.destroy_impl() which deletes the wrapper
+    3. Internal may still be alive if operations hold refs
+    4. When operation completes, internal_ptr.reset() releases the ref
+    5. If that was the last ref, internal is destroyed
+
+    Key Invariants
+    --------------
+    1. Operations hold shared_ptr<internal> ONLY during active I/O (set at
+       I/O start, cleared in operator())
+
+    2. The win_sockets service owns both wrappers and tracks internals:
+       - socket_wrapper_list_ / acceptor_wrapper_list_ own wrappers
+       - socket_list_ / acceptor_list_ track internals for shutdown
+
+    3. Internal impl destructors call unregister_impl() to remove themselves
+       from the service's list
+
+    4. The socket/acceptor classes hold raw pointers to wrappers; wrappers
+       hold shared_ptr to internals. No shared_ptr in public headers.
+
+    5. For accept operations, a new wrapper is created by the service and
+       passed to the peer socket via impl_out. The peer socket calls
+       release() on close, which triggers destroy_impl().
+
+    Cancellation
+    ------------
+    Cancellation has two paths:
+
+    1. Explicit cancel(): Sets the cancelled flag and calls CancelIoEx().
+       The completion will arrive with ERROR_OPERATION_ABORTED.
+
+    2. Stop token: The stop_callback calls request_cancel() which does the
+       same thing. The stop_cb is reset in operator() before resuming.
+
+    Both paths result in the operation completing normally through IOCP,
+    just with an error code. The coroutine resumes and sees the cancellation.
+
+    Service Shutdown
+    ----------------
+    When the io_context shuts down, win_sockets::shutdown() closes all
+    sockets and removes them from the tracking list, then deletes any
+    remaining wrappers. Internals may still be alive if operations hold
+    shared_ptrs. This is fine - they'll be destroyed when all references
+    are released.
+
+    Thread Safety
+    -------------
+    - Multiple threads can call GetQueuedCompletionStatus() on the same IOCP
+    - The mutex_ protects the socket/acceptor lists during create/unregister
+    - Individual socket operations are NOT thread-safe - users must not
+      have concurrent operations of the same type on a single socket
+*/
+
 namespace boost {
 namespace corosio {
 namespace detail {
@@ -62,13 +182,16 @@ operator()()
     if (ec_out)
     {
         if (cancelled.load(std::memory_order_acquire))
-            *ec_out = make_error_code(system::errc::operation_canceled);
+            *ec_out = capy::error::canceled;
+        else if (error == ERROR_OPERATION_ABORTED)
+            // CancelIoEx or socket close caused abort
+            *ec_out = capy::error::canceled;
         else if (error != 0)
             *ec_out = system::error_code(
                 static_cast<int>(error), system::system_category());
     }
 
-    if (success && accepted_socket != INVALID_SOCKET && peer_impl)
+    if (success && accepted_socket != INVALID_SOCKET && peer_wrapper)
     {
         // Update accept context for proper socket behavior
         ::setsockopt(
@@ -78,14 +201,15 @@ operator()()
             reinterpret_cast<char*>(&listen_socket),
             sizeof(SOCKET));
 
-        // Transfer socket handle to peer impl
-        peer_impl->set_socket(accepted_socket);
+        // Transfer socket handle to peer impl internal
+        peer_wrapper->get_internal()->set_socket(accepted_socket);
         accepted_socket = INVALID_SOCKET;
 
-        // Pass impl to awaitable for assignment to peer socket
+        // Pass wrapper to awaitable for assignment to peer socket
         if (impl_out)
-            *impl_out = peer_impl;
-        peer_impl = nullptr;
+            *impl_out = peer_wrapper;
+        // Note: peer_wrapper ownership transfers to the peer socket
+        // Don't delete it here
     }
     else
     {
@@ -96,17 +220,24 @@ operator()()
             accepted_socket = INVALID_SOCKET;
         }
 
-        if (peer_impl)
-        {
-            peer_impl->release();
-            peer_impl = nullptr;
-        }
+        // Release the peer wrapper on failure
+        peer_wrapper->release();
+        peer_wrapper = nullptr;
 
         if (impl_out)
             *impl_out = nullptr;
     }
 
-    d.dispatch(h).resume();
+    // Save h and d before resetting acceptor_ptr, because acceptor_ptr
+    // may be the last reference to the internal, and this accept_op is a
+    // member of the internal. Destroying the internal would invalidate h and d.
+    auto saved_h = h;
+    auto saved_d = d;
+
+    // Release the acceptor reference now that I/O is complete
+    acceptor_ptr.reset();
+
+    saved_d.dispatch(saved_h).resume();
 }
 
 void
@@ -122,43 +253,67 @@ do_cancel() noexcept
 }
 
 void
-read_op::
-do_cancel() noexcept
+connect_op::
+operator()()
 {
-    if (impl.is_open())
-    {
-        ::CancelIoEx(
-            reinterpret_cast<HANDLE>(impl.native_handle()),
-            this);
-    }
-}
-
-void
-write_op::
-do_cancel() noexcept
-{
-    if (impl.is_open())
-    {
-        ::CancelIoEx(
-            reinterpret_cast<HANDLE>(impl.native_handle()),
-            this);
-    }
+    overlapped_op::operator()();
+    internal_ptr.reset();
 }
 
 void
 connect_op::
 do_cancel() noexcept
 {
-    if (impl.is_open())
+    if (internal.is_open())
     {
         ::CancelIoEx(
-            reinterpret_cast<HANDLE>(impl.native_handle()),
+            reinterpret_cast<HANDLE>(internal.native_handle()),
             this);
     }
 }
 
-win_socket_impl::
-win_socket_impl(win_sockets& svc) noexcept
+void
+read_op::
+operator()()
+{
+    overlapped_op::operator()();
+    internal_ptr.reset();
+}
+
+void
+read_op::
+do_cancel() noexcept
+{
+    if (internal.is_open())
+    {
+        ::CancelIoEx(
+            reinterpret_cast<HANDLE>(internal.native_handle()),
+            this);
+    }
+}
+
+void
+write_op::
+operator()()
+{
+    overlapped_op::operator()();
+    internal_ptr.reset();
+}
+
+void
+write_op::
+do_cancel() noexcept
+{
+    if (internal.is_open())
+    {
+        ::CancelIoEx(
+            reinterpret_cast<HANDLE>(internal.native_handle()),
+            this);
+    }
+}
+
+win_socket_impl_internal::
+win_socket_impl_internal(win_sockets& svc) noexcept
     : svc_(svc)
     , conn_(*this)
     , rd_(*this)
@@ -166,16 +321,30 @@ win_socket_impl(win_sockets& svc) noexcept
 {
 }
 
-void
-win_socket_impl::
-release()
+win_socket_impl_internal::
+~win_socket_impl_internal()
 {
-    close_socket();
-    svc_.destroy_impl(*this);
+    svc_.unregister_impl(*this);
 }
 
 void
-win_socket_impl::
+win_socket_impl_internal::
+release_internal()
+{
+    // Cancel pending I/O before closing to ensure operations
+    // complete with ERROR_OPERATION_ABORTED via IOCP
+    if (socket_ != INVALID_SOCKET)
+    {
+        ::CancelIoEx(
+            reinterpret_cast<HANDLE>(socket_),
+            nullptr);
+    }
+    close_socket();
+    // Destruction happens automatically when all shared_ptrs are released
+}
+
+void
+win_socket_impl_internal::
 connect(
     capy::any_coro h,
     capy::any_executor_ref d,
@@ -183,6 +352,9 @@ connect(
     std::stop_token token,
     system::error_code* ec)
 {
+    // Keep internal alive during I/O
+    conn_.internal_ptr = shared_from_this();
+
     auto& op = conn_;
     op.reset();
     op.h = h;
@@ -245,7 +417,7 @@ connect(
 }
 
 void
-win_socket_impl::
+win_socket_impl_internal::
 read_some(
     capy::any_coro h,
     capy::any_executor_ref d,
@@ -254,6 +426,9 @@ read_some(
     system::error_code* ec,
     std::size_t* bytes_out)
 {
+    // Keep internal alive during I/O
+    rd_.internal_ptr = shared_from_this();
+
     auto& op = rd_;
     op.reset();
     op.h = h;
@@ -316,7 +491,7 @@ read_some(
 }
 
 void
-win_socket_impl::
+win_socket_impl_internal::
 write_some(
     capy::any_coro h,
     capy::any_executor_ref d,
@@ -325,6 +500,9 @@ write_some(
     system::error_code* ec,
     std::size_t* bytes_out)
 {
+    // Keep internal alive during I/O
+    wr_.internal_ptr = shared_from_this();
+
     auto& op = wr_;
     op.reset();
     op.h = h;
@@ -384,7 +562,7 @@ write_some(
 }
 
 void
-win_socket_impl::
+win_socket_impl_internal::
 cancel() noexcept
 {
     if (socket_ != INVALID_SOCKET)
@@ -400,13 +578,26 @@ cancel() noexcept
 }
 
 void
-win_socket_impl::
+win_socket_impl_internal::
 close_socket() noexcept
 {
     if (socket_ != INVALID_SOCKET)
     {
         ::closesocket(socket_);
         socket_ = INVALID_SOCKET;
+    }
+}
+
+void
+win_socket_impl::
+release()
+{
+    if (internal_)
+    {
+        auto& svc = internal_->svc_;
+        internal_->release_internal();
+        internal_.reset();
+        svc.destroy_impl(*this);
     }
 }
 
@@ -430,18 +621,32 @@ shutdown()
 {
     std::lock_guard<win_mutex> lock(mutex_);
 
+    // Just close sockets and remove from list
+    // The shared_ptrs held by socket objects and operations will handle destruction
     for (auto* impl = socket_list_.pop_front(); impl != nullptr;
          impl = socket_list_.pop_front())
     {
         impl->close_socket();
-        delete impl;
+        // Note: impl may still be alive if operations hold shared_ptr
     }
 
     for (auto* impl = acceptor_list_.pop_front(); impl != nullptr;
          impl = acceptor_list_.pop_front())
     {
         impl->close_socket();
-        delete impl;
+    }
+
+    // Cleanup wrappers
+    for (auto* w = socket_wrapper_list_.pop_front(); w != nullptr;
+         w = socket_wrapper_list_.pop_front())
+    {
+        delete w;
+    }
+
+    for (auto* w = acceptor_wrapper_list_.pop_front(); w != nullptr;
+         w = acceptor_wrapper_list_.pop_front())
+    {
+        delete w;
     }
 }
 
@@ -449,14 +654,21 @@ win_socket_impl&
 win_sockets::
 create_impl()
 {
-    auto* impl = new win_socket_impl(*this);
+    auto internal = std::make_shared<win_socket_impl_internal>(*this);
 
     {
         std::lock_guard<win_mutex> lock(mutex_);
-        socket_list_.push_back(impl);
+        socket_list_.push_back(internal.get());
     }
 
-    return *impl;
+    auto* wrapper = new win_socket_impl(std::move(internal));
+
+    {
+        std::lock_guard<win_mutex> lock(mutex_);
+        socket_wrapper_list_.push_back(wrapper);
+    }
+
+    return *wrapper;
 }
 
 void
@@ -465,15 +677,22 @@ destroy_impl(win_socket_impl& impl)
 {
     {
         std::lock_guard<win_mutex> lock(mutex_);
-        socket_list_.remove(&impl);
+        socket_wrapper_list_.remove(&impl);
     }
-
     delete &impl;
+}
+
+void
+win_sockets::
+unregister_impl(win_socket_impl_internal& impl)
+{
+    std::lock_guard<win_mutex> lock(mutex_);
+    socket_list_.remove(&impl);
 }
 
 system::error_code
 win_sockets::
-open_socket(win_socket_impl& impl)
+open_socket(win_socket_impl_internal& impl)
 {
     impl.close_socket();
 
@@ -584,14 +803,21 @@ win_acceptor_impl&
 win_sockets::
 create_acceptor_impl()
 {
-    auto* impl = new win_acceptor_impl(*this);
+    auto internal = std::make_shared<win_acceptor_impl_internal>(*this);
 
     {
         std::lock_guard<win_mutex> lock(mutex_);
-        acceptor_list_.push_back(impl);
+        acceptor_list_.push_back(internal.get());
     }
 
-    return *impl;
+    auto* wrapper = new win_acceptor_impl(std::move(internal));
+
+    {
+        std::lock_guard<win_mutex> lock(mutex_);
+        acceptor_wrapper_list_.push_back(wrapper);
+    }
+
+    return *wrapper;
 }
 
 void
@@ -600,16 +826,23 @@ destroy_acceptor_impl(win_acceptor_impl& impl)
 {
     {
         std::lock_guard<win_mutex> lock(mutex_);
-        acceptor_list_.remove(&impl);
+        acceptor_wrapper_list_.remove(&impl);
     }
-
     delete &impl;
+}
+
+void
+win_sockets::
+unregister_acceptor_impl(win_acceptor_impl_internal& impl)
+{
+    std::lock_guard<win_mutex> lock(mutex_);
+    acceptor_list_.remove(&impl);
 }
 
 system::error_code
 win_sockets::
 open_acceptor(
-    win_acceptor_impl& impl,
+    win_acceptor_impl_internal& impl,
     endpoint ep,
     int backlog)
 {
@@ -681,22 +914,36 @@ open_acceptor(
     return {};
 }
 
-win_acceptor_impl::
-win_acceptor_impl(win_sockets& svc) noexcept
+win_acceptor_impl_internal::
+win_acceptor_impl_internal(win_sockets& svc) noexcept
     : svc_(svc)
 {
 }
 
-void
-win_acceptor_impl::
-release()
+win_acceptor_impl_internal::
+~win_acceptor_impl_internal()
 {
-    close_socket();
-    svc_.destroy_acceptor_impl(*this);
+    svc_.unregister_acceptor_impl(*this);
 }
 
 void
-win_acceptor_impl::
+win_acceptor_impl_internal::
+release_internal()
+{
+    // Cancel pending I/O before closing to ensure operations
+    // complete with ERROR_OPERATION_ABORTED via IOCP
+    if (socket_ != INVALID_SOCKET)
+    {
+        ::CancelIoEx(
+            reinterpret_cast<HANDLE>(socket_),
+            nullptr);
+    }
+    close_socket();
+    // Destruction happens automatically when all shared_ptrs are released
+}
+
+void
+win_acceptor_impl_internal::
 accept(
     capy::any_coro h,
     capy::any_executor_ref d,
@@ -704,6 +951,9 @@ accept(
     system::error_code* ec,
     io_object::io_object_impl** impl_out)
 {
+    // Keep acceptor internal alive during I/O
+    acc_.acceptor_ptr = shared_from_this();
+
     auto& op = acc_;
     op.reset();
     op.h = h;
@@ -712,8 +962,8 @@ accept(
     op.impl_out = impl_out;
     op.start(token);
 
-    // Create impl for the peer socket
-    auto& peer_impl = svc_.create_impl();
+    // Create wrapper for the peer socket (service owns it)
+    auto& peer_wrapper = svc_.create_impl();
 
     // Create the accepted socket
     SOCKET accepted = ::WSASocketW(
@@ -726,7 +976,7 @@ accept(
 
     if (accepted == INVALID_SOCKET)
     {
-        peer_impl.release();
+        peer_wrapper.release();
         op.error = ::WSAGetLastError();
         svc_.post(&op);
         return;
@@ -742,7 +992,7 @@ accept(
     {
         DWORD err = ::GetLastError();
         ::closesocket(accepted);
-        peer_impl.release();
+        peer_wrapper.release();
         op.error = err;
         svc_.post(&op);
         return;
@@ -754,16 +1004,16 @@ accept(
 
     // Set up the accept operation
     op.accepted_socket = accepted;
-    op.peer_impl = &peer_impl;
+    op.peer_wrapper = &peer_wrapper;
     op.listen_socket = socket_;
 
     auto accept_ex = svc_.accept_ex();
     if (!accept_ex)
     {
         ::closesocket(accepted);
-        peer_impl.release();
+        peer_wrapper.release();
+        op.peer_wrapper = nullptr;
         op.accepted_socket = INVALID_SOCKET;
-        op.peer_impl = nullptr;
         op.error = WSAEOPNOTSUPP;
         svc_.post(&op);
         return;
@@ -789,9 +1039,9 @@ accept(
         {
             svc_.work_finished();
             ::closesocket(accepted);
-            peer_impl.release();
+            peer_wrapper.release();
+            op.peer_wrapper = nullptr;
             op.accepted_socket = INVALID_SOCKET;
-            op.peer_impl = nullptr;
             op.error = err;
             svc_.post(&op);
             return;
@@ -806,7 +1056,7 @@ accept(
 }
 
 void
-win_acceptor_impl::
+win_acceptor_impl_internal::
 cancel() noexcept
 {
     if (socket_ != INVALID_SOCKET)
@@ -820,13 +1070,26 @@ cancel() noexcept
 }
 
 void
-win_acceptor_impl::
+win_acceptor_impl_internal::
 close_socket() noexcept
 {
     if (socket_ != INVALID_SOCKET)
     {
         ::closesocket(socket_);
         socket_ = INVALID_SOCKET;
+    }
+}
+
+void
+win_acceptor_impl::
+release()
+{
+    if (internal_)
+    {
+        auto& svc = internal_->svc_;
+        internal_->release_internal();
+        internal_.reset();
+        svc.destroy_acceptor_impl(*this);
     }
 }
 

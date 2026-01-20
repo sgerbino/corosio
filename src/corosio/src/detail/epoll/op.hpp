@@ -170,12 +170,20 @@ struct epoll_read_op : epoll_op
     iovec iovecs[max_buffers];
     int iovec_count = 0;
 
-    bool is_read_operation() const noexcept override { return true; }
+    // True when 0 bytes is due to empty buffer, not EOF
+    bool empty_buffer_read = false;
+
+    // EOF only applies when we actually tried to read something
+    bool is_read_operation() const noexcept override
+    {
+        return !empty_buffer_read;
+    }
 
     void reset() noexcept
     {
         epoll_op::reset();
         iovec_count = 0;
+        empty_buffer_read = false;
     }
 
     void perform_io() noexcept override

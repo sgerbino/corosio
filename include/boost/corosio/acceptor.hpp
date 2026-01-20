@@ -27,6 +27,7 @@
 #include <concepts>
 #include <coroutine>
 #include <cstddef>
+#include <memory>
 #include <stop_token>
 #include <type_traits>
 
@@ -275,7 +276,6 @@ public:
     };
 
 private:
-
     inline acceptor_impl& get() const noexcept
     {
         return *static_cast<acceptor_impl*>(impl_);

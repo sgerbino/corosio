@@ -20,6 +20,76 @@
 #include <csignal>
 #include <mutex>
 
+/*
+    Windows Signal Handling Implementation
+    ======================================
+
+    This file implements POSIX-style signal handling on Windows, integrated with
+    the IOCP scheduler. Windows lacks native async signal support, so we use the
+    C standard library's signal() function and manually bridge signals into the
+    completion-based I/O model.
+
+    Architecture Overview
+    ---------------------
+
+    Three layers manage signal registrations:
+
+    1. signal_state (global singleton)
+       - Tracks the global service list and per-signal registration counts
+       - Owns the mutex that protects signal handler installation/removal
+       - Multiple execution_contexts share this; each gets a win_signals entry
+
+    2. win_signals (one per execution_context)
+       - Maintains registrations_[] table indexed by signal number
+       - Each slot is a doubly-linked list of all signal_registrations for that signal
+       - Also maintains impl_list_ of all win_signal_impl objects it owns
+
+    3. win_signal_impl (one per signal_set)
+       - Owns a singly-linked list (sorted by signal number) of signal_registrations
+       - Contains the pending_op_ used for async_wait operations
+
+    The signal_registration struct links these together:
+       - next_in_set / (implicit via sorted order): links registrations within one signal_set
+       - prev_in_table / next_in_table: links registrations for the same signal across sets
+
+    Signal Delivery Flow
+    --------------------
+
+    1. corosio_signal_handler() (C handler, must be async-signal-safe)
+       - Called by the OS when a signal arrives
+       - Delegates to deliver_signal() and re-registers itself (Windows resets to SIG_DFL)
+
+    2. deliver_signal() broadcasts to all win_signals services:
+       - If a signal_set is waiting (impl->waiting_ == true), complete it immediately
+         by posting the signal_op to the scheduler
+       - Otherwise, increment reg->undelivered to queue the signal for later
+
+    3. start_wait() checks for queued signals first:
+       - If undelivered > 0, consume one and post immediate completion
+       - Otherwise, set waiting_ = true and call on_work_started() to keep context alive
+
+    Locking Protocol
+    ----------------
+
+    Two mutex levels exist (must be acquired in this order to avoid deadlock):
+       1. signal_state::mutex - protects handler registration and service list
+       2. win_signals::mutex_ - protects per-service registration tables and wait state
+
+    deliver_signal() acquires both locks because it iterates the global service list
+    and modifies per-service state.
+
+    Work Tracking
+    -------------
+
+    When waiting for a signal:
+       - start_wait() calls sched_.on_work_started() to keep io_context::run() alive
+       - signal_op::svc is set to point to the service
+       - signal_op::operator()() calls work_finished() after resuming the coroutine
+
+    If a signal was already queued (undelivered > 0), no work tracking is needed
+    because completion is posted immediately.
+*/
+
 namespace boost {
 namespace corosio {
 namespace detail {
@@ -45,12 +115,15 @@ signal_state* get_signal_state()
     return &state;
 }
 
-// C signal handler - must be async-signal-safe
+// C signal handler. Note: On POSIX this would need to be async-signal-safe,
+// but Windows signal handling is synchronous (runs on the faulting thread)
+// so we can safely acquire locks here.
 extern "C" void corosio_signal_handler(int signal_number)
 {
     win_signals::deliver_signal(signal_number);
 
-    // Re-register handler (Windows resets to SIG_DFL after each signal)
+    // Windows uses "one-shot" semantics: the handler reverts to SIG_DFL
+    // after each delivery. Re-register to maintain our handler.
     ::signal(signal_number, corosio_signal_handler);
 }
 
@@ -71,13 +144,15 @@ operator()()
     if (signal_out)
         *signal_out = signal_number;
 
-    // Capture svc before resuming (coro may destroy us)
+    // Capture svc before resuming: the coroutine may destroy this op,
+    // so we cannot access any members after resume() returns
     auto* service = svc;
     svc = nullptr;
 
     d.dispatch(h).resume();
 
-    // Balance the on_work_started() from start_wait
+    // Balance the on_work_started() from start_wait. When svc is null
+    // (immediate completion from queued signal), no work tracking occurred.
     if (service)
         service->work_finished();
 }
@@ -446,7 +521,9 @@ deliver_signal(int signal_number)
     signal_state* state = get_signal_state();
     std::lock_guard<std::mutex> lock(state->mutex);
 
-    // Deliver to all services
+    // Deliver to all services. We hold state->mutex while iterating, and
+    // acquire each service's mutex_ inside (matching the lock order used by
+    // add_signal/remove_signal) to safely read and modify registration state.
     win_signals* service = state->service_list;
     while (service)
     {
@@ -467,7 +544,8 @@ deliver_signal(int signal_number)
             }
             else
             {
-                // Queue for later
+                // No waiter yet; increment undelivered so start_wait() will
+                // find this signal immediately without blocking
                 ++reg->undelivered;
             }
 

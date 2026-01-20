@@ -486,15 +486,18 @@ struct socket_test
                 bool read_done = false;
                 system::error_code read_ec;
 
-                capy::run_async(ioc.get_executor())(
-                    [&b, &read_done, &read_ec]() -> capy::task<>
-                    {
-                        char buf[32];
-                        auto [ec, n] = co_await b.read_some(
-                            capy::mutable_buffer(buf, sizeof(buf)));
-                        read_ec = ec;
-                        read_done = true;
-                    }());
+                // Store lambda in variable to ensure it outlives the coroutine.
+                // Lambda coroutines capture 'this' by reference, so the lambda
+                // must remain alive while the coroutine is suspended.
+                auto nested_coro = [&b, &read_done, &read_ec]() -> capy::task<>
+                {
+                    char buf[32];
+                    auto [ec, n] = co_await b.read_some(
+                        capy::mutable_buffer(buf, sizeof(buf)));
+                    read_ec = ec;
+                    read_done = true;
+                };
+                capy::run_async(ioc.get_executor())(nested_coro());
 
                 // Wait for timer then cancel
                 co_await t.wait();
@@ -529,15 +532,18 @@ struct socket_test
                 bool read_done = false;
                 system::error_code read_ec;
 
-                capy::run_async(ioc.get_executor())(
-                    [&b, &read_done, &read_ec]() -> capy::task<>
-                    {
-                        char buf[32];
-                        auto [ec, n] = co_await b.read_some(
-                            capy::mutable_buffer(buf, sizeof(buf)));
-                        read_ec = ec;
-                        read_done = true;
-                    }());
+                // Store lambda in variable to ensure it outlives the coroutine.
+                // Lambda coroutines capture 'this' by reference, so the lambda
+                // must remain alive while the coroutine is suspended.
+                auto nested_coro = [&b, &read_done, &read_ec]() -> capy::task<>
+                {
+                    char buf[32];
+                    auto [ec, n] = co_await b.read_some(
+                        capy::mutable_buffer(buf, sizeof(buf)));
+                    read_ec = ec;
+                    read_done = true;
+                };
+                capy::run_async(ioc.get_executor())(nested_coro());
 
                 // Wait then close the socket
                 co_await t.wait();
@@ -764,10 +770,9 @@ struct socket_test
         testReadAfterPeerClose();
         testWriteAfterPeerClose();
 
-        // Cancellation - temporarily disabled due to crash
-        // TODO: investigate cancellation crash
-        //testCancelRead();
-        //testCloseWhileReading();
+        // Cancellation
+        testCancelRead();
+        testCloseWhileReading();
 
         // Composed operations
         testReadFull();

@@ -11,6 +11,10 @@
 #include <boost/corosio/acceptor.hpp>
 
 #include <boost/corosio/io_context.hpp>
+#include <boost/corosio/timer.hpp>
+#include <boost/capy/cond.hpp>
+#include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/task.hpp>
 
 #include "test_suite.hpp"
 
@@ -19,7 +23,7 @@ namespace corosio {
 
 //------------------------------------------------
 // Acceptor-specific tests
-// Focus: acceptor construction and basic interface
+// Focus: acceptor construction, basic interface, and cancellation
 //------------------------------------------------
 
 struct acceptor_test
@@ -83,6 +87,109 @@ struct acceptor_test
         acc2.close();
     }
 
+    //------------------------------------------------
+    // Cancellation Tests
+    //------------------------------------------------
+
+    void
+    testCancelAccept()
+    {
+        // Tests that cancel() properly cancels a pending accept operation.
+        // This exercises the acceptor_ptr shared_ptr that keeps the
+        // acceptor impl alive until IOCP delivers the cancellation.
+        io_context ioc;
+        acceptor acc(ioc);
+        acc.listen(endpoint(0));
+
+        // These must outlive the coroutines
+        bool accept_done = false;
+        system::error_code accept_ec;
+        socket peer(ioc);
+
+        capy::run_async(ioc.get_executor())(
+            [&]() -> capy::task<>
+            {
+                // Start a timer to cancel the accept
+                timer t(ioc);
+                t.expires_after(std::chrono::milliseconds(50));
+
+                // Launch accept that will block (no incoming connections)
+                // Store lambda in variable to ensure it outlives the coroutine.
+                auto nested_coro = [&acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
+                {
+                    auto [ec] = co_await acc.accept(peer);
+                    accept_ec = ec;
+                    accept_done = true;
+                };
+                capy::run_async(ioc.get_executor())(nested_coro());
+
+                // Wait for timer then cancel
+                co_await t.wait();
+                acc.cancel();
+
+                // Wait for accept to complete
+                timer t2(ioc);
+                t2.expires_after(std::chrono::milliseconds(50));
+                co_await t2.wait();
+
+                BOOST_TEST(accept_done);
+                BOOST_TEST(accept_ec == capy::cond::canceled);
+            }());
+
+        ioc.run();
+        acc.close();
+    }
+
+    void
+    testCloseWhilePendingAccept()
+    {
+        // Tests that close() properly handles a pending accept operation.
+        // This is the key test for the cancel/destruction race condition:
+        // when close() is called, CancelIoEx is invoked, the socket is closed,
+        // but the impl must stay alive until IOCP delivers the cancellation.
+        // The acceptor_ptr shared_ptr in accept_op ensures this.
+        io_context ioc;
+        acceptor acc(ioc);
+        acc.listen(endpoint(0));
+
+        socket peer(ioc);
+        bool accept_done = false;
+        system::error_code accept_ec;
+
+        // Pattern from socket tests: run a single coroutine that manages
+        // the nested coroutine and close operation
+        capy::run_async(ioc.get_executor())(
+            [&ioc, &acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
+            {
+                timer t(ioc);
+                t.expires_after(std::chrono::milliseconds(50));
+
+                // Store lambda in variable to ensure it outlives the coroutine.
+                // Lambda coroutines capture 'this' by reference, so the lambda
+                // must remain alive while the coroutine is suspended.
+                auto nested_coro = [&acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
+                {
+                    auto [ec] = co_await acc.accept(peer);
+                    accept_ec = ec;
+                    accept_done = true;
+                };
+                capy::run_async(ioc.get_executor())(nested_coro());
+
+                // Wait then close the acceptor
+                co_await t.wait();
+                acc.close();
+
+                timer t2(ioc);
+                t2.expires_after(std::chrono::milliseconds(50));
+                co_await t2.wait();
+
+                BOOST_TEST(accept_done);
+                BOOST_TEST(accept_ec == capy::cond::canceled);
+            }());
+
+        ioc.run();
+    }
+
     void
     run()
     {
@@ -90,6 +197,10 @@ struct acceptor_test
         testListen();
         testMoveConstruct();
         testMoveAssign();
+
+        // Cancellation
+        testCancelAccept();
+        testCloseWhilePendingAccept();
     }
 };
 

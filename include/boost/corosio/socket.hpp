@@ -27,6 +27,7 @@
 #include <concepts>
 #include <coroutine>
 #include <cstddef>
+#include <memory>
 #include <stop_token>
 #include <type_traits>
 

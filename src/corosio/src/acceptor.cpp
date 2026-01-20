@@ -56,13 +56,18 @@ listen(endpoint ep, int backlog)
         close();
 
     auto& svc = ctx_->use_service<acceptor_service>();
-    auto& impl = svc.create_acceptor_impl();
-    impl_ = &impl;
+    auto& wrapper = svc.create_acceptor_impl();
+    impl_ = &wrapper;
 
-    system::error_code ec = svc.open_acceptor(impl, ep, backlog);
+#if defined(BOOST_COROSIO_BACKEND_IOCP)
+    system::error_code ec = svc.open_acceptor(
+        *wrapper.get_internal(), ep, backlog);
+#elif defined(BOOST_COROSIO_BACKEND_EPOLL)
+    system::error_code ec = svc.open_acceptor(wrapper, ep, backlog);
+#endif
     if (ec)
     {
-        impl.release();
+        wrapper.release();
         impl_ = nullptr;
         detail::throw_system_error(ec, "acceptor::listen");
     }
@@ -75,7 +80,8 @@ close()
     if (!impl_)
         return;
 
-    impl_->release();
+    auto* wrapper = static_cast<acceptor_impl_type*>(impl_);
+    wrapper->release();
     impl_ = nullptr;
 }
 
@@ -84,7 +90,11 @@ acceptor::
 cancel()
 {
     assert(impl_ != nullptr);
+#if defined(BOOST_COROSIO_BACKEND_IOCP)
+    static_cast<acceptor_impl_type*>(impl_)->get_internal()->cancel();
+#elif defined(BOOST_COROSIO_BACKEND_EPOLL)
     static_cast<acceptor_impl_type*>(impl_)->cancel();
+#endif
 }
 
 } // namespace corosio
