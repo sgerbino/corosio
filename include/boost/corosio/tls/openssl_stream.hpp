@@ -57,6 +57,12 @@ public:
         @param ctx The TLS context containing configuration.
     */
     openssl_stream( io_stream& stream, tls::context ctx );
+
+    /** Destructor.
+
+        Releases the underlying OpenSSL resources.
+    */
+    ~openssl_stream();
 };
 
 } // namespace corosio

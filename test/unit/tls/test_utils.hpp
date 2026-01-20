@@ -266,30 +266,32 @@ run_tls_test(
     auto client = make_client( s1, client_ctx );
     auto server = make_server( s2, server_ctx );
 
-    // Concurrent handshakes
-    capy::run_async( ioc.get_executor() )(
-        [&client]() -> capy::task<>
-        {
-            auto [ec] = co_await client.handshake( tls_stream::client );
-            BOOST_TEST( !ec );
-        }() );
+    // Store lambdas in named variables before invoking - anonymous lambda + immediate
+    // invocation pattern [...](){}() can cause capture corruption with run_async
+    auto client_task = [&client]() -> capy::task<>
+    {
+        auto [ec] = co_await client.handshake( tls_stream::client );
+        BOOST_TEST( !ec );
+    };
 
-    capy::run_async( ioc.get_executor() )(
-        [&server]() -> capy::task<>
-        {
-            auto [ec] = co_await server.handshake( tls_stream::server );
-            BOOST_TEST( !ec );
-        }() );
+    auto server_task = [&server]() -> capy::task<>
+    {
+        auto [ec] = co_await server.handshake( tls_stream::server );
+        BOOST_TEST( !ec );
+    };
+
+    capy::run_async( ioc.get_executor() )( client_task() );
+    capy::run_async( ioc.get_executor() )( server_task() );
 
     ioc.run();
     ioc.restart();
 
     // Bidirectional data transfer
-    capy::run_async( ioc.get_executor() )(
-        [&client, &server]() -> capy::task<>
-        {
-            co_await test_stream( client, server );
-        }() );
+    auto transfer_task = [&client, &server]() -> capy::task<>
+    {
+        co_await test_stream( client, server );
+    };
+    capy::run_async( ioc.get_executor() )( transfer_task() );
 
     ioc.run();
 
@@ -326,30 +328,32 @@ run_tls_test_no_shutdown(
     auto client = make_client( s1, client_ctx );
     auto server = make_server( s2, server_ctx );
 
-    // Concurrent handshakes
-    capy::run_async( ioc.get_executor() )(
-        [&client]() -> capy::task<>
-        {
-            auto [ec] = co_await client.handshake( tls_stream::client );
-            BOOST_TEST( !ec );
-        }() );
+    // Store lambdas in named variables before invoking - anonymous lambda + immediate
+    // invocation pattern [...](){}() can cause capture corruption with run_async
+    auto client_task = [&client]() -> capy::task<>
+    {
+        auto [ec] = co_await client.handshake( tls_stream::client );
+        BOOST_TEST( !ec );
+    };
 
-    capy::run_async( ioc.get_executor() )(
-        [&server]() -> capy::task<>
-        {
-            auto [ec] = co_await server.handshake( tls_stream::server );
-            BOOST_TEST( !ec );
-        }() );
+    auto server_task = [&server]() -> capy::task<>
+    {
+        auto [ec] = co_await server.handshake( tls_stream::server );
+        BOOST_TEST( !ec );
+    };
+
+    capy::run_async( ioc.get_executor() )( client_task() );
+    capy::run_async( ioc.get_executor() )( server_task() );
 
     ioc.run();
     ioc.restart();
 
     // Bidirectional data transfer
-    capy::run_async( ioc.get_executor() )(
-        [&client, &server]() -> capy::task<>
-        {
-            co_await test_stream( client, server );
-        }() );
+    auto transfer_task = [&client, &server]() -> capy::task<>
+    {
+        co_await test_stream( client, server );
+    };
+    capy::run_async( ioc.get_executor() )( transfer_task() );
 
     ioc.run();
 
@@ -389,44 +393,46 @@ run_tls_test_fail(
     bool client_done = false;
     bool server_done = false;
 
-    // Concurrent handshakes (at least one should fail)
-    capy::run_async( ioc.get_executor() )(
-        [&client, &client_failed, &client_done]() -> capy::task<>
-        {
-            auto [ec] = co_await client.handshake( tls_stream::client );
-            if( ec )
-                client_failed = true;
-            client_done = true;
-        }() );
+    // Store lambdas in named variables before invoking - anonymous lambda + immediate
+    // invocation pattern [...](){}() can cause capture corruption with run_async
+    auto client_task = [&client, &client_failed, &client_done]() -> capy::task<>
+    {
+        auto [ec] = co_await client.handshake( tls_stream::client );
+        if( ec )
+            client_failed = true;
+        client_done = true;
+    };
 
-    capy::run_async( ioc.get_executor() )(
-        [&server, &server_failed, &server_done]() -> capy::task<>
-        {
-            auto [ec] = co_await server.handshake( tls_stream::server );
-            if( ec )
-                server_failed = true;
-            server_done = true;
-        }() );
+    auto server_task = [&server, &server_failed, &server_done]() -> capy::task<>
+    {
+        auto [ec] = co_await server.handshake( tls_stream::server );
+        if( ec )
+            server_failed = true;
+        server_done = true;
+    };
+
+    capy::run_async( ioc.get_executor() )( client_task() );
+    capy::run_async( ioc.get_executor() )( server_task() );
 
     // Timer to unblock stuck handshakes - when one side fails, the other
     // may block waiting for data. Timer cancels socket operations to unblock them.
     timer timeout( ioc );
     timeout.expires_after( std::chrono::milliseconds( 500 ) );
-    capy::run_async( ioc.get_executor() )(
-        [&timeout, &s1, &s2, &client_done, &server_done]() -> capy::task<>
+    auto timeout_task = [&timeout, &s1, &s2, &client_done, &server_done]() -> capy::task<>
+    {
+        (void)client_done;
+        (void)server_done;
+        auto [ec] = co_await timeout.wait();
+        if( !ec )
         {
-            (void)client_done;
-            (void)server_done;
-            auto [ec] = co_await timeout.wait();
-            if( !ec )
-            {
-                // Timer expired - cancel pending operations then close sockets
-                s1.cancel();
-                s2.cancel();
-                s1.close();
-                s2.close();
-            }
-        }() );
+            // Timer expired - cancel pending operations then close sockets
+            s1.cancel();
+            s2.cancel();
+            s1.close();
+            s2.close();
+        }
+    };
+    capy::run_async( ioc.get_executor() )( timeout_task() );
 
     ioc.run();
 

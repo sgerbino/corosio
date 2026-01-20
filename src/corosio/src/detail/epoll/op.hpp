@@ -31,6 +31,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <stop_token>
 
@@ -38,16 +39,49 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 
+/*
+    epoll Operation State
+    =====================
+
+    Each async I/O operation has a corresponding epoll_op-derived struct that
+    holds the operation's state while it's in flight. The socket impl owns
+    fixed slots for each operation type (conn_, rd_, wr_), so only one
+    operation of each type can be pending per socket at a time.
+
+    Completion vs Cancellation Race
+    -------------------------------
+    The `registered` atomic handles the race between epoll signaling ready
+    and cancel() being called. Whoever atomically exchanges it from true to
+    false "claims" the operation and is responsible for completing it. The
+    loser sees false and does nothing. This avoids double-completion bugs
+    without requiring a mutex in the hot path.
+
+    Impl Lifetime Management
+    ------------------------
+    When cancel() posts an op to the scheduler's ready queue, the socket impl
+    might be destroyed before the scheduler processes the op. The `impl_ptr`
+    member holds a shared_ptr to the impl, keeping it alive until the op
+    completes. This is set by cancel() in sockets.hpp and cleared in operator()
+    after the coroutine is resumed. Without this, closing a socket with pending
+    operations causes use-after-free.
+
+    EOF Detection
+    -------------
+    For reads, 0 bytes with no error means EOF. But an empty user buffer also
+    returns 0 bytes. The `empty_buffer_read` flag distinguishes these cases
+    so we don't spuriously report EOF when the user just passed an empty buffer.
+
+    SIGPIPE Prevention
+    ------------------
+    Writes use sendmsg() with MSG_NOSIGNAL instead of writev() to prevent
+    SIGPIPE when the peer has closed. This is the same approach Boost.Asio
+    uses on Linux.
+*/
+
 namespace boost {
 namespace corosio {
 namespace detail {
 
-/** Base class for epoll async operations.
-
-    This class is analogous to overlapped_op on Windows.
-    It stores the coroutine handle, executor, and result
-    pointers needed to complete an async operation.
-*/
 struct epoll_op : scheduler_op
 {
     struct canceller
@@ -67,7 +101,12 @@ struct epoll_op : scheduler_op
     std::size_t bytes_transferred = 0;
 
     std::atomic<bool> cancelled{false};
+    std::atomic<bool> registered{false};
     std::optional<std::stop_callback<canceller>> stop_cb;
+
+    // Prevents use-after-free when socket is closed with pending ops.
+    // See "Impl Lifetime Management" in file header.
+    std::shared_ptr<void> impl_ptr;
 
     epoll_op()
     {
@@ -81,6 +120,8 @@ struct epoll_op : scheduler_op
         errn = 0;
         bytes_transferred = 0;
         cancelled.store(false, std::memory_order_relaxed);
+        registered.store(false, std::memory_order_relaxed);
+        impl_ptr.reset();
     }
 
     void operator()() override
@@ -94,16 +135,16 @@ struct epoll_op : scheduler_op
             else if (errn != 0)
                 *ec_out = make_err(errn);
             else if (is_read_operation() && bytes_transferred == 0)
-            {
-                // EOF: 0 bytes transferred with no error indicates end of stream
                 *ec_out = capy::error::eof;
-            }
         }
 
         if (bytes_out)
             *bytes_out = bytes_transferred;
 
-        d.dispatch(h).resume();
+        auto saved_d = d;
+        auto saved_h = std::move(h);
+        impl_ptr.reset();
+        saved_d.dispatch(saved_h).resume();
     }
 
     virtual bool is_read_operation() const noexcept { return false; }
@@ -111,6 +152,7 @@ struct epoll_op : scheduler_op
     void destroy() override
     {
         stop_cb.reset();
+        impl_ptr.reset();
     }
 
     void request_cancel() noexcept
@@ -133,10 +175,6 @@ struct epoll_op : scheduler_op
         bytes_transferred = bytes;
     }
 
-    /** Called when epoll signals the fd is ready.
-        Derived classes override this to perform the actual I/O.
-        Sets error and bytes_transferred appropriately.
-    */
     virtual void perform_io() noexcept {}
 };
 
@@ -148,12 +186,11 @@ get_epoll_op(scheduler_op* h) noexcept
 
 //------------------------------------------------------------------------------
 
-/** Connect operation state. */
 struct epoll_connect_op : epoll_op
 {
     void perform_io() noexcept override
     {
-        // For connect, check SO_ERROR to see if connection succeeded
+        // connect() completion status is retrieved via SO_ERROR, not return value
         int err = 0;
         socklen_t len = sizeof(err);
         if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
@@ -164,17 +201,13 @@ struct epoll_connect_op : epoll_op
 
 //------------------------------------------------------------------------------
 
-/** Read operation state with buffer descriptors. */
 struct epoll_read_op : epoll_op
 {
     static constexpr std::size_t max_buffers = 16;
     iovec iovecs[max_buffers];
     int iovec_count = 0;
-
-    // True when 0 bytes is due to empty buffer, not EOF
     bool empty_buffer_read = false;
 
-    // EOF only applies when we actually tried to read something
     bool is_read_operation() const noexcept override
     {
         return !empty_buffer_read;
@@ -199,7 +232,6 @@ struct epoll_read_op : epoll_op
 
 //------------------------------------------------------------------------------
 
-/** Write operation state with buffer descriptors. */
 struct epoll_write_op : epoll_op
 {
     static constexpr std::size_t max_buffers = 16;
@@ -214,7 +246,11 @@ struct epoll_write_op : epoll_op
 
     void perform_io() noexcept override
     {
-        ssize_t n = ::writev(fd, iovecs, iovec_count);
+        msghdr msg{};
+        msg.msg_iov = iovecs;
+        msg.msg_iovlen = static_cast<std::size_t>(iovec_count);
+
+        ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
         if (n >= 0)
             complete(0, static_cast<std::size_t>(n));
         else
@@ -224,7 +260,6 @@ struct epoll_write_op : epoll_op
 
 //------------------------------------------------------------------------------
 
-/** Accept operation state. */
 struct epoll_accept_op : epoll_op
 {
     int accepted_fd = -1;
@@ -241,7 +276,6 @@ struct epoll_accept_op : epoll_op
         accepted_fd = -1;
         peer_impl = nullptr;
         impl_out = nullptr;
-        // Don't reset create_peer and service_ptr - they're set once
     }
 
     void perform_io() noexcept override
@@ -302,7 +336,10 @@ struct epoll_accept_op : epoll_op
                 *impl_out = nullptr;
         }
 
-        d.dispatch(h).resume();
+        auto saved_d = d;
+        auto saved_h = std::move(h);
+        impl_ptr.reset();
+        saved_d.dispatch(saved_h).resume();
     }
 };
 

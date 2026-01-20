@@ -59,6 +59,12 @@ public:
         @param ctx The TLS context containing configuration.
     */
     wolfssl_stream(io_stream& stream, tls::context ctx);
+
+    /** Destructor.
+
+        Releases the underlying WolfSSL resources.
+    */
+    ~wolfssl_stream();
 };
 
 } // namespace corosio

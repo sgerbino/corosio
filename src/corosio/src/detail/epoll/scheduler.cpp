@@ -29,6 +29,47 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/*
+    epoll Scheduler
+    ===============
+
+    The scheduler is the heart of the I/O event loop. It multiplexes I/O
+    readiness notifications from epoll with a completion queue for operations
+    that finished synchronously or were cancelled.
+
+    Event Loop Structure (do_one)
+    -----------------------------
+    1. Check completion queue first (mutex-protected)
+    2. If empty, call epoll_wait with calculated timeout
+    3. Process timer expirations
+    4. For each ready fd, claim the operation and perform I/O
+    5. Push completed operations to completion queue
+    6. Pop one and invoke its handler
+
+    The completion queue exists because handlers must run outside the epoll
+    processing loop. This allows handlers to safely start new operations
+    on the same fd without corrupting iteration state.
+
+    Wakeup Mechanism
+    ----------------
+    An eventfd allows other threads (or cancel/post calls) to wake the
+    event loop from epoll_wait. We distinguish wakeup events from I/O by
+    storing nullptr in epoll_event.data.ptr for the eventfd.
+
+    Work Counting
+    -------------
+    outstanding_work_ tracks pending operations. When it hits zero, run()
+    returns. This is how io_context knows there's nothing left to do.
+    Each operation increments on start, decrements on completion.
+
+    Timer Integration
+    -----------------
+    Timers are handled by timer_service. The scheduler adjusts epoll_wait
+    timeout to wake in time for the nearest timer expiry. When a new timer
+    is scheduled earlier than current, timer_service calls wakeup() to
+    re-evaluate the timeout.
+*/
+
 namespace boost {
 namespace corosio {
 namespace detail {
@@ -84,7 +125,6 @@ epoll_scheduler(
         detail::throw_system_error(make_err(errn), "eventfd");
     }
 
-    // data.ptr = nullptr distinguishes wakeup events from I/O completions
     epoll_event ev{};
     ev.events = EPOLLIN;
     ev.data.ptr = nullptr;
@@ -119,7 +159,6 @@ shutdown()
     std::unique_lock lock(mutex_);
     shutdown_ = true;
 
-    // Drain all completed operations without invoking handlers
     while (auto* h = completed_ops_.pop())
     {
         lock.unlock();
@@ -127,8 +166,6 @@ shutdown()
         lock.lock();
     }
 
-    // Reset outstanding work count - any pending I/O operations
-    // will be cleaned up when their owning objects are destroyed
     outstanding_work_.store(0, std::memory_order_release);
 }
 
@@ -357,7 +394,6 @@ void
 epoll_scheduler::
 unregister_fd(int fd) const
 {
-    // EPOLL_CTL_DEL ignores the event parameter (can be NULL on Linux 2.6.9+)
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 }
 
@@ -379,12 +415,10 @@ void
 epoll_scheduler::
 wakeup() const
 {
-    // Write cannot fail: eventfd counter won't overflow with single increments
     std::uint64_t val = 1;
     [[maybe_unused]] auto r = ::write(event_fd_, &val, sizeof(val));
 }
 
-// RAII guard - work_finished called even if handler throws
 struct work_guard
 {
     epoll_scheduler const* self;
@@ -459,7 +493,6 @@ do_one(long timeout_us)
         {
             if (errno == EINTR)
             {
-                // EINTR: retry for infinite waits, return for timed waits
                 if (timeout_us < 0)
                     continue;
                 return 0;
@@ -467,14 +500,12 @@ do_one(long timeout_us)
             detail::throw_system_error(make_err(errno), "epoll_wait");
         }
 
-        // May dispatch timer handlers inline
         timer_svc_->process_expired();
 
         for (int i = 0; i < nfds; ++i)
         {
             if (events[i].data.ptr == nullptr)
             {
-                // Drain eventfd; read cannot fail since epoll signaled readiness
                 std::uint64_t val;
                 [[maybe_unused]] auto r = ::read(event_fd_, &val, sizeof(val));
                 continue;
@@ -482,7 +513,10 @@ do_one(long timeout_us)
 
             auto* op = static_cast<epoll_op*>(events[i].data.ptr);
 
-            // One-shot: unregister before I/O
+            bool was_registered = op->registered.exchange(false, std::memory_order_acq_rel);
+            if (!was_registered)
+                continue;
+
             unregister_fd(op->fd);
 
             if (events[i].events & (EPOLLERR | EPOLLHUP))
@@ -521,7 +555,6 @@ do_one(long timeout_us)
             return 1;
         }
 
-        // Finite timeout: return on timeout; infinite: keep looping
         if (timeout_us >= 0)
             return 0;
     }

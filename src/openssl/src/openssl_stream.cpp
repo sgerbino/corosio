@@ -763,5 +763,12 @@ openssl_stream( io_stream& stream, tls::context ctx )
     impl_ = impl;
 }
 
+openssl_stream::
+~openssl_stream()
+{
+    if( impl_ )
+        impl_->release();
+}
+
 } // namespace corosio
 } // namespace boost

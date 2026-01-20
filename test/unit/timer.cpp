@@ -184,13 +184,13 @@ struct timer_test
 
         t.expires_after(std::chrono::milliseconds(10));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                ec_out = ec;
-                done_out = true;
-            }(t, result_ec, completed));
+        auto task = [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            ec_out = ec;
+            done_out = true;
+        };
+        capy::run_async(ioc.get_executor())(task(t, result_ec, completed));
 
         ioc.run();
         BOOST_TEST(completed);
@@ -208,13 +208,13 @@ struct timer_test
 
         t.expires_after(std::chrono::milliseconds(50));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, timer::time_point start_val, timer::duration& elapsed_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                elapsed_out = timer::clock_type::now() - start_val;
-                (void)ec;
-            }(t, start, elapsed));
+        auto task = [](timer& t_ref, timer::time_point start_val, timer::duration& elapsed_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            elapsed_out = timer::clock_type::now() - start_val;
+            (void)ec;
+        };
+        capy::run_async(ioc.get_executor())(task(t, start, elapsed));
 
         ioc.run();
 
@@ -233,13 +233,13 @@ struct timer_test
 
         t.expires_at(timer::clock_type::now() - std::chrono::seconds(1));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                ec_out = ec;
-                done_out = true;
-            }(t, result_ec, completed));
+        auto task = [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            ec_out = ec;
+            done_out = true;
+        };
+        capy::run_async(ioc.get_executor())(task(t, result_ec, completed));
 
         ioc.run();
         BOOST_TEST(completed);
@@ -257,13 +257,13 @@ struct timer_test
 
         t.expires_after(std::chrono::milliseconds(0));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                ec_out = ec;
-                done_out = true;
-            }(t, result_ec, completed));
+        auto task = [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            ec_out = ec;
+            done_out = true;
+        };
+        capy::run_async(ioc.get_executor())(task(t, result_ec, completed));
 
         ioc.run();
         BOOST_TEST(completed);
@@ -287,20 +287,20 @@ struct timer_test
         t.expires_after(std::chrono::seconds(60));
         cancel_timer.expires_after(std::chrono::milliseconds(10));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                ec_out = ec;
-                done_out = true;
-            }(t, result_ec, completed));
+        auto wait_task = [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            ec_out = ec;
+            done_out = true;
+        };
+        capy::run_async(ioc.get_executor())(wait_task(t, result_ec, completed));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& cancel_t_ref, timer& t_ref) -> capy::task<>
-            {
-                co_await cancel_t_ref.wait();
-                t_ref.cancel();
-            }(cancel_timer, t));
+        auto cancel_task = [](timer& cancel_t_ref, timer& t_ref) -> capy::task<>
+        {
+            co_await cancel_t_ref.wait();
+            t_ref.cancel();
+        };
+        capy::run_async(ioc.get_executor())(cancel_task(cancel_timer, t));
 
         ioc.run();
         BOOST_TEST(completed);
@@ -346,20 +346,20 @@ struct timer_test
         t.expires_after(std::chrono::seconds(60));
         delay_timer.expires_after(std::chrono::milliseconds(10));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                ec_out = ec;
-                done_out = true;
-            }(t, result_ec, completed));
+        auto wait_task = [](timer& t_ref, system::error_code& ec_out, bool& done_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            ec_out = ec;
+            done_out = true;
+        };
+        capy::run_async(ioc.get_executor())(wait_task(t, result_ec, completed));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& delay_ref, timer& t_ref) -> capy::task<>
-            {
-                co_await delay_ref.wait();
-                t_ref.expires_after(std::chrono::seconds(30));
-            }(delay_timer, t));
+        auto delay_task = [](timer& delay_ref, timer& t_ref) -> capy::task<>
+        {
+            co_await delay_ref.wait();
+            t_ref.expires_after(std::chrono::seconds(30));
+        };
+        capy::run_async(ioc.get_executor())(delay_task(delay_timer, t));
 
         ioc.run_for(std::chrono::milliseconds(100));
         BOOST_TEST(completed);
@@ -385,29 +385,15 @@ struct timer_test
         t2.expires_after(std::chrono::milliseconds(10));
         t3.expires_after(std::chrono::milliseconds(20));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, int& order_ref, int& t_order_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                t_order_out = ++order_ref;
-                (void)ec;
-            }(t1, order, t1_order));
-
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, int& order_ref, int& t_order_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                t_order_out = ++order_ref;
-                (void)ec;
-            }(t2, order, t2_order));
-
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, int& order_ref, int& t_order_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                t_order_out = ++order_ref;
-                (void)ec;
-            }(t3, order, t3_order));
+        auto task = [](timer& t_ref, int& order_ref, int& t_order_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            t_order_out = ++order_ref;
+            (void)ec;
+        };
+        capy::run_async(ioc.get_executor())(task(t1, order, t1_order));
+        capy::run_async(ioc.get_executor())(task(t2, order, t2_order));
+        capy::run_async(ioc.get_executor())(task(t3, order, t3_order));
 
         ioc.run();
 
@@ -429,21 +415,14 @@ struct timer_test
         t1.expires_at(expiry);
         t2.expires_at(expiry);
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                done_out = true;
-                (void)ec;
-            }(t1, t1_done));
-
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                done_out = true;
-                (void)ec;
-            }(t2, t2_done));
+        auto task = [](timer& t_ref, bool& done_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            done_out = true;
+            (void)ec;
+        };
+        capy::run_async(ioc.get_executor())(task(t1, t1_done));
+        capy::run_async(ioc.get_executor())(task(t2, t2_done));
 
         ioc.run();
 
@@ -463,24 +442,24 @@ struct timer_test
 
         int wait_count = 0;
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, int& count_out) -> capy::task<>
-            {
-                t_ref.expires_after(std::chrono::milliseconds(5));
-                auto [ec1] = co_await t_ref.wait();
-                BOOST_TEST(!ec1);
-                ++count_out;
+        auto task = [](timer& t_ref, int& count_out) -> capy::task<>
+        {
+            t_ref.expires_after(std::chrono::milliseconds(5));
+            auto [ec1] = co_await t_ref.wait();
+            BOOST_TEST(!ec1);
+            ++count_out;
 
-                t_ref.expires_after(std::chrono::milliseconds(5));
-                auto [ec2] = co_await t_ref.wait();
-                BOOST_TEST(!ec2);
-                ++count_out;
+            t_ref.expires_after(std::chrono::milliseconds(5));
+            auto [ec2] = co_await t_ref.wait();
+            BOOST_TEST(!ec2);
+            ++count_out;
 
-                t_ref.expires_after(std::chrono::milliseconds(5));
-                auto [ec3] = co_await t_ref.wait();
-                BOOST_TEST(!ec3);
-                ++count_out;
-            }(t, wait_count));
+            t_ref.expires_after(std::chrono::milliseconds(5));
+            auto [ec3] = co_await t_ref.wait();
+            BOOST_TEST(!ec3);
+            ++count_out;
+        };
+        capy::run_async(ioc.get_executor())(task(t, wait_count));
 
         ioc.run();
         BOOST_TEST_EQ(wait_count, 3);
@@ -500,12 +479,12 @@ struct timer_test
 
         t.expires_after(std::chrono::milliseconds(5));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, bool& ok_out) -> capy::task<>
-            {
-                auto result = co_await t_ref.wait();
-                ok_out = !result.ec;
-            }(t, result_ok));
+        auto task = [](timer& t_ref, bool& ok_out) -> capy::task<>
+        {
+            auto result = co_await t_ref.wait();
+            ok_out = !result.ec;
+        };
+        capy::run_async(ioc.get_executor())(task(t, result_ok));
 
         ioc.run();
         BOOST_TEST(result_ok);
@@ -524,20 +503,20 @@ struct timer_test
         t.expires_after(std::chrono::seconds(60));
         cancel_timer.expires_after(std::chrono::milliseconds(10));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, bool& ok_out, system::error_code& ec_out) -> capy::task<>
-            {
-                auto result = co_await t_ref.wait();
-                ok_out = !result.ec;
-                ec_out = result.ec;
-            }(t, result_ok, result_ec));
+        auto wait_task = [](timer& t_ref, bool& ok_out, system::error_code& ec_out) -> capy::task<>
+        {
+            auto result = co_await t_ref.wait();
+            ok_out = !result.ec;
+            ec_out = result.ec;
+        };
+        capy::run_async(ioc.get_executor())(wait_task(t, result_ok, result_ec));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& cancel_t_ref, timer& t_ref) -> capy::task<>
-            {
-                co_await cancel_t_ref.wait();
-                t_ref.cancel();
-            }(cancel_timer, t));
+        auto cancel_task = [](timer& cancel_t_ref, timer& t_ref) -> capy::task<>
+        {
+            co_await cancel_t_ref.wait();
+            t_ref.cancel();
+        };
+        capy::run_async(ioc.get_executor())(cancel_task(cancel_timer, t));
 
         ioc.run();
         BOOST_TEST(!result_ok);
@@ -554,12 +533,12 @@ struct timer_test
 
         t.expires_after(std::chrono::milliseconds(5));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, system::error_code& ec_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                ec_out = ec;
-            }(t, captured_ec));
+        auto task = [](timer& t_ref, system::error_code& ec_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            ec_out = ec;
+        };
+        capy::run_async(ioc.get_executor())(task(t, captured_ec));
 
         ioc.run();
         BOOST_TEST(!captured_ec);
@@ -594,13 +573,13 @@ struct timer_test
 
         t.expires_after(std::chrono::milliseconds(-100));
 
-        capy::run_async(ioc.get_executor())(
-            [](timer& t_ref, bool& done_out) -> capy::task<>
-            {
-                auto [ec] = co_await t_ref.wait();
-                done_out = true;
-                (void)ec;
-            }(t, completed));
+        auto task = [](timer& t_ref, bool& done_out) -> capy::task<>
+        {
+            auto [ec] = co_await t_ref.wait();
+            done_out = true;
+            (void)ec;
+        };
+        capy::run_async(ioc.get_executor())(task(t, completed));
 
         ioc.run();
         BOOST_TEST(completed);

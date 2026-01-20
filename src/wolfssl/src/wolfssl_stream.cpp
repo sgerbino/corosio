@@ -54,9 +54,30 @@
     handshake data, SSL_write may need to read. Each operation handles
     whatever I/O direction WolfSSL requests.
 
+    WolfSSL Context Initialization (IMPORTANT)
+    ------------------------------------------
+    Unlike OpenSSL which provides a combined TLS_method() for both client and
+    server roles, standard WolfSSL builds only expose separate methods:
+      - wolfTLS_client_method()  -- for client connections
+      - wolfTLS_server_method()  -- for server connections
+
+    The combined wolfSSLv23_method() requires WolfSSL to be built with
+    --enable-opensslextra or --enable-opensslall, which many distributions omit.
+
+    To handle this portably:
+      1. wolfssl_native_context caches TWO WOLFSSL_CTX pointers (client + server)
+      2. The WOLFSSL object is NOT created at stream construction time
+      3. Instead, init_ssl_for_role(type) is called at handshake time when we
+         know whether this is a client or server connection
+      4. This deferred initialization selects the appropriate cached context
+
+    This design allows a single tls::context to be shared across both client
+    and server streams without requiring OpenSSL compatibility mode in WolfSSL.
+
     Key Types
     ---------
     - wolfssl_stream_impl_ : tls_stream_impl  -- the impl stored in io_object::impl_
+    - wolfssl_native_context                  -- caches client_ctx_ and server_ctx_
     - recv_callback, send_callback            -- WolfSSL I/O hooks (static)
     - do_read_some, do_write_some             -- inner coroutines with WANT_* loops
 */
@@ -86,24 +107,24 @@ using buffer_array = std::array<capy::mutable_buffer, max_buffers>;
 namespace tls {
 namespace detail {
 
-/** Cached WolfSSL context owning WOLFSSL_CTX.
+/** Cached WolfSSL contexts owning WOLFSSL_CTX for client and server.
 
     Created on first stream construction for a given tls::context,
     then reused for subsequent streams sharing that context.
+    Maintains separate contexts for client and server roles since
+    WolfSSL requires different method functions for each.
 */
 class wolfssl_native_context
     : public native_context_base
 {
 public:
-    WOLFSSL_CTX* ctx_;
+    WOLFSSL_CTX* client_ctx_;
+    WOLFSSL_CTX* server_ctx_;
 
-    explicit
-    wolfssl_native_context( context_data const& cd )
-        : ctx_( nullptr )
+    static void
+    apply_common_settings( WOLFSSL_CTX* ctx, context_data const& cd )
     {
-        // Create WOLFSSL_CTX supporting both client and server
-        ctx_ = wolfSSL_CTX_new( wolfSSLv23_method() );
-        if( !ctx_ )
+        if( !ctx )
             return;
 
         // Apply verify mode from config
@@ -112,14 +133,14 @@ public:
             verify_mode_flag = WOLFSSL_VERIFY_PEER;
         else if( cd.verification_mode == verify_mode::require_peer )
             verify_mode_flag = WOLFSSL_VERIFY_PEER | WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-        wolfSSL_CTX_set_verify( ctx_, verify_mode_flag, nullptr );
+        wolfSSL_CTX_set_verify( ctx, verify_mode_flag, nullptr );
 
         // Apply certificates if provided
         if( !cd.entity_certificate.empty() )
         {
             int format = ( cd.entity_cert_format == file_format::pem )
                 ? WOLFSSL_FILETYPE_PEM : WOLFSSL_FILETYPE_ASN1;
-            wolfSSL_CTX_use_certificate_buffer( ctx_,
+            wolfSSL_CTX_use_certificate_buffer( ctx,
                 reinterpret_cast<unsigned char const*>( cd.entity_certificate.data() ),
                 static_cast<long>( cd.entity_certificate.size() ),
                 format );
@@ -130,7 +151,7 @@ public:
         {
             int format = ( cd.private_key_format == file_format::pem )
                 ? WOLFSSL_FILETYPE_PEM : WOLFSSL_FILETYPE_ASN1;
-            wolfSSL_CTX_use_PrivateKey_buffer( ctx_,
+            wolfSSL_CTX_use_PrivateKey_buffer( ctx,
                 reinterpret_cast<unsigned char const*>( cd.private_key.data() ),
                 static_cast<long>( cd.private_key.size() ),
                 format );
@@ -139,38 +160,53 @@ public:
         // Apply CA certificates for verification
         for( auto const& ca : cd.ca_certificates )
         {
-            wolfSSL_CTX_load_verify_buffer( ctx_,
+            wolfSSL_CTX_load_verify_buffer( ctx,
                 reinterpret_cast<unsigned char const*>( ca.data() ),
                 static_cast<long>( ca.size() ),
                 WOLFSSL_FILETYPE_PEM );
         }
 
         // Apply verify depth
-        wolfSSL_CTX_set_verify_depth( ctx_, cd.verify_depth );
+        wolfSSL_CTX_set_verify_depth( ctx, cd.verify_depth );
+    }
+
+    explicit
+    wolfssl_native_context( context_data const& cd )
+        : client_ctx_( nullptr )
+        , server_ctx_( nullptr )
+    {
+        // Create separate contexts for client and server
+        client_ctx_ = wolfSSL_CTX_new( wolfTLS_client_method() );
+        server_ctx_ = wolfSSL_CTX_new( wolfTLS_server_method() );
+
+        apply_common_settings( client_ctx_, cd );
+        apply_common_settings( server_ctx_, cd );
     }
 
     ~wolfssl_native_context() override
     {
-        if( ctx_ )
-            wolfSSL_CTX_free( ctx_ );
+        if( client_ctx_ )
+            wolfSSL_CTX_free( client_ctx_ );
+        if( server_ctx_ )
+            wolfSSL_CTX_free( server_ctx_ );
     }
 };
 
-/** Get or create cached WOLFSSL_CTX for this context.
+/** Get or create cached wolfssl_native_context for this context.
 
     @param cd The context implementation.
 
-    @return Pointer to the cached WOLFSSL_CTX.
+    @return Pointer to the cached native context wrapper.
 */
-inline WOLFSSL_CTX*
-get_wolfssl_context( context_data const& cd )
+inline wolfssl_native_context*
+get_wolfssl_native_context( context_data const& cd )
 {
     static char key;
     auto* p = cd.find( &key, [&]
     {
         return new wolfssl_native_context( cd );
     });
-    return static_cast<wolfssl_native_context*>( p )->ctx_;
+    return static_cast<wolfssl_native_context*>( p );
 }
 
 } // namespace detail
@@ -557,6 +593,16 @@ struct wolfssl_stream_impl_
     {
         system::error_code ec;
 
+        // Initialize SSL object for the specified role (deferred from construction)
+        ec = init_ssl_for_role( type );
+        if( ec )
+        {
+            *ec_out = ec;
+            current_op_ = nullptr;
+            d.dispatch(capy::any_coro{continuation}).resume();
+            co_return;
+        }
+
         // Set up operation buffers for callbacks (use read buffers for handshake)
         op_buffers op{
             &read_in_buf_, &read_in_pos_, &read_in_len_,
@@ -876,12 +922,33 @@ struct wolfssl_stream_impl_
     // Initialization
     //--------------------------------------------------------------------------
 
+    /** Initialize SSL object for the specified role.
+
+        @param type wolfssl_stream::client or wolfssl_stream::server
+        @return Error code if initialization failed.
+    */
     system::error_code
-    init_ssl()
+    init_ssl_for_role( int type )
     {
-        // Get cached WOLFSSL_CTX from tls::context
+        // Already initialized?
+        if( ssl_ )
+            return {};
+
+        // Get cached native contexts from tls::context
         auto& impl = tls::detail::get_context_data( ctx_ );
-        WOLFSSL_CTX* native_ctx = tls::detail::get_wolfssl_context( impl );
+        auto* native = tls::detail::get_wolfssl_native_context( impl );
+        if( !native )
+        {
+            return system::error_code(
+                wolfSSL_get_error( nullptr, 0 ),
+                system::system_category() );
+        }
+
+        // Select appropriate context based on role
+        WOLFSSL_CTX* native_ctx = ( type == wolfssl_stream::client )
+            ? native->client_ctx_
+            : native->server_ctx_;
+
         if( !native_ctx )
         {
             return system::error_code(
@@ -889,7 +956,7 @@ struct wolfssl_stream_impl_
                 system::system_category() );
         }
 
-        // Create SSL session from cached context
+        // Create SSL session from the role-specific context
         ssl_ = wolfSSL_new( native_ctx );
         if( !ssl_ )
         {
@@ -905,8 +972,8 @@ struct wolfssl_stream_impl_
         wolfSSL_SetIOReadCtx( ssl_, this );
         wolfSSL_SetIOWriteCtx( ssl_, this );
 
-        // Apply per-session config (SNI) from context
-        if( !impl.hostname.empty() )
+        // Apply per-session config (SNI) from context (client only)
+        if( type == wolfssl_stream::client && !impl.hostname.empty() )
         {
             wolfSSL_UseSNI( ssl_, WOLFSSL_SNI_HOST_NAME,
                 impl.hostname.data(),
@@ -923,18 +990,15 @@ wolfssl_stream::
 wolfssl_stream( io_stream& stream, tls::context ctx )
     : tls_stream( stream )
 {
-    auto* impl = new wolfssl_stream_impl_( s_, std::move( ctx ) );
+    // SSL object creation is deferred to handshake time when we know the role
+    impl_ = new wolfssl_stream_impl_( s_, std::move( ctx ) );
+}
 
-    // Initialize WolfSSL using cached context
-    auto ec = impl->init_ssl();
-    if( ec )
-    {
-        delete impl;
-        // For now, silently fail - could throw or store error
-        return;
-    }
-
-    impl_ = impl;
+wolfssl_stream::
+~wolfssl_stream()
+{
+    if( impl_ )
+        impl_->release();
 }
 
 } // namespace corosio

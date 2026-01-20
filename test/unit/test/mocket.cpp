@@ -47,35 +47,35 @@ struct mocket_test
 
         // Note: Pass captures as parameters to store them in the coroutine frame,
         // avoiding use-after-scope when the lambda temporary is destroyed.
-        capy::run_async(ioc.get_executor())(
-            [](mocket& m1_ref, mocket& m2_ref) -> capy::task<>
-            {
-                char buf[32] = {};
+        auto task = [](mocket& m1_ref, mocket& m2_ref) -> capy::task<>
+        {
+            char buf[32] = {};
 
-                // m2 reads from m1's provide
-                auto [ec1, n1] = co_await m2_ref.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
-                BOOST_TEST(!ec1);
-                BOOST_TEST_EQ(std::string_view(buf, n1), "hello_from_m1");
+            // m2 reads from m1's provide
+            auto [ec1, n1] = co_await m2_ref.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec1);
+            BOOST_TEST_EQ(std::string_view(buf, n1), "hello_from_m1");
 
-                // m1 reads from m2's provide
-                auto [ec2, n2] = co_await m1_ref.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
-                BOOST_TEST(!ec2);
-                BOOST_TEST_EQ(std::string_view(buf, n2), "hello_from_m2");
+            // m1 reads from m2's provide
+            auto [ec2, n2] = co_await m1_ref.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec2);
+            BOOST_TEST_EQ(std::string_view(buf, n2), "hello_from_m2");
 
-                // Write to m1's expect
-                auto [ec3, n3] = co_await m1_ref.write_some(
-                    capy::const_buffer("write_to_m1", 11));
-                BOOST_TEST(!ec3);
-                BOOST_TEST_EQ(n3, 11u);
+            // Write to m1's expect
+            auto [ec3, n3] = co_await m1_ref.write_some(
+                capy::const_buffer("write_to_m1", 11));
+            BOOST_TEST(!ec3);
+            BOOST_TEST_EQ(n3, 11u);
 
-                // Write to m2's expect
-                auto [ec4, n4] = co_await m2_ref.write_some(
-                    capy::const_buffer("write_to_m2", 11));
-                BOOST_TEST(!ec4);
-                BOOST_TEST_EQ(n4, 11u);
-            }(m1, m2));
+            // Write to m2's expect
+            auto [ec4, n4] = co_await m2_ref.write_some(
+                capy::const_buffer("write_to_m2", 11));
+            BOOST_TEST(!ec4);
+            BOOST_TEST_EQ(n4, 11u);
+        };
+        capy::run_async(ioc.get_executor())(task(m1, m2));
 
         ioc.run();
         ioc.restart();
@@ -112,35 +112,35 @@ struct mocket_test
 
         auto [m1, m2] = make_mockets(ioc, f);
 
-        capy::run_async(ioc.get_executor())(
-            [](mocket& a, mocket& b) -> capy::task<>
-            {
-                char buf[32] = {};
+        auto task = [](mocket& a, mocket& b) -> capy::task<>
+        {
+            char buf[32] = {};
 
-                // Write from m1, read from m2
-                auto [ec1, n1] = co_await a.write_some(
-                    capy::const_buffer("hello", 5));
-                BOOST_TEST(!ec1);
-                BOOST_TEST_EQ(n1, 5u);
+            // Write from m1, read from m2
+            auto [ec1, n1] = co_await a.write_some(
+                capy::const_buffer("hello", 5));
+            BOOST_TEST(!ec1);
+            BOOST_TEST_EQ(n1, 5u);
 
-                auto [ec2, n2] = co_await b.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
-                BOOST_TEST(!ec2);
-                BOOST_TEST_EQ(n2, 5u);
-                BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
+            auto [ec2, n2] = co_await b.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec2);
+            BOOST_TEST_EQ(n2, 5u);
+            BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
 
-                // Write from m2, read from m1
-                auto [ec3, n3] = co_await b.write_some(
-                    capy::const_buffer("world", 5));
-                BOOST_TEST(!ec3);
-                BOOST_TEST_EQ(n3, 5u);
+            // Write from m2, read from m1
+            auto [ec3, n3] = co_await b.write_some(
+                capy::const_buffer("world", 5));
+            BOOST_TEST(!ec3);
+            BOOST_TEST_EQ(n3, 5u);
 
-                auto [ec4, n4] = co_await a.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
-                BOOST_TEST(!ec4);
-                BOOST_TEST_EQ(n4, 5u);
-                BOOST_TEST_EQ(std::string_view(buf, n4), "world");
-            }(m1, m2));
+            auto [ec4, n4] = co_await a.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec4);
+            BOOST_TEST_EQ(n4, 5u);
+            BOOST_TEST_EQ(std::string_view(buf, n4), "world");
+        };
+        capy::run_async(ioc.get_executor())(task(m1, m2));
 
         ioc.run();
 

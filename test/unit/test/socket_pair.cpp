@@ -43,35 +43,35 @@ struct socket_pair_test
 
         auto [s1, s2] = make_socket_pair(ioc);
 
-        capy::run_async(ioc.get_executor())(
-            [](socket& a, socket& b) -> capy::task<>
-            {
-                char buf[32] = {};
+        auto task = [](socket& a, socket& b) -> capy::task<>
+        {
+            char buf[32] = {};
 
-                // Write from s1, read from s2
-                auto [ec1, n1] = co_await a.write_some(
-                    capy::const_buffer("hello", 5));
-                BOOST_TEST(!ec1);
-                BOOST_TEST_EQ(n1, 5u);
+            // Write from s1, read from s2
+            auto [ec1, n1] = co_await a.write_some(
+                capy::const_buffer("hello", 5));
+            BOOST_TEST(!ec1);
+            BOOST_TEST_EQ(n1, 5u);
 
-                auto [ec2, n2] = co_await b.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
-                BOOST_TEST(!ec2);
-                BOOST_TEST_EQ(n2, 5u);
-                BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
+            auto [ec2, n2] = co_await b.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec2);
+            BOOST_TEST_EQ(n2, 5u);
+            BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
 
-                // Write from s2, read from s1
-                auto [ec3, n3] = co_await b.write_some(
-                    capy::const_buffer("world", 5));
-                BOOST_TEST(!ec3);
-                BOOST_TEST_EQ(n3, 5u);
+            // Write from s2, read from s1
+            auto [ec3, n3] = co_await b.write_some(
+                capy::const_buffer("world", 5));
+            BOOST_TEST(!ec3);
+            BOOST_TEST_EQ(n3, 5u);
 
-                auto [ec4, n4] = co_await a.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
-                BOOST_TEST(!ec4);
-                BOOST_TEST_EQ(n4, 5u);
-                BOOST_TEST_EQ(std::string_view(buf, n4), "world");
-            }(s1, s2));
+            auto [ec4, n4] = co_await a.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec4);
+            BOOST_TEST_EQ(n4, 5u);
+            BOOST_TEST_EQ(std::string_view(buf, n4), "world");
+        };
+        capy::run_async(ioc.get_executor())(task(s1, s2));
 
         ioc.run();
 

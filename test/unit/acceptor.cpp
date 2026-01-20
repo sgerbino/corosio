@@ -106,35 +106,35 @@ struct acceptor_test
         system::error_code accept_ec;
         socket peer(ioc);
 
-        capy::run_async(ioc.get_executor())(
-            [&]() -> capy::task<>
+        auto task = [&]() -> capy::task<>
+        {
+            // Start a timer to cancel the accept
+            timer t(ioc);
+            t.expires_after(std::chrono::milliseconds(50));
+
+            // Launch accept that will block (no incoming connections)
+            // Store lambda in variable to ensure it outlives the coroutine.
+            auto nested_coro = [&acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
             {
-                // Start a timer to cancel the accept
-                timer t(ioc);
-                t.expires_after(std::chrono::milliseconds(50));
+                auto [ec] = co_await acc.accept(peer);
+                accept_ec = ec;
+                accept_done = true;
+            };
+            capy::run_async(ioc.get_executor())(nested_coro());
 
-                // Launch accept that will block (no incoming connections)
-                // Store lambda in variable to ensure it outlives the coroutine.
-                auto nested_coro = [&acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
-                {
-                    auto [ec] = co_await acc.accept(peer);
-                    accept_ec = ec;
-                    accept_done = true;
-                };
-                capy::run_async(ioc.get_executor())(nested_coro());
+            // Wait for timer then cancel
+            co_await t.wait();
+            acc.cancel();
 
-                // Wait for timer then cancel
-                co_await t.wait();
-                acc.cancel();
+            // Wait for accept to complete
+            timer t2(ioc);
+            t2.expires_after(std::chrono::milliseconds(50));
+            co_await t2.wait();
 
-                // Wait for accept to complete
-                timer t2(ioc);
-                t2.expires_after(std::chrono::milliseconds(50));
-                co_await t2.wait();
-
-                BOOST_TEST(accept_done);
-                BOOST_TEST(accept_ec == capy::cond::canceled);
-            }());
+            BOOST_TEST(accept_done);
+            BOOST_TEST(accept_ec == capy::cond::canceled);
+        };
+        capy::run_async(ioc.get_executor())(task());
 
         ioc.run();
         acc.close();
@@ -158,34 +158,34 @@ struct acceptor_test
 
         // Pattern from socket tests: run a single coroutine that manages
         // the nested coroutine and close operation
-        capy::run_async(ioc.get_executor())(
-            [&ioc, &acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
+        auto task = [&ioc, &acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
+        {
+            timer t(ioc);
+            t.expires_after(std::chrono::milliseconds(50));
+
+            // Store lambda in variable to ensure it outlives the coroutine.
+            // Lambda coroutines capture 'this' by reference, so the lambda
+            // must remain alive while the coroutine is suspended.
+            auto nested_coro = [&acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
             {
-                timer t(ioc);
-                t.expires_after(std::chrono::milliseconds(50));
+                auto [ec] = co_await acc.accept(peer);
+                accept_ec = ec;
+                accept_done = true;
+            };
+            capy::run_async(ioc.get_executor())(nested_coro());
 
-                // Store lambda in variable to ensure it outlives the coroutine.
-                // Lambda coroutines capture 'this' by reference, so the lambda
-                // must remain alive while the coroutine is suspended.
-                auto nested_coro = [&acc, &peer, &accept_done, &accept_ec]() -> capy::task<>
-                {
-                    auto [ec] = co_await acc.accept(peer);
-                    accept_ec = ec;
-                    accept_done = true;
-                };
-                capy::run_async(ioc.get_executor())(nested_coro());
+            // Wait then close the acceptor
+            co_await t.wait();
+            acc.close();
 
-                // Wait then close the acceptor
-                co_await t.wait();
-                acc.close();
+            timer t2(ioc);
+            t2.expires_after(std::chrono::milliseconds(50));
+            co_await t2.wait();
 
-                timer t2(ioc);
-                t2.expires_after(std::chrono::milliseconds(50));
-                co_await t2.wait();
-
-                BOOST_TEST(accept_done);
-                BOOST_TEST(accept_ec == capy::cond::canceled);
-            }());
+            BOOST_TEST(accept_done);
+            BOOST_TEST(accept_ec == capy::cond::canceled);
+        };
+        capy::run_async(ioc.get_executor())(task());
 
         ioc.run();
     }

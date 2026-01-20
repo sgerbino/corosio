@@ -27,7 +27,10 @@
 #include "src/detail/endpoint_convert.hpp"
 #include "src/detail/make_err.hpp"
 
+#include <algorithm>
+#include <memory>
 #include <mutex>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -36,6 +39,58 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+/*
+    epoll Socket Implementation
+    ===========================
+
+    Each I/O operation follows the same pattern:
+      1. Try the syscall immediately (non-blocking socket)
+      2. If it succeeds or fails with a real error, post to completion queue
+      3. If EAGAIN/EWOULDBLOCK, register with epoll and wait
+
+    This "try first" approach avoids unnecessary epoll round-trips for
+    operations that can complete immediately (common for small reads/writes
+    on fast local connections).
+
+    One-Shot Registration
+    ---------------------
+    We use one-shot epoll registration: each operation registers, waits for
+    one event, then unregisters. This simplifies the state machine since we
+    don't need to track whether an fd is currently registered or handle
+    re-arming. The tradeoff is slightly more epoll_ctl calls, but the
+    simplicity is worth it.
+
+    Cancellation
+    ------------
+    See op.hpp for the completion/cancellation race handling via the
+    `registered` atomic. cancel() must complete pending operations (post
+    them with cancelled flag) so coroutines waiting on them can resume.
+    close_socket() calls cancel() first to ensure this.
+
+    Impl Lifetime with shared_ptr
+    -----------------------------
+    Socket and acceptor impls use enable_shared_from_this. The service owns
+    impls via shared_ptr vectors (socket_ptrs_, acceptor_ptrs_). When a user
+    calls close(), we call cancel() which posts pending ops to the scheduler.
+
+    CRITICAL: The posted ops must keep the impl alive until they complete.
+    Otherwise the scheduler would process a freed op (use-after-free). The
+    cancel() method captures shared_from_this() into op.impl_ptr before
+    posting. When the op completes, impl_ptr is cleared, allowing the impl
+    to be destroyed if no other references exist.
+
+    The intrusive_list (socket_list_, acceptor_list_) provides fast iteration
+    for shutdown cleanup. It stores raw pointers alongside the shared_ptr
+    ownership in the vectors.
+
+    Service Ownership
+    -----------------
+    epoll_sockets owns all socket impls. destroy_impl() removes the shared_ptr
+    from the vector, but the impl may survive if ops still hold impl_ptr refs.
+    shutdown() closes all sockets and clears the vectors; any in-flight ops
+    will complete and release their refs, allowing final destruction.
+*/
 
 namespace boost {
 namespace corosio {
@@ -47,13 +102,9 @@ class epoll_acceptor_impl;
 
 //------------------------------------------------------------------------------
 
-/** Socket implementation for epoll-based I/O.
-
-    This class contains the state for a single socket, including
-    the native socket handle and pending operations.
-*/
 class epoll_socket_impl
     : public socket::socket_impl
+    , public std::enable_shared_from_this<epoll_socket_impl>
     , public capy::intrusive_list<epoll_socket_impl>::node
 {
     friend class epoll_sockets;
@@ -103,12 +154,9 @@ private:
 
 //------------------------------------------------------------------------------
 
-/** Acceptor implementation for epoll-based I/O.
-
-    This class contains the state for a listening socket.
-*/
 class epoll_acceptor_impl
     : public acceptor::acceptor_impl
+    , public std::enable_shared_from_this<epoll_acceptor_impl>
     , public capy::intrusive_list<epoll_acceptor_impl>::node
 {
     friend class epoll_sockets;
@@ -139,80 +187,46 @@ private:
 
 //------------------------------------------------------------------------------
 
-/** epoll socket management service.
-
-    This service owns all socket implementations and coordinates their
-    lifecycle with the epoll-based scheduler.
-*/
 class epoll_sockets
     : public capy::execution_context::service
 {
 public:
     using key_type = epoll_sockets;
 
-    /** Construct the socket service.
-
-        @param ctx Reference to the owning execution_context.
-    */
     explicit epoll_sockets(capy::execution_context& ctx);
-
-    /** Destroy the socket service. */
     ~epoll_sockets();
 
     epoll_sockets(epoll_sockets const&) = delete;
     epoll_sockets& operator=(epoll_sockets const&) = delete;
 
-    /** Shut down the service. */
     void shutdown() override;
 
-    /** Create a new socket implementation. */
     epoll_socket_impl& create_impl();
-
-    /** Destroy a socket implementation. */
     void destroy_impl(epoll_socket_impl& impl);
-
-    /** Create and configure a socket.
-
-        @param impl The socket implementation to initialize.
-        @return Error code, or success.
-    */
     system::error_code open_socket(epoll_socket_impl& impl);
 
-    /** Create a new acceptor implementation. */
     epoll_acceptor_impl& create_acceptor_impl();
-
-    /** Destroy an acceptor implementation. */
     void destroy_acceptor_impl(epoll_acceptor_impl& impl);
-
-    /** Create, bind, and listen on an acceptor socket.
-
-        @param impl The acceptor implementation to initialize.
-        @param ep The local endpoint to bind to.
-        @param backlog The listen backlog.
-        @return Error code, or success.
-    */
     system::error_code open_acceptor(
         epoll_acceptor_impl& impl,
         endpoint ep,
         int backlog);
 
-    /** Return the scheduler. */
     epoll_scheduler& scheduler() const noexcept { return sched_; }
-
-    /** Post an operation for completion. */
     void post(epoll_op* op);
-
-    /** Notify scheduler of pending I/O work. */
     void work_started() noexcept;
-
-    /** Notify scheduler that I/O work completed. */
     void work_finished() noexcept;
 
 private:
     epoll_scheduler& sched_;
     std::mutex mutex_;
+
+    // Dual tracking: intrusive_list for fast shutdown iteration,
+    // vectors for shared_ptr ownership. See "Impl Lifetime" in file header.
     capy::intrusive_list<epoll_socket_impl> socket_list_;
     capy::intrusive_list<epoll_acceptor_impl> acceptor_list_;
+    std::vector<std::shared_ptr<epoll_socket_impl>> socket_ptrs_;
+    std::vector<std::shared_ptr<epoll_acceptor_impl>> acceptor_ptrs_;
 };
 
 //------------------------------------------------------------------------------
@@ -264,6 +278,7 @@ connect(
     if (errno == EINPROGRESS)
     {
         svc_.work_started();
+        op.registered.store(true, std::memory_order_release);
         svc_.scheduler().register_fd(fd_, &op, EPOLLOUT | EPOLLET);
         return;
     }
@@ -294,8 +309,7 @@ read_some(
     capy::mutable_buffer bufs[epoll_read_op::max_buffers];
     op.iovec_count = static_cast<int>(param.copy_to(bufs, epoll_read_op::max_buffers));
 
-    // Handle empty buffer: complete immediately with 0 bytes
-    if (op.iovec_count == 0)
+    if (op.iovec_count == 0 || (op.iovec_count == 1 && bufs[0].size() == 0))
     {
         op.empty_buffer_read = true;
         op.complete(0, 0);
@@ -328,6 +342,7 @@ read_some(
     if (errno == EAGAIN || errno == EWOULDBLOCK)
     {
         svc_.work_started();
+        op.registered.store(true, std::memory_order_release);
         svc_.scheduler().register_fd(fd_, &op, EPOLLIN | EPOLLET);
         return;
     }
@@ -358,8 +373,7 @@ write_some(
     capy::mutable_buffer bufs[epoll_write_op::max_buffers];
     op.iovec_count = static_cast<int>(param.copy_to(bufs, epoll_write_op::max_buffers));
 
-    // Handle empty buffer: complete immediately with 0 bytes
-    if (op.iovec_count == 0)
+    if (op.iovec_count == 0 || (op.iovec_count == 1 && bufs[0].size() == 0))
     {
         op.complete(0, 0);
         svc_.post(&op);
@@ -372,7 +386,11 @@ write_some(
         op.iovecs[i].iov_len = bufs[i].size();
     }
 
-    ssize_t n = ::writev(fd_, op.iovecs, op.iovec_count);
+    msghdr msg{};
+    msg.msg_iov = op.iovecs;
+    msg.msg_iovlen = static_cast<std::size_t>(op.iovec_count);
+
+    ssize_t n = ::sendmsg(fd_, &msg, MSG_NOSIGNAL);
 
     if (n > 0)
     {
@@ -384,11 +402,11 @@ write_some(
     if (errno == EAGAIN || errno == EWOULDBLOCK)
     {
         svc_.work_started();
+        op.registered.store(true, std::memory_order_release);
         svc_.scheduler().register_fd(fd_, &op, EPOLLOUT | EPOLLET);
         return;
     }
 
-    // n == 0 shouldn't happen for TCP stream sockets
     op.complete(errno ? errno : EIO, 0);
     svc_.post(&op);
 }
@@ -397,15 +415,36 @@ inline void
 epoll_socket_impl::
 cancel() noexcept
 {
-    conn_.request_cancel();
-    rd_.request_cancel();
-    wr_.request_cancel();
+    std::shared_ptr<epoll_socket_impl> self;
+    try {
+        self = shared_from_this();
+    } catch (const std::bad_weak_ptr&) {
+        return; // Not yet managed by shared_ptr (during construction)
+    }
+
+    auto cancel_op = [this, &self](epoll_op& op) {
+        bool was_registered = op.registered.exchange(false, std::memory_order_acq_rel);
+        op.request_cancel();
+        if (was_registered)
+        {
+            svc_.scheduler().unregister_fd(fd_);
+            op.impl_ptr = self; // prevent use-after-free
+            svc_.post(&op);
+            svc_.work_finished();
+        }
+    };
+
+    cancel_op(conn_);
+    cancel_op(rd_);
+    cancel_op(wr_);
 }
 
 inline void
 epoll_socket_impl::
 close_socket() noexcept
 {
+    cancel();
+
     if (fd_ >= 0)
     {
         svc_.scheduler().unregister_fd(fd_);
@@ -451,7 +490,7 @@ accept(
     op.fd = fd_;
     op.start(token);
 
-    // Callback for creating peer socket when accept completes via epoll
+    // Needed for deferred peer creation when accept completes via epoll path
     op.service_ptr = &svc_;
     op.create_peer = [](void* svc_ptr, int new_fd) -> io_object::io_object_impl* {
         auto& svc = *static_cast<epoll_sockets*>(svc_ptr);
@@ -479,6 +518,7 @@ accept(
     if (errno == EAGAIN || errno == EWOULDBLOCK)
     {
         svc_.work_started();
+        op.registered.store(true, std::memory_order_release);
         svc_.scheduler().register_fd(fd_, &op, EPOLLIN | EPOLLET);
         return;
     }
@@ -491,13 +531,26 @@ inline void
 epoll_acceptor_impl::
 cancel() noexcept
 {
+    bool was_registered = acc_.registered.exchange(false, std::memory_order_acq_rel);
     acc_.request_cancel();
+
+    if (was_registered)
+    {
+        svc_.scheduler().unregister_fd(fd_);
+        try {
+            acc_.impl_ptr = shared_from_this(); // prevent use-after-free
+        } catch (const std::bad_weak_ptr&) {}
+        svc_.post(&acc_);
+        svc_.work_finished();
+    }
 }
 
 inline void
 epoll_acceptor_impl::
 close_socket() noexcept
 {
+    cancel();
+
     if (fd_ >= 0)
     {
         svc_.scheduler().unregister_fd(fd_);
@@ -530,27 +583,26 @@ shutdown()
     std::lock_guard lock(mutex_);
 
     while (auto* impl = socket_list_.pop_front())
-    {
         impl->close_socket();
-        delete impl;
-    }
 
     while (auto* impl = acceptor_list_.pop_front())
-    {
         impl->close_socket();
-        delete impl;
-    }
+
+    // Impls may outlive this if in-flight ops hold impl_ptr refs
+    socket_ptrs_.clear();
+    acceptor_ptrs_.clear();
 }
 
 inline epoll_socket_impl&
 epoll_sockets::
 create_impl()
 {
-    auto* impl = new epoll_socket_impl(*this);
+    auto impl = std::make_shared<epoll_socket_impl>(*this);
 
     {
         std::lock_guard lock(mutex_);
-        socket_list_.push_back(impl);
+        socket_list_.push_back(impl.get());
+        socket_ptrs_.push_back(impl);
     }
 
     return *impl;
@@ -560,12 +612,14 @@ inline void
 epoll_sockets::
 destroy_impl(epoll_socket_impl& impl)
 {
-    {
-        std::lock_guard lock(mutex_);
-        socket_list_.remove(&impl);
-    }
+    std::lock_guard lock(mutex_);
+    socket_list_.remove(&impl);
 
-    delete &impl;
+    // Impl may outlive this if pending ops hold impl_ptr refs
+    auto it = std::find_if(socket_ptrs_.begin(), socket_ptrs_.end(),
+        [&impl](const auto& ptr) { return ptr.get() == &impl; });
+    if (it != socket_ptrs_.end())
+        socket_ptrs_.erase(it);
 }
 
 inline system::error_code
@@ -586,11 +640,12 @@ inline epoll_acceptor_impl&
 epoll_sockets::
 create_acceptor_impl()
 {
-    auto* impl = new epoll_acceptor_impl(*this);
+    auto impl = std::make_shared<epoll_acceptor_impl>(*this);
 
     {
         std::lock_guard lock(mutex_);
-        acceptor_list_.push_back(impl);
+        acceptor_list_.push_back(impl.get());
+        acceptor_ptrs_.push_back(impl);
     }
 
     return *impl;
@@ -600,12 +655,13 @@ inline void
 epoll_sockets::
 destroy_acceptor_impl(epoll_acceptor_impl& impl)
 {
-    {
-        std::lock_guard lock(mutex_);
-        acceptor_list_.remove(&impl);
-    }
+    std::lock_guard lock(mutex_);
+    acceptor_list_.remove(&impl);
 
-    delete &impl;
+    auto it = std::find_if(acceptor_ptrs_.begin(), acceptor_ptrs_.end(),
+        [&impl](const auto& ptr) { return ptr.get() == &impl; });
+    if (it != acceptor_ptrs_.end())
+        acceptor_ptrs_.erase(it);
 }
 
 inline system::error_code
