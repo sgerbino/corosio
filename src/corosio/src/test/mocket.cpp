@@ -276,33 +276,22 @@ read_some(
         }
     }
 
-    // Extract buffers synchronously
-    buffer_array bufs{};
-    std::size_t count = buffers.copy_to(bufs.data(), max_buffers);
-
-    // Try to serve from peer's provide buffer
-    std::size_t n = fill_from_provide(bufs, count);
-    if (n > 0)
+    // Check if peer has staged data - if so, serve from provide buffer
+    if (peer_ && !peer_->provide_.empty())
     {
+        // Extract buffers only when we need them for staged data
+        buffer_array bufs{};
+        std::size_t count = buffers.copy_to(bufs.data(), max_buffers);
+
+        std::size_t n = fill_from_provide(bufs, count);
         *ec = {};
         *bytes_transferred = n;
         d.dispatch(capy::any_coro{h}).resume();
         return;
     }
 
-    // No staged data - check if we should fail or pass through
-    if (peer_ && peer_->provide_.empty())
-    {
-        // Caller expected data but none was provided
-        // Pass through to real socket for transparent mode
-    }
-
-    // Pass through to the real socket
-    // TODO: Temporarily disabled during API refactoring
-    // run_async requires Executor concept but any_executor_ref doesn't satisfy it
-    *ec = make_error_code(system::errc::not_supported);
-    *bytes_transferred = 0;
-    d.dispatch(capy::any_coro{h}).resume();
+    // Pass through to the real socket (don't extract buffers - forward as-is)
+    sock_.get_impl()->read_some(h, d, buffers, token, ec, bytes_transferred);
 }
 
 void
@@ -329,18 +318,18 @@ write_some(
         }
     }
 
-    // Extract buffers synchronously
-    buffer_array bufs{};
-    std::size_t count = buffers.copy_to(bufs.data(), max_buffers);
-
-    // Calculate total size
-    std::size_t total_size = 0;
-    for (std::size_t i = 0; i < count; ++i)
-        total_size += bufs[i].size();
-
-    // Validate against expect buffer if not empty
+    // Check if we have staged expectations to validate
     if (!expect_.empty())
     {
+        // Extract buffers only when we need them for validation
+        buffer_array bufs{};
+        std::size_t count = buffers.copy_to(bufs.data(), max_buffers);
+
+        // Calculate total size
+        std::size_t total_size = 0;
+        for (std::size_t i = 0; i < count; ++i)
+            total_size += bufs[i].size();
+
         if (!validate_expect(bufs, count, total_size))
         {
             *ec = capy::error::test_failure;
@@ -356,12 +345,8 @@ write_some(
         return;
     }
 
-    // Pass through to the real socket
-    // TODO: Temporarily disabled during API refactoring
-    // run_async requires Executor concept but any_executor_ref doesn't satisfy it
-    *ec = make_error_code(system::errc::not_supported);
-    *bytes_transferred = 0;
-    d.dispatch(capy::any_coro{h}).resume();
+    // Pass through to the real socket (don't extract buffers - forward as-is)
+    sock_.get_impl()->write_some(h, d, buffers, token, ec, bytes_transferred);
 }
 
 //------------------------------------------------------------------------------

@@ -105,10 +105,55 @@ struct mocket_test
     }
 
     void
+    testPassthrough()
+    {
+        io_context ioc;
+        capy::test::fuse f;
+
+        auto [m1, m2] = make_mockets(ioc, f);
+
+        capy::run_async(ioc.get_executor())(
+            [](mocket& a, mocket& b) -> capy::task<>
+            {
+                char buf[32] = {};
+
+                // Write from m1, read from m2
+                auto [ec1, n1] = co_await a.write_some(
+                    capy::const_buffer("hello", 5));
+                BOOST_TEST(!ec1);
+                BOOST_TEST_EQ(n1, 5u);
+
+                auto [ec2, n2] = co_await b.read_some(
+                    capy::mutable_buffer(buf, sizeof(buf)));
+                BOOST_TEST(!ec2);
+                BOOST_TEST_EQ(n2, 5u);
+                BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
+
+                // Write from m2, read from m1
+                auto [ec3, n3] = co_await b.write_some(
+                    capy::const_buffer("world", 5));
+                BOOST_TEST(!ec3);
+                BOOST_TEST_EQ(n3, 5u);
+
+                auto [ec4, n4] = co_await a.read_some(
+                    capy::mutable_buffer(buf, sizeof(buf)));
+                BOOST_TEST(!ec4);
+                BOOST_TEST_EQ(n4, 5u);
+                BOOST_TEST_EQ(std::string_view(buf, n4), "world");
+            }(m1, m2));
+
+        ioc.run();
+
+        BOOST_TEST(!m1.close());
+        BOOST_TEST(!m2.close());
+    }
+
+    void
     run()
     {
         testComprehensive();
         testCloseWithUnconsumedData();
+        testPassthrough();
     }
 };
 
