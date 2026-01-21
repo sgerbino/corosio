@@ -421,7 +421,22 @@ struct wolfssl_stream_impl_
                         if(read_in_pos_ == read_in_len_) { read_in_pos_ = 0; read_in_len_ = 0; }
                         capy::mutable_buffer buf(read_in_buf_.data() + read_in_len_, read_in_buf_.size() - read_in_len_);
                         auto [rec, rn] = co_await do_underlying_read(buf);
-                        if(rec) { ec = rec; goto done; }
+                        if(rec)
+                        {
+                            if(rec == make_error_code(capy::error::eof))
+                            {
+                                // Check if we got a proper TLS shutdown
+                                if(wolfSSL_get_shutdown(ssl_) & SSL_RECEIVED_SHUTDOWN)
+                                    ec = make_error_code(capy::error::eof);
+                                else
+                                    ec = make_error_code(capy::error::stream_truncated);
+                            }
+                            else
+                            {
+                                ec = rec;
+                            }
+                            goto done;
+                        }
                         read_in_len_ += rn;
                     }
                     else if(err == WOLFSSL_ERROR_WANT_WRITE)

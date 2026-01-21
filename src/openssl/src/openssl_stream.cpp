@@ -357,9 +357,11 @@ struct openssl_stream_impl_
                         {
                             if(ec == make_error_code(capy::error::eof))
                             {
-                                // Check if we got a proper shutdown
+                                // Check if we got a proper TLS shutdown
                                 if(SSL_get_shutdown(ssl_) & SSL_RECEIVED_SHUTDOWN)
                                     ec = make_error_code(capy::error::eof);
+                                else
+                                    ec = make_error_code(capy::error::stream_truncated);
                             }
                             goto done;
                         }
@@ -373,7 +375,7 @@ struct openssl_stream_impl_
                     {
                         unsigned long ssl_err = ERR_get_error();
                         if(ssl_err == 0)
-                            ec = make_error_code(capy::error::eof);
+                            ec = make_error_code(capy::error::stream_truncated);
                         else
                             ec = system::error_code(
                                 static_cast<int>(ssl_err), system::system_category());

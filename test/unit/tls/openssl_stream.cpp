@@ -73,6 +73,36 @@ struct openssl_stream_test
             ioc.restart();
         }
     }
+
+    void
+    testTlsShutdown()
+    {
+        using namespace tls::test;
+
+        for( auto mode : { context_mode::shared_cert,
+                           context_mode::separate_cert } )
+        {
+            io_context ioc;
+            auto [client_ctx, server_ctx] = make_contexts( mode );
+            run_tls_shutdown_test( ioc, client_ctx, server_ctx,
+                make_stream, make_stream );
+        }
+    }
+
+    void
+    testStreamTruncated()
+    {
+        using namespace tls::test;
+
+        for( auto mode : { context_mode::shared_cert,
+                           context_mode::separate_cert } )
+        {
+            io_context ioc;
+            auto [client_ctx, server_ctx] = make_contexts( mode );
+            run_tls_truncation_test( ioc, client_ctx, server_ctx,
+                make_stream, make_stream );
+        }
+    }
 #endif
 
     void
@@ -80,6 +110,8 @@ struct openssl_stream_test
     {
 #ifdef BOOST_COROSIO_HAS_OPENSSL
         testSuccessCases();
+        testTlsShutdown();
+        testStreamTruncated();
         // Failure tests disabled: socket cancellation doesn't propagate to
         // TLS handshake operations, causing hangs when one side fails.
         // testFailureCases();
