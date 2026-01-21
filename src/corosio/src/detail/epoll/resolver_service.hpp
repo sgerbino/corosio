@@ -20,7 +20,7 @@
 #include <boost/capy/ex/any_executor_ref.hpp>
 #include <boost/capy/concept/io_awaitable.hpp>
 #include <boost/capy/ex/execution_context.hpp>
-#include <boost/capy/core/intrusive_list.hpp>
+#include "src/detail/intrusive.hpp"
 
 #include <mutex>
 #include <stdexcept>
@@ -44,7 +44,7 @@ class epoll_resolver_impl;
 */
 class epoll_resolver_impl
     : public resolver::resolver_impl
-    , public capy::intrusive_list<epoll_resolver_impl>::node
+    , public intrusive_list<epoll_resolver_impl>::node
 {
     friend class epoll_resolver_service;
 
@@ -137,7 +137,7 @@ public:
 
 private:
     std::mutex mutex_;
-    capy::intrusive_list<epoll_resolver_impl> resolver_list_;
+    intrusive_list<epoll_resolver_impl> resolver_list_;
 };
 
 //------------------------------------------------------------------------------
