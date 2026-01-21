@@ -17,8 +17,8 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/acceptor.hpp>
 #include <boost/corosio/socket.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
-#include <boost/capy/concept/io_awaitable.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
+#include <boost/capy/io_awaitable.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include "src/detail/intrusive.hpp"
 
@@ -116,14 +116,14 @@ public:
 
     void connect(
         std::coroutine_handle<>,
-        capy::any_executor_ref,
+        capy::executor_ref,
         endpoint,
         std::stop_token,
         system::error_code*) override;
 
     void read_some(
         std::coroutine_handle<>,
-        capy::any_executor_ref,
+        capy::executor_ref,
         io_buffer_param,
         std::stop_token,
         system::error_code*,
@@ -131,7 +131,7 @@ public:
 
     void write_some(
         std::coroutine_handle<>,
-        capy::any_executor_ref,
+        capy::executor_ref,
         io_buffer_param,
         std::stop_token,
         system::error_code*,
@@ -184,7 +184,7 @@ public:
 
     void accept(
         std::coroutine_handle<>,
-        capy::any_executor_ref,
+        capy::executor_ref,
         std::stop_token,
         system::error_code*,
         io_object::io_object_impl**) override;
@@ -268,7 +268,7 @@ inline void
 epoll_socket_impl::
 connect(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     endpoint ep,
     std::stop_token token,
     system::error_code* ec)
@@ -307,7 +307,7 @@ inline void
 epoll_socket_impl::
 read_some(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     io_buffer_param param,
     std::stop_token token,
     system::error_code* ec,
@@ -371,7 +371,7 @@ inline void
 epoll_socket_impl::
 write_some(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     io_buffer_param param,
     std::stop_token token,
     system::error_code* ec,
@@ -492,7 +492,7 @@ inline void
 epoll_acceptor_impl::
 accept(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     std::stop_token token,
     system::error_code* ec,
     io_object::io_object_impl** impl_out)

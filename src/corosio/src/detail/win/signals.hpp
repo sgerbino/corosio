@@ -16,8 +16,8 @@
 
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/signal_set.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
-#include <boost/capy/concept/io_awaitable.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
+#include <boost/capy/io_awaitable.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include "src/detail/intrusive.hpp"
 #include <boost/system/error_code.hpp>
@@ -71,8 +71,8 @@ enum { max_signal_number = 32 };
 /** Signal wait operation state. */
 struct signal_op : scheduler_op
 {
-    capy::any_coro h;
-    capy::any_executor_ref d;
+    capy::coro h;
+    capy::executor_ref d;
     system::error_code* ec_out = nullptr;
     int* signal_out = nullptr;
     int signal_number = 0;
@@ -123,7 +123,7 @@ public:
 
     void wait(
         std::coroutine_handle<>,
-        capy::any_executor_ref,
+        capy::executor_ref,
         std::stop_token,
         system::error_code*,
         int*) override;

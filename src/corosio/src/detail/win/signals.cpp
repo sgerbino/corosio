@@ -198,7 +198,7 @@ void
 win_signal_impl::
 wait(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     std::stop_token token,
     system::error_code* ec,
     int* signal_out)

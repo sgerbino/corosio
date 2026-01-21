@@ -307,7 +307,7 @@ struct openssl_stream_impl_
         system::error_code* ec_out,
         std::size_t* bytes_out,
         std::coroutine_handle<> continuation,
-        capy::any_executor_ref d)
+        capy::executor_ref d)
     {
         system::error_code ec;
         std::size_t total_read = 0;
@@ -399,7 +399,7 @@ struct openssl_stream_impl_
         *ec_out = ec;
         *bytes_out = total_read;
 
-        d.dispatch(capy::any_coro{continuation}).resume();
+        d.dispatch(capy::coro{continuation}).resume();
         co_return;
     }
 
@@ -411,7 +411,7 @@ struct openssl_stream_impl_
         system::error_code* ec_out,
         std::size_t* bytes_out,
         std::coroutine_handle<> continuation,
-        capy::any_executor_ref d)
+        capy::executor_ref d)
     {
         system::error_code ec;
         std::size_t total_written = 0;
@@ -479,7 +479,7 @@ struct openssl_stream_impl_
         *ec_out = ec;
         *bytes_out = total_written;
 
-        d.dispatch(capy::any_coro{continuation}).resume();
+        d.dispatch(capy::coro{continuation}).resume();
         co_return;
     }
 
@@ -489,7 +489,7 @@ struct openssl_stream_impl_
         std::stop_token token,
         system::error_code* ec_out,
         std::coroutine_handle<> continuation,
-        capy::any_executor_ref d)
+        capy::executor_ref d)
     {
         system::error_code ec;
 
@@ -545,7 +545,7 @@ struct openssl_stream_impl_
 
         *ec_out = ec;
 
-        d.dispatch(capy::any_coro{continuation}).resume();
+        d.dispatch(capy::coro{continuation}).resume();
         co_return;
     }
 
@@ -554,7 +554,7 @@ struct openssl_stream_impl_
         std::stop_token token,
         system::error_code* ec_out,
         std::coroutine_handle<> continuation,
-        capy::any_executor_ref d)
+        capy::executor_ref d)
     {
         system::error_code ec;
 
@@ -633,7 +633,7 @@ struct openssl_stream_impl_
 
         *ec_out = ec;
 
-        d.dispatch(capy::any_coro{continuation}).resume();
+        d.dispatch(capy::coro{continuation}).resume();
         co_return;
     }
 
@@ -648,7 +648,7 @@ struct openssl_stream_impl_
 
     void read_some(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         io_buffer_param param,
         std::stop_token token,
         system::error_code* ec,
@@ -663,7 +663,7 @@ struct openssl_stream_impl_
 
     void write_some(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         io_buffer_param param,
         std::stop_token token,
         system::error_code* ec,
@@ -678,7 +678,7 @@ struct openssl_stream_impl_
 
     void handshake(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         int type,
         std::stop_token token,
         system::error_code* ec) override
@@ -689,7 +689,7 @@ struct openssl_stream_impl_
 
     void shutdown(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         std::stop_token token,
         system::error_code* ec) override
     {

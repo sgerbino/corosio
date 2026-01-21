@@ -16,8 +16,8 @@
 #include <boost/corosio/io_result.hpp>
 #include <boost/corosio/io_buffer_param.hpp>
 #include <boost/corosio/endpoint.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
-#include <boost/capy/concept/io_awaitable.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
+#include <boost/capy/io_awaitable.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/capy/concept/executor.hpp>
 
@@ -86,7 +86,7 @@ public:
     {
         virtual void connect(
             std::coroutine_handle<>,
-            capy::any_executor_ref,
+            capy::executor_ref,
             endpoint,
             std::stop_token,
             system::error_code*) = 0;

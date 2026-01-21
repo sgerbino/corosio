@@ -16,9 +16,9 @@
 
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_object.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
-#include <boost/capy/concept/io_awaitable.hpp>
-#include <boost/capy/ex/any_coro.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
+#include <boost/capy/io_awaitable.hpp>
+#include <boost/capy/coro.hpp>
 #include <boost/capy/error.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -90,8 +90,8 @@ struct epoll_op : scheduler_op
         void operator()() const noexcept { op->request_cancel(); }
     };
 
-    capy::any_coro h;
-    capy::any_executor_ref d;
+    capy::coro h;
+    capy::executor_ref d;
     system::error_code* ec_out = nullptr;
     std::size_t* bytes_out = nullptr;
 

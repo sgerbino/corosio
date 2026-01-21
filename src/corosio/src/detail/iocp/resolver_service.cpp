@@ -191,8 +191,8 @@ release()
 void
 win_resolver_impl::
 resolve(
-    capy::any_coro h,
-    capy::any_executor_ref d,
+    capy::coro h,
+    capy::executor_ref d,
     std::string_view host,
     std::string_view service,
     resolve_flags flags,

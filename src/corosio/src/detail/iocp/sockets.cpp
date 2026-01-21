@@ -343,8 +343,8 @@ release_internal()
 void
 win_socket_impl_internal::
 connect(
-    capy::any_coro h,
-    capy::any_executor_ref d,
+    capy::coro h,
+    capy::executor_ref d,
     endpoint ep,
     std::stop_token token,
     system::error_code* ec)
@@ -416,8 +416,8 @@ connect(
 void
 win_socket_impl_internal::
 read_some(
-    capy::any_coro h,
-    capy::any_executor_ref d,
+    capy::coro h,
+    capy::executor_ref d,
     io_buffer_param param,
     std::stop_token token,
     system::error_code* ec,
@@ -490,8 +490,8 @@ read_some(
 void
 win_socket_impl_internal::
 write_some(
-    capy::any_coro h,
-    capy::any_executor_ref d,
+    capy::coro h,
+    capy::executor_ref d,
     io_buffer_param param,
     std::stop_token token,
     system::error_code* ec,
@@ -926,8 +926,8 @@ release_internal()
 void
 win_acceptor_impl_internal::
 accept(
-    capy::any_coro h,
-    capy::any_executor_ref d,
+    capy::coro h,
+    capy::executor_ref d,
     std::stop_token token,
     system::error_code* ec,
     io_object::io_object_impl** impl_out)

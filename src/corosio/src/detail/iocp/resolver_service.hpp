@@ -23,8 +23,8 @@
 
 #include <boost/corosio/resolver.hpp>
 #include <boost/corosio/resolver_results.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
-#include <boost/capy/concept/io_awaitable.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
+#include <boost/capy/io_awaitable.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include "src/detail/intrusive.hpp"
 
@@ -94,7 +94,7 @@ public:
 
     void resolve(
         std::coroutine_handle<>,
-        capy::any_executor_ref,
+        capy::executor_ref,
         std::string_view host,
         std::string_view service,
         resolve_flags flags,

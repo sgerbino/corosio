@@ -18,7 +18,7 @@
 #include "src/detail/make_err.hpp"
 
 #include <boost/corosio/detail/except.hpp>
-#include <boost/capy/core/thread_local_ptr.hpp>
+#include <boost/corosio/detail/thread_local_ptr.hpp>
 
 #include <limits>
 
@@ -59,7 +59,7 @@ struct scheduler_context
 };
 
 // used for running_in_this_thread()
-capy::thread_local_ptr<scheduler_context> context_stack;
+corosio::detail::thread_local_ptr<scheduler_context> context_stack;
 
 struct thread_context_guard
 {
@@ -200,16 +200,16 @@ shutdown()
 
 void
 win_scheduler::
-post(capy::any_coro h) const
+post(capy::coro h) const
 {
     struct post_handler final
         : scheduler_op
     {
-        capy::any_coro h_;
+        capy::coro h_;
         long ready_ = 1;  // always ready for immediate dispatch
 
         explicit
-        post_handler(capy::any_coro h)
+        post_handler(capy::coro h)
             : h_(h)
         {
         }

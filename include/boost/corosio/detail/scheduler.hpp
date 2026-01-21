@@ -11,7 +11,7 @@
 #define BOOST_COROSIO_DETAIL_SCHEDULER_HPP
 
 #include <boost/corosio/detail/config.hpp>
-#include <boost/capy/ex/any_coro.hpp>
+#include <boost/capy/coro.hpp>
 
 #include <cstddef>
 
@@ -24,7 +24,7 @@ class scheduler_op;
 struct scheduler
 {
     virtual ~scheduler() = default;
-    virtual void post(capy::any_coro) const = 0;
+    virtual void post(capy::coro) const = 0;
     virtual void post(scheduler_op*) const = 0;
     virtual void on_work_started() noexcept = 0;
     virtual void on_work_finished() noexcept = 0;

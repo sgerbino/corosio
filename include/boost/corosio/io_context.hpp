@@ -13,7 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/corosio/detail/unique_ptr.hpp>
-#include <boost/capy/ex/any_coro.hpp>
+#include <boost/capy/coro.hpp>
 #include <boost/capy/concept/executor.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
@@ -374,8 +374,8 @@ public:
         @return The handle for symmetric transfer, or `noop_coroutine`
             if the handle was posted.
     */
-    capy::any_coro
-    dispatch(capy::any_coro h) const
+    capy::coro
+    dispatch(capy::coro h) const
     {
         if (running_in_this_thread())
             return h;
@@ -391,7 +391,7 @@ public:
         @param h The coroutine handle to post.
     */
     void
-    post(capy::any_coro h) const
+    post(capy::coro h) const
     {
         ctx_->sched_.post(h);
     }

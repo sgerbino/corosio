@@ -14,7 +14,7 @@
 #include <boost/corosio/io_object.hpp>
 #include <boost/corosio/io_result.hpp>
 #include <boost/corosio/io_buffer_param.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <coroutine>
@@ -200,7 +200,7 @@ public:
     {
         virtual void read_some(
             std::coroutine_handle<>,
-            capy::any_executor_ref,
+            capy::executor_ref,
             io_buffer_param,
             std::stop_token,
             system::error_code*,
@@ -208,7 +208,7 @@ public:
 
         virtual void write_some(
             std::coroutine_handle<>,
-            capy::any_executor_ref,
+            capy::executor_ref,
             io_buffer_param,
             std::stop_token,
             system::error_code*,

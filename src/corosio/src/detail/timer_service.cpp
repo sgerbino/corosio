@@ -12,8 +12,8 @@
 #include <boost/corosio/detail/scheduler.hpp>
 #include "src/detail/intrusive.hpp"
 #include <boost/capy/error.hpp>
-#include <boost/capy/ex/any_coro.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
+#include <boost/capy/coro.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <coroutine>
@@ -43,7 +43,7 @@ struct timer_impl
 
     // Wait operation state
     std::coroutine_handle<> h_;
-    capy::any_executor_ref d_;
+    capy::executor_ref d_;
     system::error_code* ec_out_ = nullptr;
     std::stop_token token_;
     bool waiting_ = false;
@@ -57,7 +57,7 @@ struct timer_impl
 
     void wait(
         std::coroutine_handle<>,
-        capy::any_executor_ref,
+        capy::executor_ref,
         std::stop_token,
         system::error_code*) override;
 };
@@ -144,7 +144,7 @@ public:
         bool notify = false;
         bool was_waiting = false;
         std::coroutine_handle<> h;
-        capy::any_executor_ref d;
+        capy::executor_ref d;
         system::error_code* ec_out = nullptr;
 
         {
@@ -209,7 +209,7 @@ public:
     void cancel_timer(timer_impl& impl)
     {
         std::coroutine_handle<> h;
-        capy::any_executor_ref d;
+        capy::executor_ref d;
         system::error_code* ec_out = nullptr;
         bool was_waiting = false;
 
@@ -258,7 +258,7 @@ public:
         struct expired_entry
         {
             std::coroutine_handle<> h;
-            capy::any_executor_ref d;
+            capy::executor_ref d;
             system::error_code* ec_out;
         };
         std::vector<expired_entry> expired;
@@ -380,7 +380,7 @@ void
 timer_impl::
 wait(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     std::stop_token token,
     system::error_code* ec)
 {

@@ -17,8 +17,8 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/acceptor.hpp>
 #include <boost/corosio/socket.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
-#include <boost/capy/concept/io_awaitable.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
+#include <boost/capy/io_awaitable.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include "src/detail/intrusive.hpp"
 
@@ -141,23 +141,23 @@ public:
     void release_internal();
 
     void connect(
-        capy::any_coro,
-        capy::any_executor_ref,
+        capy::coro,
+        capy::executor_ref,
         endpoint,
         std::stop_token,
         system::error_code*);
 
     void read_some(
-        capy::any_coro,
-        capy::any_executor_ref,
+        capy::coro,
+        capy::executor_ref,
         io_buffer_param,
         std::stop_token,
         system::error_code*,
         std::size_t*);
 
     void write_some(
-        capy::any_coro,
-        capy::any_executor_ref,
+        capy::coro,
+        capy::executor_ref,
         io_buffer_param,
         std::stop_token,
         system::error_code*,
@@ -195,7 +195,7 @@ public:
 
     void connect(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         endpoint ep,
         std::stop_token token,
         system::error_code* ec) override
@@ -205,7 +205,7 @@ public:
 
     void read_some(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         io_buffer_param buf,
         std::stop_token token,
         system::error_code* ec,
@@ -216,7 +216,7 @@ public:
 
     void write_some(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         io_buffer_param buf,
         std::stop_token token,
         system::error_code* ec,
@@ -267,8 +267,8 @@ public:
     void release_internal();
 
     void accept(
-        capy::any_coro,
-        capy::any_executor_ref,
+        capy::coro,
+        capy::executor_ref,
         std::stop_token,
         system::error_code*,
         io_object::io_object_impl**);
@@ -310,7 +310,7 @@ public:
 
     void accept(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         std::stop_token token,
         system::error_code* ec,
         io_object::io_object_impl** impl_out) override

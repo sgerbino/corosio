@@ -13,7 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_result.hpp>
 #include <boost/corosio/io_stream.hpp>
-#include <boost/capy/ex/any_executor_ref.hpp>
+#include <boost/capy/ex/executor_ref.hpp>
 
 #include <coroutine>
 #include <stop_token>
@@ -230,14 +230,14 @@ public:
     {
         virtual void handshake(
             std::coroutine_handle<>,
-            capy::any_executor_ref,
+            capy::executor_ref,
             int,
             std::stop_token,
             system::error_code*) = 0;
 
         virtual void shutdown(
             std::coroutine_handle<>,
-            capy::any_executor_ref,
+            capy::executor_ref,
             std::stop_token,
             system::error_code*) = 0;
     };

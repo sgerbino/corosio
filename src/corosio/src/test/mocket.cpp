@@ -89,7 +89,7 @@ public:
 
     void read_some(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         io_buffer_param buffers,
         std::stop_token token,
         system::error_code* ec,
@@ -97,7 +97,7 @@ public:
 
     void write_some(
         std::coroutine_handle<> h,
-        capy::any_executor_ref d,
+        capy::executor_ref d,
         io_buffer_param buffers,
         std::stop_token token,
         system::error_code* ec,
@@ -256,7 +256,7 @@ void
 mocket_impl::
 read_some(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     io_buffer_param buffers,
     std::stop_token token,
     system::error_code* ec,
@@ -271,7 +271,7 @@ read_some(
         {
             *ec = fail_ec;
             *bytes_transferred = 0;
-            d.dispatch(capy::any_coro{h}).resume();
+            d.dispatch(capy::coro{h}).resume();
             return;
         }
     }
@@ -286,7 +286,7 @@ read_some(
         std::size_t n = fill_from_provide(bufs, count);
         *ec = {};
         *bytes_transferred = n;
-        d.dispatch(capy::any_coro{h}).resume();
+        d.dispatch(capy::coro{h}).resume();
         return;
     }
 
@@ -298,7 +298,7 @@ void
 mocket_impl::
 write_some(
     std::coroutine_handle<> h,
-    capy::any_executor_ref d,
+    capy::executor_ref d,
     io_buffer_param buffers,
     std::stop_token token,
     system::error_code* ec,
@@ -313,7 +313,7 @@ write_some(
         {
             *ec = fail_ec;
             *bytes_transferred = 0;
-            d.dispatch(capy::any_coro{h}).resume();
+            d.dispatch(capy::coro{h}).resume();
             return;
         }
     }
@@ -334,14 +334,14 @@ write_some(
         {
             *ec = capy::error::test_failure;
             *bytes_transferred = 0;
-            d.dispatch(capy::any_coro{h}).resume();
+            d.dispatch(capy::coro{h}).resume();
             return;
         }
 
         // If all expected data was validated, report success
         *ec = {};
         *bytes_transferred = total_size;
-        d.dispatch(capy::any_coro{h}).resume();
+        d.dispatch(capy::coro{h}).resume();
         return;
     }
 
