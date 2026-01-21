@@ -74,6 +74,14 @@ namespace corosio {
 class BOOST_COROSIO_DECL socket : public io_stream
 {
 public:
+    /** Different ways a socket may be shutdown. */
+    enum shutdown_type
+    {
+        shutdown_receive,
+        shutdown_send,
+        shutdown_both
+    };
+
     struct socket_impl : io_stream_impl
     {
         virtual void connect(
@@ -82,6 +90,8 @@ public:
             endpoint,
             std::stop_token,
             system::error_code*) = 0;
+
+        virtual system::error_code shutdown(shutdown_type) noexcept = 0;
     };
 
     struct connect_awaitable
@@ -270,6 +280,47 @@ public:
         Check `ec == cond::canceled` for portable comparison.
     */
     void cancel();
+
+    /** Disable sends or receives on the socket.
+
+        TCP connections are full-duplex: each direction (send and receive)
+        operates independently. This function allows you to close one or
+        both directions without destroying the socket.
+
+        @li @ref shutdown_send sends a TCP FIN packet to the peer,
+            signaling that you have no more data to send. You can still
+            receive data until the peer also closes their send direction.
+            This is the most common use case, typically called before
+            close() to ensure graceful connection termination.
+
+        @li @ref shutdown_receive disables reading on the socket. This
+            does NOT send anything to the peer - they are not informed
+            and may continue sending data. Subsequent reads will fail
+            or return end-of-file. Incoming data may be discarded or
+            buffered depending on the operating system.
+
+        @li @ref shutdown_both combines both effects: sends a FIN and
+            disables reading.
+
+        When the peer shuts down their send direction (sends a FIN),
+        subsequent read operations will complete with `capy::cond::eof`.
+        Use the portable condition test rather than comparing error
+        codes directly:
+
+        @code
+        auto [ec, n] = co_await sock.read_some(buffer);
+        if (ec == capy::cond::eof)
+        {
+            // Peer closed their send direction
+        }
+        @endcode
+
+        Any error from the underlying system call is silently discarded
+        because it is unlikely to be helpful.
+
+        @param what Determines what operations will no longer be allowed.
+    */
+    void shutdown(shutdown_type what);
 
 private:
     friend class acceptor;

@@ -225,6 +225,22 @@ public:
         internal_->write_some(h, d, buf, token, ec, bytes);
     }
 
+    system::error_code shutdown(socket::shutdown_type what) noexcept override
+    {
+        int how;
+        switch (what)
+        {
+        case socket::shutdown_receive: how = SD_RECEIVE; break;
+        case socket::shutdown_send:    how = SD_SEND;    break;
+        case socket::shutdown_both:    how = SD_BOTH;    break;
+        default:
+            return make_err(WSAEINVAL);
+        }
+        if (::shutdown(internal_->native_handle(), how) != 0)
+            return make_err(WSAGetLastError());
+        return {};
+    }
+
     win_socket_impl_internal* get_internal() const noexcept { return internal_.get(); }
 };
 

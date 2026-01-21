@@ -51,7 +51,7 @@ socket::
 open()
 {
     if (impl_)
-        return; // Already open
+        return;
 
     auto& svc = ctx_->use_service<socket_service>();
     auto& wrapper = svc.create_impl();
@@ -75,7 +75,7 @@ socket::
 close()
 {
     if (!impl_)
-        return; // Already closed
+        return;
 
     auto* wrapper = static_cast<socket_impl_type*>(impl_);
     wrapper->release();
@@ -92,6 +92,14 @@ cancel()
 #elif defined(BOOST_COROSIO_BACKEND_EPOLL)
     static_cast<socket_impl_type*>(impl_)->cancel();
 #endif
+}
+
+void
+socket::
+shutdown(shutdown_type what)
+{
+    if (impl_)
+        get().shutdown(what);
 }
 
 } // namespace corosio

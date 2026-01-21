@@ -137,6 +137,22 @@ public:
         system::error_code*,
         std::size_t*) override;
 
+    system::error_code shutdown(socket::shutdown_type what) noexcept override
+    {
+        int how;
+        switch (what)
+        {
+        case socket::shutdown_receive: how = SHUT_RD;   break;
+        case socket::shutdown_send:    how = SHUT_WR;   break;
+        case socket::shutdown_both:    how = SHUT_RDWR; break;
+        default:
+            return make_err(EINVAL);
+        }
+        if (::shutdown(fd_, how) != 0)
+            return make_err(errno);
+        return {};
+    }
+
     int native_handle() const noexcept { return fd_; }
     bool is_open() const noexcept { return fd_ >= 0; }
     void cancel() noexcept;

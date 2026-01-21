@@ -679,6 +679,109 @@ struct socket_test
         s2.close();
     }
 
+    // Shutdown
+
+    void
+    testShutdownSend()
+    {
+        io_context ioc;
+        auto [s1, s2] = test::make_socket_pair(ioc);
+
+        auto task = [](socket& a, socket& b) -> capy::task<>
+        {
+            // Write data then shutdown send
+            co_await a.write_some(capy::const_buffer("hello", 5));
+            a.shutdown(socket::shutdown_send);
+
+            // Read the data
+            char buf[32] = {};
+            auto [ec1, n1] = co_await b.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec1);
+            BOOST_TEST_EQ(std::string_view(buf, n1), "hello");
+
+            // Next read should get EOF
+            auto [ec2, n2] = co_await b.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(ec2 == capy::cond::eof);
+        };
+        capy::run_async(ioc.get_executor())(task(s1, s2));
+
+        ioc.run();
+        s1.close();
+        s2.close();
+    }
+
+    void
+    testShutdownReceive()
+    {
+        io_context ioc;
+        auto [s1, s2] = test::make_socket_pair(ioc);
+
+        auto task = [](socket& a, socket& b) -> capy::task<>
+        {
+            // Shutdown receive on b
+            b.shutdown(socket::shutdown_receive);
+
+            // b can still send
+            co_await b.write_some(capy::const_buffer("from_b", 6));
+
+            char buf[32] = {};
+            auto [ec, n] = co_await a.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec);
+            BOOST_TEST_EQ(std::string_view(buf, n), "from_b");
+        };
+        capy::run_async(ioc.get_executor())(task(s1, s2));
+
+        ioc.run();
+        s1.close();
+        s2.close();
+    }
+
+    void
+    testShutdownOnClosedSocket()
+    {
+        io_context ioc;
+        socket sock(ioc);
+
+        // Shutdown on closed socket should not crash
+        sock.shutdown(socket::shutdown_send);
+        sock.shutdown(socket::shutdown_receive);
+        sock.shutdown(socket::shutdown_both);
+    }
+
+    void
+    testShutdownBothSendDirection()
+    {
+        io_context ioc;
+        auto [s1, s2] = test::make_socket_pair(ioc);
+
+        auto task = [](socket& a, socket& b) -> capy::task<>
+        {
+            // Write data then shutdown both
+            co_await a.write_some(capy::const_buffer("goodbye", 7));
+            a.shutdown(socket::shutdown_both);
+
+            // Peer should receive the data
+            char buf[32] = {};
+            auto [ec1, n1] = co_await b.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(!ec1);
+            BOOST_TEST_EQ(std::string_view(buf, n1), "goodbye");
+
+            // Next read should get EOF
+            auto [ec2, n2] = co_await b.read_some(
+                capy::mutable_buffer(buf, sizeof(buf)));
+            BOOST_TEST(ec2 == capy::cond::eof);
+        };
+        capy::run_async(ioc.get_executor())(task(s1, s2));
+
+        ioc.run();
+        s1.close();
+        s2.close();
+    }
+
     // Data Integrity
 
     void
@@ -769,6 +872,12 @@ struct socket_test
         // EOF and closure
         testReadAfterPeerClose();
         testWriteAfterPeerClose();
+
+        // Shutdown
+        testShutdownSend();
+        testShutdownReceive();
+        testShutdownOnClosedSocket();
+        testShutdownBothSendDirection();
 
         // Cancellation
         testCancelRead();
