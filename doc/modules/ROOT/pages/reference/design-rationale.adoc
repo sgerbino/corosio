@@ -115,11 +115,11 @@ io_object
 Virtual function overhead for `read_some()`/`write_some()`. Acceptable
 because I/O operations are inherently expensive.
 
-== Buffer Type Erasure (any_bufref)
+== Buffer Type Erasure (buffer_param)
 
 === Decision
 
-Buffer sequences are type-erased at the I/O boundary using `any_bufref`.
+Buffer sequences are type-erased at the I/O boundary using `buffer_param`.
 
 === Rationale
 

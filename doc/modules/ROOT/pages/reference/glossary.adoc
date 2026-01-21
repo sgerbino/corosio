@@ -25,8 +25,8 @@ Affinity::
 The binding of a coroutine to a specific executor. A coroutine with affinity
 to executor `ex` will have all its resumptions dispatched through `ex`.
 
-any_bufref::
-A type-erased reference to a buffer sequence, allowing non-template code to
+buffer_param::
+A type-erased buffer sequence parameter, allowing non-template code to
 work with any buffer type.
 
 any_dispatcher::

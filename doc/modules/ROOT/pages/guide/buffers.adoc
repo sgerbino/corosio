@@ -160,24 +160,24 @@ consuming.consume(n);  // Advance by bytes read
 
 This is used internally by `read()` and `write()` but can be used directly.
 
-== any_bufref
+== buffer_param
 
-The `any_bufref` class type-erases buffer sequences:
+The `buffer_param` class type-erases buffer sequences:
 
 [source,cpp]
 ----
-#include <boost/corosio/any_bufref.hpp>
+#include <boost/capy/buffers/buffer_param.hpp>
 
-void accept_any_buffer(corosio::any_bufref bufref)
+void accept_any_buffer(capy::buffer_param buffers)
 {
     capy::mutable_buffer temp[8];
-    std::size_t n = bufref.copy_to(temp, 8);
+    std::size_t n = buffers.copy_to(temp, 8);
     // Use temp[0..n-1]
 }
 
-// Works with any buffer sequence
+// Works with any buffer sequence (implicit conversion)
 std::array<capy::mutable_buffer, 2> bufs = {...};
-accept_any_buffer(corosio::any_bufref(bufs));
+accept_any_buffer(bufs);
 ----
 
 This enables non-templated code to work with any buffer type.
