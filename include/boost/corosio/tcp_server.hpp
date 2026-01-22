@@ -96,7 +96,7 @@ private:
 
                     auto await_suspend(std::coroutine_handle<promise_type> h)
                     {
-                        static_assert(capy::IoAwaitable<std::decay_t<Awaitable>, Ex>);
+                        static_assert(capy::IoAwaitable<std::decay_t<Awaitable>>);
                         return aw.await_suspend(h, *ex_ptr, std::stop_token{});
                     }
                 };
