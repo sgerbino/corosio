@@ -104,22 +104,21 @@ jobs:
             build-cmake: true
 
           # macOS (2 configurations)
-          # TODO: Re-enable when BSD/kqueue support is implemented
+          # TODO: Re-enable second config when BSD/kqueue support is implemented
           #
-          # - compiler: "apple-clang"
-          #   version: "*"
-          #   cxxstd: "20"
-          #   latest-cxxstd: "20"
-          #   cxx: "clang++"
-          #   cc: "clang"
-          #   runs-on: "macos-26"
-          #   b2-toolset: "clang"
-          #   is-latest: true
-          #   name: "Apple-Clang (macOS 26, asan+ubsan): C++20"
-          #   shared: true
-          #   build-type: "RelWithDebInfo"
-          #   asan: true
-          #   ubsan: true
+          - compiler: "apple-clang"
+            version: "*"
+            cxxstd: "20"
+            latest-cxxstd: "20"
+            cxx: "clang++"
+            cc: "clang"
+            runs-on: "macos-26"
+            b2-toolset: "clang"
+            is-latest: true
+            name: "Apple-Clang (macOS 26): C++20"
+            shared: true
+            build-type: "Release"
+            build-cmake: true
           #
           # - compiler: "apple-clang"
           #   version: "*"

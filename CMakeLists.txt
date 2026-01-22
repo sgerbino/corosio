@@ -163,7 +163,8 @@ function(boost_corosio_setup_properties target)
     endif ()
     target_compile_options(${target}
         PRIVATE
-            $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
+            $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
+            $<$<CXX_COMPILER_ID:AppleClang>:-fexperimental-library>)
 endfunction()
 
 #-------------------------------------------------

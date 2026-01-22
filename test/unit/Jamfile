@@ -18,6 +18,7 @@ project boost/corosio/test/unit
       <include>.
       <include>../..
       <toolset>gcc:<cxxflags>-fcoroutines
+      <toolset>darwin:<cxxflags>-fexperimental-library
     ;
 
 for local f in [ glob-tree-ex . : *.cpp ]

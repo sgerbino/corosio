@@ -21,6 +21,7 @@ project boost/corosio
     $(c20-requires)
     <define>BOOST_COROSIO_SOURCE
     <toolset>gcc:<cxxflags>-fcoroutines
+    <toolset>darwin:<cxxflags>-fexperimental-library
   : common-requirements
     <link>shared:<define>BOOST_COROSIO_DYN_LINK
     <link>static:<define>BOOST_COROSIO_STATIC_LINK
