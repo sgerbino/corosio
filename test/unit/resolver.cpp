@@ -21,6 +21,8 @@
 #include <boost/capy/cond.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
+#include <boost/url/ipv4_address.hpp>
+#include <boost/url/ipv6_address.hpp>
 
 #include "test_suite.hpp"
 
