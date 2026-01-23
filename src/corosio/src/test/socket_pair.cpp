@@ -14,6 +14,7 @@
 #include <boost/capy/task.hpp>
 #include <boost/url/ipv4_address.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <stdexcept>
 
@@ -23,16 +24,17 @@ namespace test {
 
 namespace {
 
-constexpr std::uint16_t test_port_base = 49300;
-constexpr std::uint16_t test_port_range = 100;
-std::uint16_t next_test_port = 0;
+// Use atomic for thread safety when tests run in parallel
+std::atomic<std::uint16_t> next_test_port{0};
 
 std::uint16_t
 get_test_port() noexcept
 {
-    auto port = test_port_base + (next_test_port % test_port_range);
-    ++next_test_port;
-    return static_cast<std::uint16_t>(port);
+    // Use a wide port range in the dynamic/ephemeral range (49152-65535)
+    constexpr std::uint16_t port_base = 49152;
+    constexpr std::uint16_t port_range = 16383;  // 49152-65535
+    auto offset = next_test_port.fetch_add(1, std::memory_order_relaxed);
+    return static_cast<std::uint16_t>(port_base + (offset % port_range));
 }
 
 } // namespace
@@ -41,15 +43,34 @@ std::pair<socket, socket>
 make_socket_pair(io_context& ioc)
 {
     auto ex = ioc.get_executor();
-    std::uint16_t port = get_test_port();
 
     system::error_code accept_ec;
     system::error_code connect_ec;
     bool accept_done = false;
     bool connect_done = false;
 
+    // Try multiple ports in case of conflicts (TIME_WAIT, parallel tests, etc.)
+    std::uint16_t port = 0;
     acceptor acc(ioc);
-    acc.listen(endpoint(urls::ipv4_address::loopback(), port));
+    bool listening = false;
+    for (int attempt = 0; attempt < 20; ++attempt)
+    {
+        port = get_test_port();
+        try
+        {
+            acc.listen(endpoint(urls::ipv4_address::loopback(), port));
+            listening = true;
+            break;
+        }
+        catch (const system::system_error&)
+        {
+            // Port in use, try another
+            acc.close();
+            acc = acceptor(ioc);
+        }
+    }
+    if (!listening)
+        throw std::runtime_error("socket_pair: failed to find available port");
 
     socket s1(ioc);
     socket s2(ioc);
