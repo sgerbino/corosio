@@ -11,7 +11,7 @@
 #define BOOST_COROSIO_HPP
 
 #include <boost/corosio/io_context.hpp>
-#include <boost/corosio/io_result.hpp>
+#include <boost/capy/io_result.hpp>
 #include <boost/corosio/socket.hpp>
 #include <boost/corosio/endpoint.hpp>
 #include <boost/corosio/read.hpp>

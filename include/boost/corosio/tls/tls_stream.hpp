@@ -11,7 +11,7 @@
 #define BOOST_COROSIO_TLS_TLS_STREAM_HPP
 
 #include <boost/corosio/detail/config.hpp>
-#include <boost/corosio/io_result.hpp>
+#include <boost/capy/io_result.hpp>
 #include <boost/corosio/io_stream.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 
@@ -56,7 +56,7 @@ class BOOST_COROSIO_DECL tls_stream : public io_stream
             return token_.stop_requested();
         }
 
-        io_result<> await_resume() const noexcept
+        capy::io_result<> await_resume() const noexcept
         {
             if(token_.stop_requested())
                 return {make_error_code(system::errc::operation_canceled)};
@@ -101,7 +101,7 @@ class BOOST_COROSIO_DECL tls_stream : public io_stream
             return token_.stop_requested();
         }
 
-        io_result<> await_resume() const noexcept
+        capy::io_result<> await_resume() const noexcept
         {
             if(token_.stop_requested())
                 return {make_error_code(system::errc::operation_canceled)};

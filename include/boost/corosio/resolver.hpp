@@ -13,7 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/except.hpp>
 #include <boost/corosio/io_object.hpp>
-#include <boost/corosio/io_result.hpp>
+#include <boost/capy/io_result.hpp>
 #include <boost/corosio/resolver_results.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <boost/capy/io_awaitable.hpp>
@@ -165,7 +165,7 @@ class BOOST_COROSIO_DECL resolver : public io_object
             return token_.stop_requested();
         }
 
-        io_result<resolver_results> await_resume() const noexcept
+        capy::io_result<resolver_results> await_resume() const noexcept
         {
             if (token_.stop_requested())
                 return {make_error_code(system::errc::operation_canceled), {}};

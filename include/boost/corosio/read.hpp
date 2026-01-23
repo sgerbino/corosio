@@ -12,7 +12,7 @@
 
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_stream.hpp>
-#include <boost/corosio/io_result.hpp>
+#include <boost/capy/io_result.hpp>
 #include <boost/capy/buffers/consuming_buffers.hpp>
 #include <boost/capy/buffers.hpp>
 #include <boost/capy/error.hpp>
@@ -76,7 +76,7 @@ namespace corosio {
         after reading any amount of data.
 */
 template<capy::MutableBufferSequence MB>
-capy::task<io_result<std::size_t>>
+capy::task<capy::io_result<std::size_t>>
 read(io_stream& ios, MB const& bs)
 {
     capy::consuming_buffers<MB> consuming(bs);
@@ -149,7 +149,7 @@ read(io_stream& ios, MB const& bs)
         string, call `s.clear()` before invoking this function.
 */
 inline
-capy::task<io_result<std::size_t>>
+capy::task<capy::io_result<std::size_t>>
 read(io_stream& ios, std::string& s)
 {
     std::size_t const base = s.size();

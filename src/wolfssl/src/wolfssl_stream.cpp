@@ -11,6 +11,7 @@
 #include <boost/capy/ex/async_mutex.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/error.hpp>
+#include <boost/capy/io_result.hpp>
 #include <boost/capy/task.hpp>
 
 // Internal context implementation
@@ -344,14 +345,14 @@ struct wolfssl_stream_impl_
 
     //--------------------------------------------------------------------------
 
-    capy::task<io_result<std::size_t>>
+    capy::task<capy::io_result<std::size_t>>
     do_underlying_read(capy::mutable_buffer buf)
     {
         auto guard = co_await io_mutex_.scoped_lock();
         co_return co_await s_.read_some(buf);
     }
 
-    capy::task<io_result<std::size_t>>
+    capy::task<capy::io_result<std::size_t>>
     do_underlying_write(capy::mutable_buffer buf)
     {
         auto guard = co_await io_mutex_.scoped_lock();

@@ -12,7 +12,7 @@
 
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_stream.hpp>
-#include <boost/corosio/io_result.hpp>
+#include <boost/capy/io_result.hpp>
 #include <boost/capy/buffers/consuming_buffers.hpp>
 #include <boost/capy/buffers.hpp>
 #include <boost/capy/task.hpp>
@@ -71,7 +71,7 @@ namespace corosio {
         writing any amount of data.
 */
 template<capy::ConstBufferSequence ConstBufferSequence>
-capy::task<io_result<std::size_t>>
+capy::task<capy::io_result<std::size_t>>
 write(io_stream& ios, ConstBufferSequence const& buffers)
 {
     capy::consuming_buffers<ConstBufferSequence> consuming(buffers);
