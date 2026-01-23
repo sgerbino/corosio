@@ -10,6 +10,12 @@
 // Test that header file is self-contained.
 #include <boost/corosio/resolver.hpp>
 
+// GCC emits false-positive "may be used uninitialized" warnings
+// for structured bindings with co_await expressions
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/timer.hpp>
 #include <boost/capy/cond.hpp>

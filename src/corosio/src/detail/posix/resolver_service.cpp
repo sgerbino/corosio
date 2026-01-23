@@ -209,52 +209,8 @@ make_gai_error(int gai_err)
 
 //------------------------------------------------------------------------------
 
+class posix_resolver_impl;
 class posix_resolver_service_impl;
-
-//------------------------------------------------------------------------------
-// posix_resolve_op - operation state for a single DNS resolution
-//------------------------------------------------------------------------------
-
-struct posix_resolve_op : scheduler_op
-{
-    struct canceller
-    {
-        posix_resolve_op* op;
-        void operator()() const noexcept { op->request_cancel(); }
-    };
-
-    // Coroutine state
-    capy::coro h;
-    capy::executor_ref d;
-
-    // Output parameters
-    system::error_code* ec_out = nullptr;
-    resolver_results* out = nullptr;
-
-    // Input parameters (owned copies for thread safety)
-    std::string host;
-    std::string service;
-    resolve_flags flags = resolve_flags::none;
-
-    // Result storage (populated by worker thread)
-    resolver_results stored_results;
-    int gai_error = 0;
-
-    // Thread coordination
-    std::atomic<bool> cancelled{false};
-    std::optional<std::stop_callback<canceller>> stop_cb;
-
-    posix_resolve_op()
-    {
-        data_ = this;
-    }
-
-    void reset() noexcept;
-    void operator()() override;
-    void destroy() override;
-    void request_cancel() noexcept;
-    void start(std::stop_token token);
-};
 
 //------------------------------------------------------------------------------
 // posix_resolver_impl - per-resolver implementation
@@ -307,6 +263,52 @@ class posix_resolver_impl
     friend class posix_resolver_service_impl;
 
 public:
+    //--------------------------------------------------------------------------
+    // resolve_op - operation state for a single DNS resolution
+    //--------------------------------------------------------------------------
+
+    struct resolve_op : scheduler_op
+    {
+        struct canceller
+        {
+            resolve_op* op;
+            void operator()() const noexcept { op->request_cancel(); }
+        };
+
+        // Coroutine state
+        capy::coro h;
+        capy::executor_ref ex;
+        posix_resolver_impl* impl = nullptr;
+
+        // Output parameters
+        system::error_code* ec_out = nullptr;
+        resolver_results* out = nullptr;
+
+        // Input parameters (owned copies for thread safety)
+        std::string host;
+        std::string service;
+        resolve_flags flags = resolve_flags::none;
+
+        // Result storage (populated by worker thread)
+        resolver_results stored_results;
+        int gai_error = 0;
+
+        // Thread coordination
+        std::atomic<bool> cancelled{false};
+        std::optional<std::stop_callback<canceller>> stop_cb;
+
+        resolve_op()
+        {
+            data_ = this;
+        }
+
+        void reset() noexcept;
+        void operator()() override;
+        void destroy() override;
+        void request_cancel() noexcept;
+        void start(std::stop_token token);
+    };
+
     explicit posix_resolver_impl(posix_resolver_service_impl& svc) noexcept
         : svc_(svc)
     {
@@ -326,7 +328,7 @@ public:
 
     void cancel() noexcept override;
 
-    posix_resolve_op op_;
+    resolve_op op_;
 
 private:
     posix_resolver_service_impl& svc_;
@@ -380,11 +382,11 @@ private:
 };
 
 //------------------------------------------------------------------------------
-// posix_resolve_op implementation
+// posix_resolver_impl::resolve_op implementation
 //------------------------------------------------------------------------------
 
 void
-posix_resolve_op::
+posix_resolver_impl::resolve_op::
 reset() noexcept
 {
     host.clear();
@@ -399,7 +401,7 @@ reset() noexcept
 }
 
 void
-posix_resolve_op::
+posix_resolver_impl::resolve_op::
 operator()()
 {
     stop_cb.reset();  // Disconnect stop callback
@@ -419,25 +421,26 @@ operator()()
     if (out && !was_cancelled && gai_error == 0)
         *out = std::move(stored_results);
 
-    d.dispatch(h).resume();
+    impl->svc_.work_finished();
+    ex.dispatch(h).resume();
 }
 
 void
-posix_resolve_op::
+posix_resolver_impl::resolve_op::
 destroy()
 {
     stop_cb.reset();
 }
 
 void
-posix_resolve_op::
+posix_resolver_impl::resolve_op::
 request_cancel() noexcept
 {
     cancelled.store(true, std::memory_order_release);
 }
 
 void
-posix_resolve_op::
+posix_resolver_impl::resolve_op::
 start(std::stop_token token)
 {
     cancelled.store(false, std::memory_order_release);
@@ -463,7 +466,7 @@ void
 posix_resolver_impl::
 resolve(
     std::coroutine_handle<> h,
-    capy::executor_ref d,
+    capy::executor_ref ex,
     std::string_view host,
     std::string_view service,
     resolve_flags flags,
@@ -474,7 +477,8 @@ resolve(
     auto& op = op_;
     op.reset();
     op.h = h;
-    op.d = d;
+    op.ex = ex;
+    op.impl = this;
     op.ec_out = ec;
     op.out = out;
     op.host = host;
@@ -483,7 +487,7 @@ resolve(
     op.start(token);
 
     // Keep io_context alive while resolution is pending
-    svc_.work_started();
+    op.ex.on_work_started();
 
     // Track thread for safe shutdown
     svc_.thread_started();
@@ -524,7 +528,6 @@ resolve(
             // (service may be destroyed during shutdown)
             if (!svc_.is_shutting_down())
             {
-                svc_.work_finished();
                 svc_.post(&op_);
             }
 
@@ -540,7 +543,6 @@ resolve(
 
         // Set error and post completion to avoid hanging the coroutine
         op_.gai_error = EAI_MEMORY;  // Map to "not enough memory"
-        svc_.work_finished();
         svc_.post(&op_);
     }
 }
