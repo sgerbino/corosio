@@ -35,6 +35,7 @@ tcp_server::
 push_aw::
 await_resume() noexcept
 {
+    // Wake a waiting acceptor if one exists, otherwise add to idle list
     if(self_.waiters_)
     {
         auto* wait = self_.waiters_;
@@ -79,6 +80,7 @@ push(worker_base& w) -> push_aw
     return push_aw{*this, w};
 }
 
+// Synchronous version for destructor/guard paths
 void
 tcp_server::
 push_sync(worker_base& w) noexcept
@@ -102,18 +104,20 @@ tcp_server::pop()
     return pop_aw{*this};
 }
 
+// Accept loop: wait for idle worker, accept connection, dispatch
 capy::task<void>
 tcp_server::do_accept(acceptor& acc)
 {
     auto st = co_await capy::this_coro::stop_token;
     while(! st.stop_requested())
     {
+        // Wait for an idle worker before blocking on accept
         auto rv = co_await pop();
         if(rv.has_error())
             continue;
         auto& w = rv.value();
         auto [ec] = co_await acc.accept(w.socket());
-        if(ec)
+        if(ec.failed())
         {
             co_await push(w);
             continue;

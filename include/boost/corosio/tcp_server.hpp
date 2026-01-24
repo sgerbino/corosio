@@ -34,13 +34,62 @@ namespace corosio {
 #pragma warning(disable: 4251) // class needs to have dll-interface
 #endif
 
+/** Base class for building TCP servers with pooled workers.
+
+    This class manages a pool of reusable worker objects that handle
+    incoming connections. When a connection arrives, an idle worker
+    is dispatched to handle it. After the connection completes, the
+    worker returns to the pool for reuse, avoiding allocation overhead
+    per connection.
+
+    Derived classes create workers via the protected `wv_` member and
+    implement custom connection handling by deriving from @ref worker_base.
+
+    @par Thread Safety
+    Distinct objects: Safe.
+    Shared objects: Unsafe.
+
+    @par Example
+    @code
+    class my_server : public tcp_server
+    {
+        class my_worker : public worker_base
+        {
+            corosio::socket sock_;
+        public:
+            my_worker( io_context& ctx ) : sock_( ctx ) {}
+            corosio::socket& socket() override { return sock_; }
+
+            void run( launcher launch ) override
+            {
+                launch( ex, [this]() -> capy::task<>
+                {
+                    // handle connection using sock_
+                    co_return;
+                }());
+            }
+        };
+
+    public:
+        my_server( io_context& ctx, capy::any_executor ex )
+            : tcp_server( ctx, ex )
+        {
+            wv_.reserve( 100 );
+            for( int i = 0; i < 100; ++i )
+                wv_.emplace<my_worker>( ctx );
+        }
+    };
+    @endcode
+
+    @see worker_base, workers, launcher
+*/
 class BOOST_COROSIO_DECL
     tcp_server
 {
 public:
-    class worker_base;
-    class launcher;
-    class workers;
+    class worker_base;  ///< Abstract base for connection handlers.
+    class launcher;     ///< Move-only handle to launch worker coroutines.
+    class workers;      ///< Container managing the worker pool.
 
 private:
     struct waiter;
@@ -192,6 +241,14 @@ private:
     capy::task<void> do_accept(acceptor& acc);
 
 public:
+    /** Abstract base class for connection handlers.
+
+        Derive from this class to implement custom connection handling.
+        Each worker owns a socket and is reused across multiple
+        connections to avoid per-connection allocation.
+
+        @see tcp_server, launcher
+    */
     class BOOST_COROSIO_DECL
         worker_base
     {
@@ -201,11 +258,29 @@ public:
         friend class workers;
 
     public:
+        /// Destroy the worker.
         virtual ~worker_base() = default;
+
+        /** Handle an accepted connection.
+
+            Called when this worker is dispatched to handle a new
+            connection. The implementation must invoke the launcher
+            exactly once to start the handling coroutine.
+
+            @param launch Handle to launch the connection coroutine.
+        */
         virtual void run(launcher launch) = 0;
+
+        /// Return the socket used for connections.
         virtual corosio::socket& socket() = 0;
     };
 
+    /** Container managing the worker pool.
+
+        This container owns the worker objects and maintains an idle
+        list for fast dispatch. Workers are created during server
+        construction and reused across connections.
+    */
     class BOOST_COROSIO_DECL
         workers
     {
@@ -215,6 +290,7 @@ public:
         worker_base* idle_ = nullptr;
 
     public:
+        /// Construct an empty worker pool.
         workers() = default;
         workers(workers const&) = delete;
         workers& operator=(workers const&) = delete;
@@ -236,6 +312,17 @@ public:
         }
 
     public:
+        /** Construct a worker in place and add it to the pool.
+
+            The worker is constructed with the given arguments and
+            immediately added to the idle list.
+
+            @tparam T The worker type, must derive from @ref worker_base.
+
+            @param args Arguments forwarded to the worker constructor.
+
+            @return Reference to the newly created worker.
+        */
         template<class T, class... Args>
         T& emplace(Args&&... args)
         {
@@ -246,10 +333,25 @@ public:
             return static_cast<T&>(*raw);
         }
 
+        /// Reserve capacity for `n` workers.
         void reserve(std::size_t n) { v_.reserve(n); }
+
+        /// Return the total number of workers in the pool.
         std::size_t size() const noexcept { return v_.size(); }
     };
 
+    /** Move-only handle to launch a worker coroutine.
+
+        Passed to @ref worker_base::run to start the connection-handling
+        coroutine. The launcher ensures the worker returns to the idle
+        pool when the coroutine completes or if launching fails.
+
+        The launcher must be invoked exactly once via `operator()`.
+        If destroyed without invoking, the worker is returned to the
+        idle pool automatically.
+
+        @see worker_base::run
+    */
     class BOOST_COROSIO_DECL launcher
     {
         tcp_server* srv_;
@@ -264,6 +366,7 @@ public:
         }
 
     public:
+        /// Return the worker to the pool if not launched.
         ~launcher()
         {
             if(w_)
@@ -279,6 +382,17 @@ public:
         launcher& operator=(launcher const&) = delete;
         launcher& operator=(launcher&&) = delete;
 
+        /** Launch the connection-handling coroutine.
+
+            Starts the given coroutine on the specified executor. When
+            the coroutine completes, the worker is automatically returned
+            to the idle pool.
+
+            @param ex The executor to run the coroutine on.
+            @param task The coroutine to execute.
+
+            @throws std::logic_error If this launcher was already invoked.
+        */
         template<class Executor>
         void operator()(Executor const& ex, capy::task<void> task)
         {
@@ -310,8 +424,16 @@ public:
     };
 
 protected:
-    workers wv_; // API for derived
+    workers wv_;  ///< Worker pool, populated by derived classes.
 
+    /** Construct a TCP server.
+
+        Derived classes call this constructor to initialize the server
+        with an I/O context and executor.
+
+        @param ctx The I/O context for socket operations.
+        @param ex The executor for dispatching coroutines.
+    */
     template<capy::Executor Ex>
     tcp_server(
         io_context& ctx,
@@ -322,8 +444,27 @@ protected:
     }
 
 public:
+    /** Bind to a local endpoint.
+
+        Creates an acceptor listening on the specified endpoint.
+        Multiple endpoints can be bound by calling this method
+        multiple times before @ref start.
+
+        @param ep The local endpoint to bind to.
+
+        @return The error code if binding fails.
+    */
     system::error_code bind(endpoint ep);
 
+    /** Start accepting connections.
+
+        Launches accept loops for all bound endpoints. Incoming
+        connections are dispatched to idle workers from the pool.
+
+        @par Preconditions
+        At least one endpoint has been bound via @ref bind.
+        Workers have been added to the pool via `wv_.emplace()`.
+    */
     void start();
 };
 
