@@ -407,9 +407,17 @@ connect(
     }
     else
     {
+        // Synchronous completion - with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS,
+        // IOCP shouldn't post a packet. But if the flag failed to set or under
+        // certain conditions, IOCP might still deliver a completion. Use CAS
+        // to race with IOCP: only set fields and post if we win (CAS returns 0).
+        // If IOCP wins, it already set the fields via complete() and processed.
         svc_.work_finished();
-        op.dwError = 0;
-        svc_.post(&op);
+        if (::InterlockedCompareExchange(&op.ready_, 1, 0) == 0)
+        {
+            op.dwError = 0;
+            svc_.post(&op);
+        }
     }
 }
 
@@ -480,10 +488,18 @@ read_some(
     }
     else
     {
+        // Synchronous completion - with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS,
+        // IOCP shouldn't post a packet. But if the flag failed to set or under
+        // certain conditions, IOCP might still deliver a completion. Use CAS
+        // to race with IOCP: only set fields and post if we win (CAS returns 0).
+        // If IOCP wins, it already set the fields via complete() and processed.
         svc_.work_finished();
-        op.bytes_transferred = static_cast<DWORD>(op.InternalHigh);
-        op.dwError = 0;
-        svc_.post(&op);
+        if (::InterlockedCompareExchange(&op.ready_, 1, 0) == 0)
+        {
+            op.bytes_transferred = static_cast<DWORD>(op.InternalHigh);
+            op.dwError = 0;
+            svc_.post(&op);
+        }
     }
 }
 
@@ -551,10 +567,15 @@ write_some(
     }
     else
     {
+        // Synchronous completion - use CAS to race with IOCP.
+        // See read_some for detailed explanation.
         svc_.work_finished();
-        op.bytes_transferred = static_cast<DWORD>(op.InternalHigh);
-        op.dwError = 0;
-        svc_.post(&op);
+        if (::InterlockedCompareExchange(&op.ready_, 1, 0) == 0)
+        {
+            op.bytes_transferred = static_cast<DWORD>(op.InternalHigh);
+            op.dwError = 0;
+            svc_.post(&op);
+        }
     }
 }
 
@@ -1030,9 +1051,14 @@ accept(
     }
     else
     {
+        // Synchronous completion - use CAS to race with IOCP.
+        // See win_socket_impl_internal::read_some for detailed explanation.
         svc_.work_finished();
-        op.dwError = 0;
-        svc_.post(&op);
+        if (::InterlockedCompareExchange(&op.ready_, 1, 0) == 0)
+        {
+            op.dwError = 0;
+            svc_.post(&op);
+        }
     }
 }
 
