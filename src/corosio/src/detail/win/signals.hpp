@@ -17,7 +17,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/signal_set.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
-#include <boost/capy/io_awaitable.hpp>
+#include <boost/capy/ex/io_awaitables.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include "src/detail/intrusive.hpp"
 #include <boost/system/error_code.hpp>
