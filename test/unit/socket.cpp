@@ -197,21 +197,21 @@ struct socket_test
             char buf[32] = {};
 
             // First exchange
-            co_await a.write_some(capy::const_buffer("one", 3));
+            (void) co_await a.write_some(capy::const_buffer("one", 3));
             auto [ec1, n1] = co_await b.read_some(
                 capy::make_buffer(buf));
             BOOST_TEST(!ec1);
             BOOST_TEST_EQ(std::string_view(buf, n1), "one");
 
             // Second exchange
-            co_await a.write_some(capy::const_buffer("two", 3));
+            (void) co_await a.write_some(capy::const_buffer("two", 3));
             auto [ec2, n2] = co_await b.read_some(
                 capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             BOOST_TEST_EQ(std::string_view(buf, n2), "two");
 
             // Third exchange
-            co_await a.write_some(capy::const_buffer("three", 5));
+            (void) co_await a.write_some(capy::const_buffer("three", 5));
             auto [ec3, n3] = co_await b.read_some(
                 capy::make_buffer(buf));
             BOOST_TEST(!ec3);
@@ -257,8 +257,8 @@ struct socket_test
             BOOST_TEST_EQ(std::string_view(buf, n4), "from_b");
 
             // Interleaved: write a, write b, read b, read a
-            co_await a.write_some(capy::const_buffer("msg_a", 5));
-            co_await b.write_some(capy::const_buffer("msg_b", 5));
+            (void) co_await a.write_some(capy::const_buffer("msg_a", 5));
+            (void) co_await b.write_some(capy::const_buffer("msg_b", 5));
 
             auto [ec5, n5] = co_await b.read_some(
                 capy::make_buffer(buf));
@@ -297,7 +297,7 @@ struct socket_test
             BOOST_TEST_EQ(n1, 0u);
 
             // Send actual data so read can complete
-            co_await a.write_some(capy::const_buffer("x", 1));
+            (void) co_await a.write_some(capy::const_buffer("x", 1));
 
             // Read with empty buffer should return 0
             auto [ec2, n2] = co_await b.read_some(
@@ -307,7 +307,7 @@ struct socket_test
 
             // Drain the actual data
             char buf[8];
-            co_await b.read_some(capy::make_buffer(buf));
+            (void) co_await b.read_some(capy::make_buffer(buf));
         };
         capy::run_async(ioc.get_executor())(task(s1, s2));
 
@@ -409,7 +409,7 @@ struct socket_test
         auto task = [](socket& a, socket& b) -> capy::task<>
         {
             // Write data then close
-            co_await a.write_some(capy::const_buffer("final", 5));
+            (void) co_await a.write_some(capy::const_buffer("final", 5));
             a.close();
 
             // Read the data
@@ -446,7 +446,7 @@ struct socket_test
             // Give OS time to process the close
             timer t(a.context());
             t.expires_after(std::chrono::milliseconds(50));
-            co_await t.wait();
+            (void) co_await t.wait();
 
             // Writing to closed peer should eventually fail
             system::error_code last_ec;
@@ -500,13 +500,13 @@ struct socket_test
             capy::run_async(ioc.get_executor())(nested_coro());
 
             // Wait for timer then cancel
-            co_await t.wait();
+            (void) co_await t.wait();
             b.cancel();
 
             // Wait for read to complete
             timer t2(a.context());
             t2.expires_after(std::chrono::milliseconds(50));
-            co_await t2.wait();
+            (void) co_await t2.wait();
 
             BOOST_TEST(read_done);
             BOOST_TEST(read_ec == capy::cond::canceled);
@@ -546,12 +546,12 @@ struct socket_test
             capy::run_async(ioc.get_executor())(nested_coro());
 
             // Wait then close the socket
-            co_await t.wait();
+            (void) co_await t.wait();
             b.close();
 
             timer t2(a.context());
             t2.expires_after(std::chrono::milliseconds(50));
-            co_await t2.wait();
+            (void) co_await t2.wait();
 
             BOOST_TEST(read_done);
             // Close should cancel pending operations
@@ -576,7 +576,7 @@ struct socket_test
         {
             // Write exactly 100 bytes
             std::string send_data(100, 'X');
-            co_await write(a, capy::const_buffer(
+            (void) co_await write(a, capy::const_buffer(
                 send_data.data(), send_data.size()));
 
             // Read exactly 100 bytes using corosio::read
@@ -632,7 +632,7 @@ struct socket_test
         auto task = [](socket& a, socket& b) -> capy::task<>
         {
             std::string send_data = "Hello, this is a test message!";
-            co_await write(a, capy::const_buffer(
+            (void) co_await write(a, capy::const_buffer(
                 send_data.data(), send_data.size()));
             a.close();
 
@@ -661,7 +661,7 @@ struct socket_test
         {
             // Send 50 bytes but try to read 100
             std::string send_data(50, 'Z');
-            co_await write(a, capy::const_buffer(
+            (void) co_await write(a, capy::const_buffer(
                 send_data.data(), send_data.size()));
             a.close();
 
@@ -691,7 +691,7 @@ struct socket_test
         auto task = [](socket& a, socket& b) -> capy::task<>
         {
             // Write data then shutdown send
-            co_await a.write_some(capy::const_buffer("hello", 5));
+            (void) co_await a.write_some(capy::const_buffer("hello", 5));
             a.shutdown(socket::shutdown_send);
 
             // Read the data
@@ -725,7 +725,7 @@ struct socket_test
             b.shutdown(socket::shutdown_receive);
 
             // b can still send
-            co_await b.write_some(capy::const_buffer("from_b", 6));
+            (void) co_await b.write_some(capy::const_buffer("from_b", 6));
 
             char buf[32] = {};
             auto [ec, n] = co_await a.read_some(
@@ -761,7 +761,7 @@ struct socket_test
         auto task = [](socket& a, socket& b) -> capy::task<>
         {
             // Write data then shutdown both
-            co_await a.write_some(capy::const_buffer("goodbye", 7));
+            (void) co_await a.write_some(capy::const_buffer("goodbye", 7));
             a.shutdown(socket::shutdown_both);
 
             // Peer should receive the data

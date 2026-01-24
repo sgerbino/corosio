@@ -17,7 +17,6 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/io_object.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
-#include <boost/capy/ex/io_awaitables.hpp>
 #include <boost/capy/coro.hpp>
 #include <boost/capy/error.hpp>
 #include <boost/system/error_code.hpp>

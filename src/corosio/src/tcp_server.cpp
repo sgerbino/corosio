@@ -105,7 +105,7 @@ tcp_server::pop()
 capy::task<void>
 tcp_server::do_accept(acceptor& acc)
 {
-    auto st = co_await capy::get_stop_token();
+    auto st = co_await capy::this_coro::stop_token;
     while(! st.stop_requested())
     {
         auto rv = co_await pop();

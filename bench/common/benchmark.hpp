@@ -111,18 +111,18 @@ public:
         return std::sqrt(variance());
     }
 
-    double min() const
+    double (min)() const
     {
         if (samples_.empty())
             return 0.0;
-        return *std::min_element(samples_.begin(), samples_.end());
+        return *(std::min_element)(samples_.begin(), samples_.end());
     }
 
-    double max() const
+    double (max)() const
     {
         if (samples_.empty())
             return 0.0;
-        return *std::max_element(samples_.begin(), samples_.end());
+        return *(std::max_element)(samples_.begin(), samples_.end());
     }
 
     // Returns the p-th percentile (p in [0, 1])
@@ -231,8 +231,8 @@ inline void print_latency_stats(statistics const& stats, char const* label)
     std::cout << "    p90:   " << format_latency(stats.p90()) << "\n";
     std::cout << "    p99:   " << format_latency(stats.p99()) << "\n";
     std::cout << "    p99.9: " << format_latency(stats.p999()) << "\n";
-    std::cout << "    min:   " << format_latency(stats.min()) << "\n";
-    std::cout << "    max:   " << format_latency(stats.max()) << "\n";
+    std::cout << "    min:   " << format_latency((stats.min)()) << "\n";
+    std::cout << "    max:   " << format_latency((stats.max)()) << "\n";
 }
 
 } // namespace bench

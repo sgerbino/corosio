@@ -69,7 +69,7 @@ void bench_throughput(std::size_t chunk_size, std::size_t total_bytes)
     {
         while (total_written < total_bytes)
         {
-            std::size_t to_write = std::min(chunk_size, total_bytes - total_written);
+            std::size_t to_write = (std::min)(chunk_size, total_bytes - total_written);
             auto [ec, n] = co_await writer.write_some(
                 capy::const_buffer(write_buf.data(), to_write));
             if (ec)
@@ -146,7 +146,7 @@ void bench_bidirectional_throughput(std::size_t chunk_size, std::size_t total_by
     {
         while (written1 < total_bytes)
         {
-            std::size_t to_write = std::min(chunk_size, total_bytes - written1);
+            std::size_t to_write = (std::min)(chunk_size, total_bytes - written1);
             auto [ec, n] = co_await sock1.write_some(
                 capy::const_buffer(buf1.data(), to_write));
             if (ec) break;
@@ -173,7 +173,7 @@ void bench_bidirectional_throughput(std::size_t chunk_size, std::size_t total_by
     {
         while (written2 < total_bytes)
         {
-            std::size_t to_write = std::min(chunk_size, total_bytes - written2);
+            std::size_t to_write = (std::min)(chunk_size, total_bytes - written2);
             auto [ec, n] = co_await sock2.write_some(
                 capy::const_buffer(buf2.data(), to_write));
             if (ec) break;

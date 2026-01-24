@@ -146,8 +146,7 @@ public:
     {
         if (entries_)
             return entries_->begin();
-        static std::vector<resolver_entry> empty;
-        return empty.begin();
+        return std::vector<resolver_entry>::const_iterator();
     }
 
     /** Get an iterator past the last entry. */
@@ -156,8 +155,7 @@ public:
     {
         if (entries_)
             return entries_->end();
-        static std::vector<resolver_entry> empty;
-        return empty.end();
+        return std::vector<resolver_entry>::const_iterator();
     }
 
     /** Get an iterator to the first entry. */

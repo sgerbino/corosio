@@ -16,7 +16,7 @@
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/endpoint.hpp>
 #include <boost/capy/task.hpp>
-#include <boost/capy/ex/io_awaitables.hpp>
+#include <boost/capy/concept/io_awaitable.hpp>
 #include <boost/capy/concept/executor.hpp>
 #include <boost/capy/ex/any_executor.hpp>
 #include <boost/capy/ex/run_async.hpp>

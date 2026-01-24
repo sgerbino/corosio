@@ -17,7 +17,6 @@
 #include <boost/capy/error.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <boost/capy/ex/execution_context.hpp>
-#include <boost/capy/ex/io_awaitables.hpp>
 #include <boost/capy/concept/executor.hpp>
 
 #include <chrono>
