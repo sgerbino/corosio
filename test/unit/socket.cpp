@@ -16,6 +16,7 @@
 #include <boost/corosio/timer.hpp>
 #include <boost/corosio/test/socket_pair.hpp>
 #include <boost/capy/buffers.hpp>
+#include <boost/capy/buffers/make_buffer.hpp>
 #include <boost/capy/concept/read_stream.hpp>
 #include <boost/capy/concept/write_stream.hpp>
 #include <boost/capy/cond.hpp>
@@ -113,7 +114,7 @@ struct socket_test
 
             char buf[32] = {};
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             BOOST_TEST_EQ(n2, 5u);
             BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
@@ -144,7 +145,7 @@ struct socket_test
 
                 char buf[32] = {};
                 auto [ec2, n2] = co_await b.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
+                    capy::make_buffer(buf));
                 BOOST_TEST(!ec2);
                 BOOST_TEST_EQ(std::string_view(buf, n2), msg);
             }
@@ -172,7 +173,7 @@ struct socket_test
 
             char buf[1024] = {};
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             // read_some returns what's available, not buffer size
             BOOST_TEST_EQ(n2, 5u);
@@ -198,21 +199,21 @@ struct socket_test
             // First exchange
             co_await a.write_some(capy::const_buffer("one", 3));
             auto [ec1, n1] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec1);
             BOOST_TEST_EQ(std::string_view(buf, n1), "one");
 
             // Second exchange
             co_await a.write_some(capy::const_buffer("two", 3));
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             BOOST_TEST_EQ(std::string_view(buf, n2), "two");
 
             // Third exchange
             co_await a.write_some(capy::const_buffer("three", 5));
             auto [ec3, n3] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec3);
             BOOST_TEST_EQ(std::string_view(buf, n3), "three");
         };
@@ -240,7 +241,7 @@ struct socket_test
             BOOST_TEST_EQ(n1, 6u);
 
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             BOOST_TEST_EQ(std::string_view(buf, n2), "from_a");
 
@@ -251,7 +252,7 @@ struct socket_test
             BOOST_TEST_EQ(n3, 6u);
 
             auto [ec4, n4] = co_await a.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec4);
             BOOST_TEST_EQ(std::string_view(buf, n4), "from_b");
 
@@ -260,12 +261,12 @@ struct socket_test
             co_await b.write_some(capy::const_buffer("msg_b", 5));
 
             auto [ec5, n5] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec5);
             BOOST_TEST_EQ(std::string_view(buf, n5), "msg_a");
 
             auto [ec6, n6] = co_await a.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec6);
             BOOST_TEST_EQ(std::string_view(buf, n6), "msg_b");
         };
@@ -306,7 +307,7 @@ struct socket_test
 
             // Drain the actual data
             char buf[8];
-            co_await b.read_some(capy::mutable_buffer(buf, sizeof(buf)));
+            co_await b.read_some(capy::make_buffer(buf));
         };
         capy::run_async(ioc.get_executor())(task(s1, s2));
 
@@ -414,13 +415,13 @@ struct socket_test
             // Read the data
             char buf[32] = {};
             auto [ec1, n1] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec1);
             BOOST_TEST_EQ(std::string_view(buf, n1), "final");
 
             // Next read should get EOF (0 bytes or error)
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             // EOF indicated by error or zero bytes
             BOOST_TEST(ec2 || n2 == 0);
         };
@@ -492,7 +493,7 @@ struct socket_test
             {
                 char buf[32];
                 auto [ec, n] = co_await b.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
+                    capy::make_buffer(buf));
                 read_ec = ec;
                 read_done = true;
             };
@@ -538,7 +539,7 @@ struct socket_test
             {
                 char buf[32];
                 auto [ec, n] = co_await b.read_some(
-                    capy::mutable_buffer(buf, sizeof(buf)));
+                    capy::make_buffer(buf));
                 read_ec = ec;
                 read_done = true;
             };
@@ -696,13 +697,13 @@ struct socket_test
             // Read the data
             char buf[32] = {};
             auto [ec1, n1] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec1);
             BOOST_TEST_EQ(std::string_view(buf, n1), "hello");
 
             // Next read should get EOF
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(ec2 == capy::cond::eof);
         };
         capy::run_async(ioc.get_executor())(task(s1, s2));
@@ -728,7 +729,7 @@ struct socket_test
 
             char buf[32] = {};
             auto [ec, n] = co_await a.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec);
             BOOST_TEST_EQ(std::string_view(buf, n), "from_b");
         };
@@ -766,13 +767,13 @@ struct socket_test
             // Peer should receive the data
             char buf[32] = {};
             auto [ec1, n1] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec1);
             BOOST_TEST_EQ(std::string_view(buf, n1), "goodbye");
 
             // Next read should get EOF
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(ec2 == capy::cond::eof);
         };
         capy::run_async(ioc.get_executor())(task(s1, s2));

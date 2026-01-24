@@ -12,6 +12,7 @@
 
 #include <boost/corosio/io_context.hpp>
 #include <boost/capy/buffers.hpp>
+#include <boost/capy/buffers/make_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 #include <boost/capy/test/fuse.hpp>
@@ -53,13 +54,13 @@ struct mocket_test
 
             // m2 reads from m1's provide
             auto [ec1, n1] = co_await m2_ref.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec1);
             BOOST_TEST_EQ(std::string_view(buf, n1), "hello_from_m1");
 
             // m1 reads from m2's provide
             auto [ec2, n2] = co_await m1_ref.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             BOOST_TEST_EQ(std::string_view(buf, n2), "hello_from_m2");
 
@@ -123,7 +124,7 @@ struct mocket_test
             BOOST_TEST_EQ(n1, 5u);
 
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             BOOST_TEST_EQ(n2, 5u);
             BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
@@ -135,7 +136,7 @@ struct mocket_test
             BOOST_TEST_EQ(n3, 5u);
 
             auto [ec4, n4] = co_await a.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec4);
             BOOST_TEST_EQ(n4, 5u);
             BOOST_TEST_EQ(std::string_view(buf, n4), "world");

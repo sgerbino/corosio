@@ -53,7 +53,7 @@ namespace corosio {
     @code
     std::string data = "Hello, World!";
     // Using structured bindings
-    auto [ec, n] = co_await corosio::write(s, capy::const_buffer(data.data(), data.size()));
+    auto [ec, n] = co_await corosio::write(s, capy::make_buffer(data));
     if (ec)
     {
         std::cerr << "Write error: " << ec.message() << "\n";

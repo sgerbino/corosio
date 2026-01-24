@@ -12,6 +12,7 @@
 
 #include <boost/corosio/io_context.hpp>
 #include <boost/capy/buffers.hpp>
+#include <boost/capy/buffers/make_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
@@ -54,7 +55,7 @@ struct socket_pair_test
             BOOST_TEST_EQ(n1, 5u);
 
             auto [ec2, n2] = co_await b.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec2);
             BOOST_TEST_EQ(n2, 5u);
             BOOST_TEST_EQ(std::string_view(buf, n2), "hello");
@@ -66,7 +67,7 @@ struct socket_pair_test
             BOOST_TEST_EQ(n3, 5u);
 
             auto [ec4, n4] = co_await a.read_some(
-                capy::mutable_buffer(buf, sizeof(buf)));
+                capy::make_buffer(buf));
             BOOST_TEST(!ec4);
             BOOST_TEST_EQ(n4, 5u);
             BOOST_TEST_EQ(std::string_view(buf, n4), "world");
