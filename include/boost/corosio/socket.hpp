@@ -70,10 +70,6 @@ using native_handle_type = int;
     char buf[1024];
     auto [read_ec, n] = co_await s.read_some(
         capy::mutable_buffer(buf, sizeof(buf)));
-
-    // Or using exceptions
-    (co_await s.connect(endpoint)).value();
-    auto bytes = (co_await s.read_some(buf)).value();
     @endcode
 */
 class BOOST_COROSIO_DECL socket : public io_stream
@@ -267,12 +263,8 @@ public:
 
         @par Example
         @code
-        // Using structured bindings
         auto [ec] = co_await s.connect(endpoint);
         if (ec) { ... }
-
-        // Using exceptions
-        (co_await s.connect(endpoint)).value();
         @endcode
     */
     auto connect(endpoint ep)

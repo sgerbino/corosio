@@ -55,7 +55,6 @@ namespace corosio {
     @par Example
     @code
     char buf[1024];
-    // Using structured bindings
     auto [ec, n] = co_await corosio::read(s, capy::mutable_buffer(buf, sizeof(buf)));
     if (ec)
     {
@@ -65,9 +64,6 @@ namespace corosio {
             std::cerr << "Read error: " << ec.message() << "\n";
         co_return;
     }
-
-    // Or using exceptions
-    auto bytes = (co_await corosio::read(s, buf)).value();
     @endcode
 
     @note This function differs from `read_some()` in that it
@@ -77,7 +73,7 @@ namespace corosio {
 */
 template<capy::MutableBufferSequence MB>
 capy::task<capy::io_result<std::size_t>>
-read(io_stream& ios, MB const& bs)
+read(io_stream& ios, MB bs)
 {
     capy::consuming_buffers<MB> consuming(bs);
     std::size_t const total_size = capy::buffer_size(bs);
@@ -132,7 +128,6 @@ read(io_stream& ios, MB const& bs)
     @par Example
     @code
     std::string content;
-    // Using structured bindings
     auto [ec, n] = co_await corosio::read(s, content);
     if (ec && ec != capy::error::eof)
     {
@@ -140,9 +135,6 @@ read(io_stream& ios, MB const& bs)
         co_return;
     }
     std::cout << "Read " << n << " bytes, total size: " << content.size() << "\n";
-
-    // Or using exceptions (note: EOF also throws)
-    auto bytes = (co_await corosio::read(s, content)).value();
     @endcode
 
     @note Existing string content is preserved. To read into an empty

@@ -41,17 +41,22 @@ class echo_server : public corosio::tcp_server
 {
     struct worker : worker_base
     {
+        corosio::io_context& ctx_;
+        corosio::socket sock_;
         std::string buf;
 
-        explicit worker(corosio::io_context& ioc)
-            : worker_base(ioc)
+        explicit worker(corosio::io_context& ctx)
+            : ctx_(ctx)
+            , sock_(ctx)
         {
             buf.reserve(4096);
         }
 
+        corosio::socket& socket() override { return sock_; }
+
         void run(launcher launch) override
         {
-            launch(sock.context().get_executor(), do_echo());
+            launch(ctx_.get_executor(), do_echo());
         }
 
         capy::task<void> do_echo();
@@ -82,37 +87,39 @@ The `worker_base` class is the foundation:
 class worker_base
 {
 public:
-    corosio::socket sock;
-
     virtual ~worker_base() = default;
     virtual void run(launcher launch) = 0;
-
-protected:
-    explicit worker_base(capy::execution_context& ctx);
+    virtual corosio::socket& socket() = 0;
 };
 ----
 
-Your worker inherits from `worker_base` and implements `run()`:
+Your worker inherits from `worker_base`, owns its socket, and implements the
+required methods:
 
 [source,cpp]
 ----
 struct my_worker : tcp_server::worker_base
 {
+    corosio::io_context& ctx_;
+    corosio::socket sock_;
     std::string request_buf;
     std::string response_buf;
 
-    explicit my_worker(corosio::io_context& ioc)
-        : worker_base(ioc)
+    explicit my_worker(corosio::io_context& ctx)
+        : ctx_(ctx)
+        , sock_(ctx)
     {}
+
+    corosio::socket& socket() override { return sock_; }
 
     void run(launcher launch) override
     {
-        launch(sock.context().get_executor(), handle_connection());
+        launch(ctx_.get_executor(), handle_connection());
     }
 
     capy::task<void> handle_connection()
     {
-        // Handle the connection using sock
+        // Handle the connection using sock_
         // Worker is automatically returned to pool when coroutine ends
     }
 };
@@ -182,11 +189,11 @@ void operator()(Executor const& ex, capy::task<void> task);
 ----
 
 The executor determines where the coroutine runs. Typically you use the
-socket's executor:
+I/O context's executor:
 
 [source,cpp]
 ----
-launch(sock.context().get_executor(), handle_connection());
+launch(ctx_.get_executor(), handle_connection());
 ----
 
 == Binding and Starting
@@ -234,7 +241,6 @@ The accept loop runs until the `io_context` stops.
 ----
 #include <boost/corosio/tcp_server.hpp>
 #include <boost/corosio/io_context.hpp>
-#include <boost/corosio/read.hpp>
 #include <boost/corosio/write.hpp>
 #include <boost/capy/task.hpp>
 #include <boost/capy/buffers.hpp>
@@ -247,17 +253,22 @@ class echo_server : public corosio::tcp_server
 {
     struct worker : worker_base
     {
+        corosio::io_context& ctx_;
+        corosio::socket sock_;
         std::string buf;
 
-        explicit worker(corosio::io_context& ioc)
-            : worker_base(ioc)
+        explicit worker(corosio::io_context& ctx)
+            : ctx_(ctx)
+            , sock_(ctx)
         {
             buf.reserve(4096);
         }
 
+        corosio::socket& socket() override { return sock_; }
+
         void run(launcher launch) override
         {
-            launch(sock.context().get_executor(), do_session());
+            launch(ctx_.get_executor(), do_session());
         }
 
         capy::task<void> do_session()
@@ -265,7 +276,7 @@ class echo_server : public corosio::tcp_server
             for (;;)
             {
                 buf.resize(4096);
-                auto [ec, n] = co_await sock.read_some(
+                auto [ec, n] = co_await sock_.read_some(
                     capy::mutable_buffer(buf.data(), buf.size()));
 
                 if (ec || n == 0)
@@ -273,23 +284,23 @@ class echo_server : public corosio::tcp_server
 
                 buf.resize(n);
                 auto [wec, wn] = co_await corosio::write(
-                    sock, capy::const_buffer(buf.data(), buf.size()));
+                    sock_, capy::const_buffer(buf.data(), buf.size()));
 
                 if (wec)
                     break;
             }
 
-            sock.close();
+            sock_.close();
         }
     };
 
 public:
-    echo_server(corosio::io_context& ioc, int max_workers)
-        : tcp_server(ioc, ioc.get_executor())
+    echo_server(corosio::io_context& ctx, int max_workers)
+        : tcp_server(ctx, ctx.get_executor())
     {
         wv_.reserve(max_workers);
         for (int i = 0; i < max_workers; ++i)
-            wv_.emplace<worker>(ioc);
+            wv_.emplace<worker>(ctx);
     }
 };
 

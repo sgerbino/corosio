@@ -9,18 +9,16 @@
 
 = Echo Server Tutorial
 
-This tutorial builds a production-quality echo server with connection pooling.
-We'll explore acceptors, socket management, and concurrent connection handling.
+This tutorial builds a production-quality echo server using the `tcp_server`
+framework. We'll explore worker pools, connection lifecycle, and the launcher
+pattern.
 
 NOTE: Code snippets assume:
 [source,cpp]
 ----
-#include <boost/corosio.hpp>
-#include <boost/corosio/acceptor.hpp>
+#include <boost/corosio/tcp_server.hpp>
 #include <boost/capy/task.hpp>
-#include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/buffers.hpp>
-#include <boost/capy/error.hpp>
 
 namespace corosio = boost::corosio;
 namespace capy = boost::capy;
@@ -31,44 +29,64 @@ namespace capy = boost::capy;
 An echo server accepts TCP connections and sends back whatever data clients
 send. While simple, this pattern demonstrates core concepts:
 
-* Listening for connections with `acceptor`
-* Managing multiple concurrent connections
+* Using `tcp_server` for connection management
+* Implementing workers with `worker_base`
+* Launching session coroutines with `launcher`
 * Reading and writing data with sockets
-* Handling connection lifecycle
 
 == Architecture
 
-Our server uses a worker pool pattern:
+The `tcp_server` framework uses a worker pool pattern:
 
-1. Preallocate a fixed number of worker structures
-2. Each worker holds a socket and buffer
-3. The accept loop assigns incoming connections to free workers
-4. Each worker runs an independent session coroutine
+1. Derive from `tcp_server` and define your worker type
+2. Preallocate workers during construction
+3. The framework accepts connections and dispatches them to idle workers
+4. Workers run session coroutines and return to the pool when done
 
 This avoids allocation during operation and limits resource usage.
 
-== Worker Structure
+== Worker Implementation
+
+Workers derive from `worker_base` and implement two methods:
 
 [source,cpp]
 ----
-struct worker
+class echo_server : public corosio::tcp_server
 {
-    corosio::socket sock;
-    std::string buf;
-    bool in_use = false;
-
-    explicit worker(corosio::io_context& ioc)
-        : sock(ioc)
+    class worker : public worker_base
     {
-        buf.reserve(4096);
-    }
+        corosio::io_context& ctx_;
+        corosio::socket sock_;
+        std::string buf_;
 
-    worker(worker&&) = default;
-    worker& operator=(worker&&) = default;
-};
+    public:
+        explicit worker(corosio::io_context& ctx)
+            : ctx_(ctx)
+            , sock_(ctx)
+        {
+            buf_.reserve(4096);
+        }
+
+        corosio::socket& socket() override
+        {
+            return sock_;
+        }
+
+        void run(launcher launch) override
+        {
+            launch(ctx_.get_executor(), do_session());
+        }
+
+        capy::task<> do_session();
+    };
 ----
 
-Each worker owns its socket and buffer. The `in_use` flag tracks availability.
+Each worker:
+
+* Stores a reference to the `io_context` for executor access
+* Owns its socket (returned via `socket()`)
+* Owns any per-connection state (like the buffer)
+* Implements `run()` to launch the session coroutine
 
 == Session Coroutine
 
@@ -76,34 +94,30 @@ The session coroutine handles one connection:
 
 [source,cpp]
 ----
-capy::task<void> run_session(worker& w)
+capy::task<> echo_server::worker::do_session()
 {
-    w.in_use = true;
-
     for (;;)
     {
-        w.buf.clear();
-        w.buf.resize(4096);
+        buf_.resize(4096);
 
         // Read some data
-        auto [ec, n] = co_await w.sock.read_some(
-            capy::mutable_buffer(w.buf.data(), w.buf.size()));
+        auto [ec, n] = co_await sock_.read_some(
+            capy::mutable_buffer(buf_.data(), buf_.size()));
 
         if (ec || n == 0)
             break;
 
-        w.buf.resize(n);
+        buf_.resize(n);
 
         // Echo it back
         auto [wec, wn] = co_await corosio::write(
-            w.sock, capy::const_buffer(w.buf.data(), w.buf.size()));
+            sock_, capy::const_buffer(buf_.data(), buf_.size()));
 
         if (wec)
             break;
     }
 
-    w.sock.close();
-    w.in_use = false;
+    sock_.close();
 }
 ----
 
@@ -112,60 +126,27 @@ Notice:
 * We reuse the worker's buffer across reads
 * `read_some()` returns when _any_ data arrives
 * `corosio::write()` writes _all_ data (it's a composed operation)
-* We mark the worker available after the connection closes
+* When the coroutine ends, the launcher returns the worker to the pool
 
-== Accept Loop
+== Server Construction
 
-The accept loop assigns connections to free workers:
+The server constructor populates the worker pool:
 
 [source,cpp]
 ----
-capy::task<void> accept_loop(
-    corosio::io_context& ioc,
-    corosio::acceptor& acc,
-    std::vector<worker>& workers)
-{
-    for (;;)
+public:
+    echo_server(corosio::io_context& ctx, int max_workers)
+        : tcp_server(ctx, ctx.get_executor())
     {
-        // Find a free worker
-        worker* free_worker = nullptr;
-        for (auto& w : workers)
-        {
-            if (!w.in_use)
-            {
-                free_worker = &w;
-                break;
-            }
-        }
-
-        if (!free_worker)
-        {
-            // All workers busy
-            std::cerr << "All workers busy, waiting...\n";
-            corosio::socket temp(ioc);
-            auto [ec] = co_await acc.accept(temp);
-            if (ec)
-                break;
-            temp.close();  // Reject connection
-            continue;
-        }
-
-        // Accept into the free worker's socket
-        auto [ec] = co_await acc.accept(free_worker->sock);
-        if (ec)
-        {
-            std::cerr << "Accept error: " << ec.message() << "\n";
-            break;
-        }
-
-        // Spawn the session coroutine
-        capy::run_async(ioc.get_executor())(run_session(*free_worker));
+        wv_.reserve(max_workers);
+        for (int i = 0; i < max_workers; ++i)
+            wv_.emplace<worker>(ctx);
     }
-}
+};
 ----
 
-When all workers are busy, we accept and immediately close the connection.
-A production server might queue connections or implement backpressure.
+Workers are stored polymorphically via `wv_.emplace<T>()`, allowing different
+worker types if needed.
 
 == Main Function
 
@@ -184,32 +165,38 @@ int main(int argc, char* argv[])
 
     corosio::io_context ioc;
 
-    // Preallocate workers
-    std::vector<worker> workers;
-    workers.reserve(max_workers);
-    for (int i = 0; i < max_workers; ++i)
-        workers.emplace_back(ioc);
+    echo_server server(ioc, max_workers);
 
-    // Create acceptor and listen
-    corosio::acceptor acc(ioc);
-    acc.listen(corosio::endpoint(port));
+    auto ec = server.bind(corosio::endpoint(port));
+    if (ec)
+    {
+        std::cerr << "Bind failed: " << ec.message() << "\n";
+        return 1;
+    }
 
     std::cout << "Echo server listening on port " << port
               << " with " << max_workers << " workers\n";
 
-    capy::run_async(ioc.get_executor())(accept_loop(ioc, acc, workers));
-
+    server.start();
     ioc.run();
 }
 ----
 
 == Key Design Decisions
 
+=== Why tcp_server?
+
+The `tcp_server` framework provides:
+
+* **Automatic pool management**: Workers cycle between idle and active states
+* **Safe lifecycle**: The launcher ensures workers return to the pool
+* **Multiple ports**: Bind to several endpoints sharing one worker pool
+
 === Why Worker Pooling?
 
 * **Bounded memory**: Fixed number of connections
 * **No allocation**: Sockets and buffers preallocated
-* **Simple accounting**: Boolean flag tracks usage
+* **Simple accounting**: Framework tracks worker availability
 
 === Why Composed Write?
 
@@ -272,5 +259,6 @@ World
 == Next Steps
 
 * xref:http-client.adoc[HTTP Client] — Build an HTTP client
+* xref:../guide/tcp-server.adoc[TCP Server Guide] — Deep dive into tcp_server
 * xref:../guide/sockets.adoc[Sockets Guide] — Deep dive into socket operations
 * xref:../guide/composed-operations.adoc[Composed Operations] — Understanding read/write

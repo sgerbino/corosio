@@ -7,125 +7,81 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
-#include <boost/corosio.hpp>
-#include <boost/corosio/acceptor.hpp>
+#include <boost/corosio/tcp_server.hpp>
 #include <boost/capy/task.hpp>
-#include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/buffers.hpp>
-#include <boost/capy/error.hpp>
 
 #include <cstdlib>
 #include <iostream>
 #include <string>
-#include <vector>
 
 namespace corosio = boost::corosio;
 namespace capy = boost::capy;
 
-// Preallocated worker that handles one connection at a time
-struct worker
+class echo_server : public corosio::tcp_server
 {
-    corosio::socket sock;
-    std::string buf;
-    bool in_use = false;
-
-    explicit worker(corosio::io_context& ioc)
-        : sock(ioc)
+    class worker : public worker_base
     {
-        buf.reserve(4096);
-    }
+        corosio::io_context& ctx_;
+        corosio::socket sock_;
+        std::string buf_;
 
-    worker(worker&&) = default;
-    worker& operator=(worker&&) = default;
+    public:
+        explicit worker(corosio::io_context& ctx)
+            : ctx_(ctx)
+            , sock_(ctx)
+        {
+            buf_.reserve(4096);
+        }
+
+        corosio::socket& socket() override
+        {
+            return sock_;
+        }
+
+        void run(launcher launch) override
+        {
+            launch(ctx_.get_executor(), do_session());
+        }
+
+        capy::task<> do_session()
+        {
+            for (;;)
+            {
+                buf_.resize(4096);
+
+                // Read some data
+                auto [ec, n] = co_await sock_.read_some(
+                    capy::mutable_buffer(buf_.data(), buf_.size()));
+
+                if (ec || n == 0)
+                    break;
+
+                buf_.resize(n);
+
+                // Echo it back
+                auto [wec, wn] = co_await corosio::write(
+                    sock_, capy::const_buffer(buf_.data(), buf_.size()));
+
+                if (wec)
+                    break;
+            }
+
+            sock_.close();
+        }
+    };
+
+public:
+    echo_server(corosio::io_context& ctx, int max_workers)
+        : tcp_server(ctx, ctx.get_executor())
+    {
+        wv_.reserve(max_workers);
+        for (int i = 0; i < max_workers; ++i)
+            wv_.emplace<worker>(ctx);
+    }
 };
 
-// Echo session coroutine for a single worker
-// Reads data and echoes it back until the client disconnects
-capy::task<void>
-run_session(worker& w)
-{
-    w.in_use = true;
-
-    for (;;)
-    {
-        w.buf.clear();
-        w.buf.resize(4096);
-
-        // Read some data
-        auto [ec, n] = co_await w.sock.read_some(
-            capy::mutable_buffer(w.buf.data(), w.buf.size()));
-
-        if (ec || n == 0)
-            break;
-
-        w.buf.resize(n);
-
-        // Echo it back
-        auto [wec, wn] = co_await corosio::write(
-            w.sock, capy::const_buffer(w.buf.data(), w.buf.size()));
-
-        if (wec)
-            break;
-    }
-
-    w.sock.close();
-    w.in_use = false;
-}
-
-// Accept loop coroutine
-// Accepts connections and assigns them to free workers
-capy::task<void>
-accept_loop(
-    corosio::io_context& ioc,
-    corosio::acceptor& acc,
-    std::vector<worker>& workers)
-{
-    for (;;)
-    {
-        // Find a free worker
-        worker* free_worker = nullptr;
-        for (auto& w : workers)
-        {
-            if (!w.in_use)
-            {
-                free_worker = &w;
-                break;
-            }
-        }
-
-        if (!free_worker)
-        {
-            // All workers busy - this simple example just logs and continues
-            // A production server might queue or reject connections
-            std::cerr << "All workers busy, waiting...\n";
-            // We need to accept anyway to not leave the client hanging
-            // Create a temporary socket just to accept and close
-            corosio::socket temp(ioc);
-            auto [ec] = co_await acc.accept(temp);
-            if (ec)
-            {
-                std::cerr << "Accept error: " << ec.message() << "\n";
-                break;
-            }
-            temp.close();
-            continue;
-        }
-
-        // Accept into the free worker's socket
-        auto [ec] = co_await acc.accept(free_worker->sock);
-        if (ec)
-        {
-            std::cerr << "Accept error: " << ec.message() << "\n";
-            break;
-        }
-
-        // Spawn the session coroutine
-        capy::run_async(ioc.get_executor())(run_session(*free_worker));
-    }
-}
-
-int
-main(int argc, char* argv[])
+int main(int argc, char* argv[])
 {
     if (argc != 3)
     {
@@ -156,21 +112,22 @@ main(int argc, char* argv[])
     // Create I/O context
     corosio::io_context ioc;
 
-    // Preallocate workers
-    std::vector<worker> workers;
-    workers.reserve(max_workers);
-    for (int i = 0; i < max_workers; ++i)
-        workers.emplace_back(ioc);
+    // Create server with worker pool
+    echo_server server(ioc, max_workers);
 
-    // Create acceptor and listen
-    corosio::acceptor acc(ioc);
-    acc.listen(corosio::endpoint(port));
+    // Bind to port
+    auto ec = server.bind(corosio::endpoint(port));
+    if (ec)
+    {
+        std::cerr << "Bind failed: " << ec.message() << "\n";
+        return EXIT_FAILURE;
+    }
 
     std::cout << "Echo server listening on port " << port
               << " with " << max_workers << " workers\n";
 
-    // Start the accept loop
-    capy::run_async(ioc.get_executor())(accept_loop(ioc, acc, workers));
+    // Start accepting connections
+    server.start();
 
     // Run the event loop
     ioc.run();

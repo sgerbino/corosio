@@ -99,16 +99,16 @@ protected:
     struct read_some_awaitable
     {
         io_stream& ios_;
-        MutableBufferSequence const& buffers_;
+        MutableBufferSequence buffers_;
         std::stop_token token_;
         mutable system::error_code ec_;
         mutable std::size_t bytes_transferred_ = 0;
 
         read_some_awaitable(
             io_stream& ios,
-            MutableBufferSequence const& buffers) noexcept
+            MutableBufferSequence buffers) noexcept
             : ios_(ios)
-            , buffers_(buffers)
+            , buffers_(std::move(buffers))
         {
         }
 
@@ -124,6 +124,7 @@ protected:
             return {ec_, bytes_transferred_};
         }
 
+#if 0
         template<typename Ex>
         auto await_suspend(
             std::coroutine_handle<> h,
@@ -132,11 +133,11 @@ protected:
             ios_.get().read_some(h, ex, buffers_, token_, &ec_, &bytes_transferred_);
             return std::noop_coroutine();
         }
+#endif
 
-        template<typename Ex>
         auto await_suspend(
             std::coroutine_handle<> h,
-            Ex const& ex,
+            capy::executor_ref ex,
             std::stop_token token) -> std::coroutine_handle<>
         {
             token_ = std::move(token);
@@ -149,16 +150,16 @@ protected:
     struct write_some_awaitable
     {
         io_stream& ios_;
-        ConstBufferSequence const& buffers_;
+        ConstBufferSequence buffers_;
         std::stop_token token_;
         mutable system::error_code ec_;
         mutable std::size_t bytes_transferred_ = 0;
 
         write_some_awaitable(
             io_stream& ios,
-            ConstBufferSequence const& buffers) noexcept
+            ConstBufferSequence buffers) noexcept
             : ios_(ios)
-            , buffers_(buffers)
+            , buffers_(std::move(buffers))
         {
         }
 
@@ -174,6 +175,7 @@ protected:
             return {ec_, bytes_transferred_};
         }
 
+#if 0
         template<typename Ex>
         auto await_suspend(
             std::coroutine_handle<> h,
@@ -182,11 +184,11 @@ protected:
             ios_.get().write_some(h, ex, buffers_, token_, &ec_, &bytes_transferred_);
             return std::noop_coroutine();
         }
+#endif
 
-        template<typename Ex>
         auto await_suspend(
             std::coroutine_handle<> h,
-            Ex const& ex,
+            capy::executor_ref ex,
             std::stop_token token) -> std::coroutine_handle<>
         {
             token_ = std::move(token);

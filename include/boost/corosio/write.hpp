@@ -52,7 +52,6 @@ namespace corosio {
     @par Example
     @code
     std::string data = "Hello, World!";
-    // Using structured bindings
     auto [ec, n] = co_await corosio::write(s, capy::make_buffer(data));
     if (ec)
     {
@@ -60,9 +59,6 @@ namespace corosio {
         co_return;
     }
     // All data has been written (n == data.size())
-
-    // Or using exceptions
-    auto bytes = (co_await corosio::write(s, buf)).value();
     @endcode
 
     @note This function differs from `write_some()` in that it
