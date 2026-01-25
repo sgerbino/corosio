@@ -13,8 +13,8 @@ namespace boost {
 namespace corosio {
 
 tcp_server::
-push_aw::
-push_aw(
+push_awaitable::
+push_awaitable(
     tcp_server& self,
     worker_base& w) noexcept
     : self_(self)
@@ -24,7 +24,7 @@ push_aw(
 
 bool
 tcp_server::
-push_aw::
+push_awaitable::
 await_ready() const noexcept
 {
     return false;
@@ -32,7 +32,7 @@ await_ready() const noexcept
 
 void
 tcp_server::
-push_aw::
+push_awaitable::
 await_resume() noexcept
 {
     // Wake a waiting acceptor if one exists, otherwise add to idle list
@@ -50,8 +50,8 @@ await_resume() noexcept
 }
 
 tcp_server::
-pop_aw::
-pop_aw(tcp_server& self) noexcept
+pop_awaitable::
+pop_awaitable(tcp_server& self) noexcept
     : self_(self)
     , wait_{}
 {
@@ -59,14 +59,15 @@ pop_aw(tcp_server& self) noexcept
 
 bool
 tcp_server::
-pop_aw::
+pop_awaitable::
 await_ready() const noexcept
 {
     return self_.wv_.idle_ != nullptr;
 }
 
 system::result<tcp_server::worker_base&>
-tcp_server::pop_aw::await_resume() noexcept
+tcp_server::
+pop_awaitable::await_resume() noexcept
 {
     if(wait_.w)
         return *wait_.w;
@@ -75,9 +76,9 @@ tcp_server::pop_aw::await_resume() noexcept
 
 auto
 tcp_server::
-push(worker_base& w) -> push_aw
+push(worker_base& w) -> push_awaitable
 {
-    return push_aw{*this, w};
+    return push_awaitable{*this, w};
 }
 
 // Synchronous version for destructor/guard paths
@@ -98,10 +99,10 @@ push_sync(worker_base& w) noexcept
     }
 }
 
-tcp_server::pop_aw
+tcp_server::pop_awaitable
 tcp_server::pop()
 {
-    return pop_aw{*this};
+    return pop_awaitable{*this};
 }
 
 // Accept loop: wait for idle worker, accept connection, dispatch
@@ -136,7 +137,8 @@ tcp_server::bind(endpoint ep)
 }
 
 void
-tcp_server::start()
+tcp_server::
+start()
 {
     for(auto& t : ports_)
         capy::run_async(ex_)(do_accept(t));

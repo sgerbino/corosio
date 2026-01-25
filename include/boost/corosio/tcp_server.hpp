@@ -183,13 +183,14 @@ private:
         worker_base* w;
     };
 
-    class BOOST_COROSIO_DECL push_aw
+    class BOOST_COROSIO_DECL
+        push_awaitable
     {
         tcp_server& self_;
         worker_base& w_;
 
     public:
-        push_aw(tcp_server& self, worker_base& w) noexcept;
+        push_awaitable(tcp_server& self, worker_base& w) noexcept;
         bool await_ready() const noexcept;
 
         template<typename Ex>
@@ -206,13 +207,14 @@ private:
         std::coroutine_handle<> await_suspend_impl(std::coroutine_handle<> h) noexcept;
     };
 
-    class BOOST_COROSIO_DECL pop_aw
+    class BOOST_COROSIO_DECL
+        pop_awaitable
     {
         tcp_server& self_;
         waiter wait_;
 
     public:
-        pop_aw(tcp_server& self) noexcept;
+        pop_awaitable(tcp_server& self) noexcept;
         bool await_ready() const noexcept;
 
         template<typename Ex>
@@ -232,11 +234,11 @@ private:
         bool await_suspend_impl(std::coroutine_handle<> h) noexcept;
     };
 
-    push_aw push(worker_base& w);
+    push_awaitable push(worker_base& w);
 
     void push_sync(worker_base& w) noexcept;
 
-    pop_aw pop();
+    pop_awaitable pop();
 
     capy::task<void> do_accept(acceptor& acc);
 
@@ -352,7 +354,8 @@ public:
 
         @see worker_base::run
     */
-    class BOOST_COROSIO_DECL launcher
+    class BOOST_COROSIO_DECL
+        launcher
     {
         tcp_server* srv_;
         worker_base* w_;
@@ -454,7 +457,8 @@ public:
 
         @return The error code if binding fails.
     */
-    system::error_code bind(endpoint ep);
+    system::error_code
+    bind(endpoint ep);
 
     /** Start accepting connections.
 
