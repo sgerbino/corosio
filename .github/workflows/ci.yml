@@ -752,8 +752,9 @@ jobs:
             --gcov-tool "$gcov_tool"
 
           # Fix paths in coverage.info to match repo structure
-          # Strips boost-root/libs/corosio/ prefix so codecov can map to repo files
-          sed -i 's|boost-root/libs/${{steps.patch.outputs.module}}/||g' boost-root/__build_cmake_test__/coverage.info
+          # Strips everything up to and including boost-root/libs/corosio/ so codecov can map to repo files
+          # Preserves the SF: prefix required by lcov format while removing the workspace path
+          sed -i 's|^SF:.*/boost-root/libs/${{steps.patch.outputs.module}}/|SF:|g' boost-root/__build_cmake_test__/coverage.info
 
       - name: Upload to Codecov
         if: ${{ matrix.coverage }}
