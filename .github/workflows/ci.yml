@@ -751,6 +751,10 @@ jobs:
             --include "*/boost-root/libs/${{steps.patch.outputs.module}}/src/*" \
             --gcov-tool "$gcov_tool"
 
+          # Fix paths in coverage.info to match repo structure
+          # Strips boost-root/libs/corosio/ prefix so codecov can map to repo files
+          sed -i 's|boost-root/libs/${{steps.patch.outputs.module}}/||g' boost-root/__build_cmake_test__/coverage.info
+
       - name: Upload to Codecov
         if: ${{ matrix.coverage }}
         uses: codecov/codecov-action@v5
@@ -760,7 +764,7 @@ jobs:
           fail_ci_if_error: false
           verbose: true
           disable_search: true
-          plugins: ''
+          plugins: noop
 
       - name: Coverage Summary
         if: ${{ matrix.coverage }}
