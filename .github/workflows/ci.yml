@@ -751,11 +751,6 @@ jobs:
             --include "*/boost-root/libs/${{steps.patch.outputs.module}}/src/*" \
             --gcov-tool "$gcov_tool"
 
-          # Fix paths in coverage.info to match repo structure
-          # Strip everything before include/ or src/ to get repo-relative paths
-          sed -i -E 's|^SF:.*(include/)|SF:\1|' boost-root/__build_cmake_test__/coverage.info
-          sed -i -E 's|^SF:.*(src/)|SF:\1|' boost-root/__build_cmake_test__/coverage.info
-
       - name: Upload to Codecov
         if: ${{ matrix.coverage }}
         uses: codecov/codecov-action@v5
