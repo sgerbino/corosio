@@ -21,6 +21,7 @@
 #include <boost/corosio/detail/thread_local_ptr.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <limits>
 
@@ -217,6 +218,7 @@ post(capy::coro h) const
         {
             auto h = h_;
             delete this;
+            std::atomic_thread_fence(std::memory_order_acquire);
             h.resume();
         }
 

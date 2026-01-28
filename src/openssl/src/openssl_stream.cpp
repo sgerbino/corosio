@@ -21,6 +21,8 @@
 #include <openssl/bio.h>
 #include <openssl/x509.h>
 
+#include "src/detail/resume_coro.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -470,7 +472,7 @@ struct openssl_stream_impl_
         *ec_out = ec;
         *bytes_out = total_read;
 
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 
@@ -550,7 +552,7 @@ struct openssl_stream_impl_
         *ec_out = ec;
         *bytes_out = total_written;
 
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 
@@ -616,7 +618,7 @@ struct openssl_stream_impl_
         }
         *ec_out = ec;
 
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 
@@ -704,7 +706,7 @@ struct openssl_stream_impl_
 
         *ec_out = ec;
 
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 

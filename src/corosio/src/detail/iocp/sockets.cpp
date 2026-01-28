@@ -15,6 +15,7 @@
 #include "src/detail/iocp/scheduler.hpp"
 #include "src/detail/endpoint_convert.hpp"
 #include "src/detail/make_err.hpp"
+#include "src/detail/resume_coro.hpp"
 
 /*
     Windows IOCP Socket Implementation Overview
@@ -251,7 +252,7 @@ operator()()
     // Release the acceptor reference now that I/O is complete
     acceptor_ptr.reset();
 
-    saved_d.dispatch(saved_h).resume();
+    resume_coro(saved_d, saved_h);
 }
 
 void

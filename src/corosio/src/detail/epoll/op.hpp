@@ -23,6 +23,7 @@
 #include <boost/system/error_code.hpp>
 
 #include "src/detail/make_err.hpp"
+#include "src/detail/resume_coro.hpp"
 #include "src/detail/scheduler_op.hpp"
 #include "src/detail/endpoint_convert.hpp"
 
@@ -177,7 +178,7 @@ struct epoll_op : scheduler_op
         capy::executor_ref saved_ex( std::move( ex ) );
         capy::coro saved_h( std::move( h ) );
         impl_ptr.reset();
-        saved_ex.dispatch( saved_h ).resume();
+        resume_coro(saved_ex, saved_h);
     }
 
     virtual bool is_read_operation() const noexcept { return false; }

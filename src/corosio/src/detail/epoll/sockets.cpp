@@ -14,6 +14,7 @@
 #include "src/detail/epoll/sockets.hpp"
 #include "src/detail/endpoint_convert.hpp"
 #include "src/detail/make_err.hpp"
+#include "src/detail/resume_coro.hpp"
 
 #include <boost/corosio/detail/except.hpp>
 #include <boost/capy/buffers.hpp>
@@ -114,7 +115,7 @@ operator()()
     capy::executor_ref saved_ex( std::move( ex ) );
     capy::coro saved_h( std::move( h ) );
     impl_ptr.reset();
-    saved_ex.dispatch( saved_h ).resume();
+    resume_coro(saved_ex, saved_h);
 }
 
 //------------------------------------------------------------------------------

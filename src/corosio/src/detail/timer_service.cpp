@@ -11,6 +11,7 @@
 
 #include <boost/corosio/detail/scheduler.hpp>
 #include "src/detail/intrusive.hpp"
+#include "src/detail/resume_coro.hpp"
 #include <boost/capy/error.hpp>
 #include <boost/capy/coro.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
@@ -186,10 +187,7 @@ public:
         {
             if (ec_out)
                 *ec_out = make_error_code(capy::error::canceled);
-            auto resume_h = d.dispatch(h);
-            // Resume the handle if executor returned it for symmetric transfer
-            if (resume_h.address() == h.address())
-                resume_h.resume();
+            resume_coro(d, h);
             // Call on_work_finished AFTER the coroutine resumes
             sched_->on_work_finished();
         }
@@ -229,10 +227,7 @@ public:
         {
             if (ec_out)
                 *ec_out = make_error_code(capy::error::canceled);
-            auto resume_h = d.dispatch(h);
-            // Resume the handle if executor returned it for symmetric transfer
-            if (resume_h.address() == h.address())
-                resume_h.resume();
+            resume_coro(d, h);
             // Call on_work_finished AFTER the coroutine resumes
             sched_->on_work_finished();
         }
@@ -285,11 +280,7 @@ public:
         {
             if (e.ec_out)
                 *e.ec_out = {};
-            auto resume_h = e.d.dispatch(e.h);
-            // Resume the handle if executor returned it for symmetric transfer
-            // (executor returns our handle if we should resume, noop if it posted)
-            if (resume_h.address() == e.h.address())
-                resume_h.resume();
+            resume_coro(e.d, e.h);
             // Call on_work_finished AFTER the coroutine resumes, so it has a
             // chance to add new work before we potentially trigger stop()
             sched_->on_work_finished();
@@ -391,10 +382,7 @@ wait(
         if (ec)
             *ec = {};
         // Note: no work tracking needed - we dispatch synchronously
-        auto resume_h = d.dispatch(h);
-        // Resume the handle if executor returned it for symmetric transfer
-        if (resume_h.address() == h.address())
-            resume_h.resume();
+        resume_coro(d, h);
         return;
     }
 

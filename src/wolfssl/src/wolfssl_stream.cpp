@@ -22,6 +22,8 @@
 #include <wolfssl/ssl.h>
 #include <wolfssl/error-ssl.h>
 
+#include "src/detail/resume_coro.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -524,7 +526,7 @@ struct wolfssl_stream_impl_
         *bytes_out = total_read;
 
         // Resume the original caller via executor
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 
@@ -635,7 +637,7 @@ struct wolfssl_stream_impl_
         *bytes_out = total_written;
 
         // Resume the original caller via executor
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 
@@ -660,7 +662,7 @@ struct wolfssl_stream_impl_
         {
             *ec_out = ec;
             current_op_ = nullptr;
-            d.dispatch(capy::coro{continuation}).resume();
+            detail::resume_coro(d, continuation);
             co_return;
         }
 
@@ -774,7 +776,7 @@ struct wolfssl_stream_impl_
         *ec_out = ec;
 
         // Resume the original caller via executor
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 
@@ -910,7 +912,7 @@ struct wolfssl_stream_impl_
         *ec_out = ec;
 
         // Resume the original caller via executor
-        d.dispatch(capy::coro{continuation}).resume();
+        detail::resume_coro(d, continuation);
         co_return;
     }
 

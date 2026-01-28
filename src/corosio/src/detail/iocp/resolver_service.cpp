@@ -15,6 +15,7 @@
 #include "src/detail/iocp/scheduler.hpp"
 #include "src/detail/endpoint_convert.hpp"
 #include "src/detail/make_err.hpp"
+#include "src/detail/resume_coro.hpp"
 
 #include <boost/url/ipv4_address.hpp>
 #include <boost/url/ipv6_address.hpp>
@@ -239,7 +240,7 @@ operator()()
 
     cancel_handle = nullptr;
 
-    d.dispatch(h).resume();
+    resume_coro(d, h);
 }
 
 void
@@ -283,7 +284,7 @@ operator()()
             ep, std::move(stored_host), std::move(stored_service));
     }
 
-    d.dispatch(h).resume();
+    resume_coro(d, h);
 }
 
 void

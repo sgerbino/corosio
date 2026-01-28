@@ -20,9 +20,9 @@
 #include <boost/url/ipv4_address.hpp>
 
 #include <boost/corosio/detail/platform.hpp>
+#include "src/detail/resume_coro.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <span>
@@ -279,7 +279,7 @@ read_some(
         {
             *ec = fail_ec;
             *bytes_transferred = 0;
-            d.dispatch(capy::coro{h}).resume();
+            detail::resume_coro(d, h);
             return;
         }
     }
@@ -294,7 +294,7 @@ read_some(
         std::size_t n = fill_from_provide(bufs, count);
         *ec = {};
         *bytes_transferred = n;
-        d.dispatch(capy::coro{h}).resume();
+        detail::resume_coro(d, h);
         return;
     }
 
@@ -321,7 +321,7 @@ write_some(
         {
             *ec = fail_ec;
             *bytes_transferred = 0;
-            d.dispatch(capy::coro{h}).resume();
+            detail::resume_coro(d, h);
             return;
         }
     }
@@ -342,14 +342,14 @@ write_some(
         {
             *ec = capy::error::test_failure;
             *bytes_transferred = 0;
-            d.dispatch(capy::coro{h}).resume();
+            detail::resume_coro(d, h);
             return;
         }
 
         // If all expected data was validated, report success
         *ec = {};
         *bytes_transferred = total_size;
-        d.dispatch(capy::coro{h}).resume();
+        detail::resume_coro(d, h);
         return;
     }
 

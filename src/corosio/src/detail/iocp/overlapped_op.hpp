@@ -21,6 +21,7 @@
 #include <boost/system/error_code.hpp>
 
 #include "src/detail/make_err.hpp"
+#include "src/detail/resume_coro.hpp"
 #include "src/detail/scheduler_op.hpp"
 
 #include <atomic>
@@ -110,7 +111,7 @@ struct overlapped_op
         if (bytes_out)
             *bytes_out = static_cast<std::size_t>(bytes_transferred);
 
-        d.dispatch(h).resume();
+        resume_coro(d, h);
     }
 
     // Returns true if this is a read operation (for EOF detection)
