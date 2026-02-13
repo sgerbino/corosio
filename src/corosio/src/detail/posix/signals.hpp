@@ -18,6 +18,8 @@
 #include <boost/corosio/signal_set.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
+#include <memory>
+
 /*
     POSIX Signal Service
     ====================
@@ -49,7 +51,7 @@ class posix_signals : public capy::execution_context::service
 {
 public:
     /** Create a new signal set implementation. */
-    virtual signal_set::signal_set_impl& create_impl() = 0;
+    virtual std::shared_ptr<signal_set::signal_set_impl> create_impl() = 0;
 
 protected:
     posix_signals() = default;

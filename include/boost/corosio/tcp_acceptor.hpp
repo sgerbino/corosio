@@ -73,7 +73,7 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         tcp_socket& peer_;
         std::stop_token token_;
         mutable std::error_code ec_;
-        mutable io_object::io_object_impl* peer_impl_ = nullptr;
+        mutable io_object::handle peer_handle_;
 
         accept_awaitable(tcp_acceptor& acc, tcp_socket& peer) noexcept
             : acc_(acc)
@@ -90,13 +90,11 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         {
             if (token_.stop_requested())
                 return {make_error_code(std::errc::operation_canceled)};
-            
-            // Transfer the accepted impl to the peer socket
-            // (acceptor is a friend of socket, so we can access impl_)
-            if (!ec_ && peer_impl_)
+
+            if (!ec_ && peer_handle_)
             {
                 peer_.close();
-                peer_.impl_ = peer_impl_;
+                peer_.h_ = std::move(peer_handle_);
             }
             return {ec_};
         }
@@ -106,7 +104,7 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
             capy::io_env const* env) -> std::coroutine_handle<>
         {
             token_ = env->stop_token;
-            return acc_.get().accept(h, env->executor, token_, &ec_, &peer_impl_);
+            return acc_.get().accept(h, env->executor, token_, &ec_, &peer_handle_);
         }
     };
 
@@ -146,8 +144,7 @@ public:
     tcp_acceptor(tcp_acceptor&& other) noexcept
         : io_object(other.context())
     {
-        impl_ = other.impl_;
-        other.impl_ = nullptr;
+        h_ = std::move(other.h_);
     }
 
     /** Move assignment operator.
@@ -169,8 +166,7 @@ public:
                 detail::throw_logic_error(
                     "cannot move tcp_acceptor across execution contexts");
             close();
-            impl_ = other.impl_;
-            other.impl_ = nullptr;
+            h_ = std::move(other.h_);
         }
         return *this;
     }
@@ -219,7 +215,7 @@ public:
     */
     bool is_open() const noexcept
     {
-        return impl_ != nullptr;
+        return static_cast<bool>(h_);
     }
 
     /** Initiate an asynchronous accept operation.
@@ -257,7 +253,7 @@ public:
     */
     auto accept(tcp_socket& peer)
     {
-        if (!impl_)
+        if (!h_)
             detail::throw_logic_error("accept: acceptor not listening");
         return accept_awaitable(*this, peer);
     }
@@ -287,14 +283,14 @@ public:
     */
     endpoint local_endpoint() const noexcept;
 
-    struct acceptor_impl : io_object_impl
+    struct acceptor_impl : implementation
     {
         virtual std::coroutine_handle<> accept(
             std::coroutine_handle<>,
             capy::executor_ref,
             std::stop_token,
             std::error_code*,
-            io_object_impl**) = 0;
+            handle*) = 0;
 
         /// Returns the cached local endpoint.
         virtual endpoint local_endpoint() const noexcept = 0;
@@ -309,7 +305,7 @@ public:
 private:
     inline acceptor_impl& get() const noexcept
     {
-        return *static_cast<acceptor_impl*>(impl_);
+        return *static_cast<acceptor_impl*>(h_.get());
     }
 };
 

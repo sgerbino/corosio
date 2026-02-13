@@ -15,6 +15,7 @@
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/endpoint.hpp>
 #include <boost/capy/ex/execution_context.hpp>
+#include <memory>
 #include <system_error>
 
 /*
@@ -61,22 +62,11 @@ class socket_service
 public:
     using key_type = socket_service;
 
-    void open(io_object::handle&) override {}
-    void close(io_object::handle&) override {}
-    void destroy(io_object::implementation*) override {}
-    io_object::implementation* construct() override { return nullptr; }
-
     /** Create a new socket implementation.
 
-        @return Reference to the newly created socket implementation.
+        @return Shared pointer to the newly created socket implementation.
     */
-    virtual tcp_socket::socket_impl& create_impl() = 0;
-
-    /** Destroy a socket implementation.
-
-        @param impl The socket implementation to destroy.
-    */
-    virtual void destroy_impl(tcp_socket::socket_impl& impl) = 0;
+    virtual std::shared_ptr<tcp_socket::socket_impl> create_impl() = 0;
 
     /** Open a socket.
 
@@ -102,22 +92,19 @@ protected:
 
     The key_type is acceptor_service itself, which enables runtime polymorphism.
 */
-class acceptor_service : public capy::execution_context::service
+class acceptor_service
+    : public capy::execution_context::service
+    , public io_object::io_service
 {
 public:
     using key_type = acceptor_service;
 
     /** Create a new acceptor implementation.
 
-        @return Reference to the newly created acceptor implementation.
+        @return Shared pointer to the newly created acceptor implementation.
     */
-    virtual tcp_acceptor::acceptor_impl& create_acceptor_impl() = 0;
-
-    /** Destroy an acceptor implementation.
-
-        @param impl The acceptor implementation to destroy.
-    */
-    virtual void destroy_acceptor_impl(tcp_acceptor::acceptor_impl& impl) = 0;
+    virtual std::shared_ptr<tcp_acceptor::acceptor_impl>
+    create_acceptor_impl() = 0;
 
     /** Open an acceptor.
 

@@ -37,7 +37,6 @@
 #include <stop_token>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 /*
@@ -52,7 +51,7 @@
     ---------------
     - posix_resolver_service (abstract base in header)
     - posix_resolver_service_impl (concrete, defined here)
-        - Owns all posix_resolver_impl instances via shared_ptr
+        - Tracks posix_resolver_impl instances via intrusive_list
         - Stores scheduler* for posting completions
     - posix_resolver_impl (one per resolver object)
         - Contains embedded resolve_op and reverse_resolve_op for reuse
@@ -381,8 +380,6 @@ public:
     {
     }
 
-    void release() override;
-
     std::coroutine_handle<> resolve(
         std::coroutine_handle<>,
         capy::executor_ref,
@@ -435,8 +432,7 @@ public:
     posix_resolver_service_impl& operator=(posix_resolver_service_impl const&) = delete;
 
     void shutdown() override;
-    resolver::resolver_impl& create_impl() override;
-    void destroy_impl(posix_resolver_impl& impl);
+    std::shared_ptr<resolver::resolver_impl> create_impl() override;
 
     void post(scheduler_op* op);
     void work_started() noexcept;
@@ -454,8 +450,6 @@ private:
     std::atomic<bool> shutting_down_{false};
     std::size_t active_threads_ = 0;
     intrusive_list<posix_resolver_impl> resolver_list_;
-    std::unordered_map<posix_resolver_impl*,
-        std::shared_ptr<posix_resolver_impl>> resolver_ptrs_;
 };
 
 //------------------------------------------------------------------------------
@@ -602,14 +596,6 @@ start(std::stop_token token)
 //------------------------------------------------------------------------------
 // posix_resolver_impl implementation
 //------------------------------------------------------------------------------
-
-void
-posix_resolver_impl::
-release()
-{
-    cancel();
-    svc_.destroy_impl(*this);
-}
 
 std::coroutine_handle<>
 posix_resolver_impl::
@@ -816,9 +802,6 @@ shutdown()
         {
             impl->cancel();
         }
-
-        // Clear the map which releases shared_ptrs
-        resolver_ptrs_.clear();
     }
 
     // Wait for all worker threads to finish before service is destroyed
@@ -828,29 +811,26 @@ shutdown()
     }
 }
 
-resolver::resolver_impl&
+std::shared_ptr<resolver::resolver_impl>
 posix_resolver_service_impl::
 create_impl()
 {
-    auto ptr = std::make_shared<posix_resolver_impl>(*this);
-    auto* impl = ptr.get();
-
+    auto* raw = new posix_resolver_impl(*this);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        resolver_list_.push_back(impl);
-        resolver_ptrs_[impl] = std::move(ptr);
+        resolver_list_.push_back(raw);
     }
-
-    return *impl;
-}
-
-void
-posix_resolver_service_impl::
-destroy_impl(posix_resolver_impl& impl)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    resolver_list_.remove(&impl);
-    resolver_ptrs_.erase(&impl);
+    return std::shared_ptr<resolver::resolver_impl>(
+        raw,
+        [this](resolver::resolver_impl* p) {
+            auto* impl = static_cast<posix_resolver_impl*>(p);
+            impl->cancel();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                resolver_list_.remove(impl);
+            }
+            delete impl;
+        });
 }
 
 void

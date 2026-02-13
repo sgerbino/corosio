@@ -111,14 +111,6 @@ select_socket_impl(select_socket_service& svc) noexcept
 {
 }
 
-void
-select_socket_impl::
-release()
-{
-    close_socket();
-    svc_.destroy_impl(*this);
-}
-
 std::coroutine_handle<>
 select_socket_impl::
 connect(
@@ -643,38 +635,42 @@ shutdown()
     std::lock_guard lock(state_->mutex_);
 
     while (auto* impl = state_->socket_list_.pop_front())
+    {
+        impl->in_service_list_ = false;
         impl->close_socket();
-
-    // Don't clear socket_ptrs_ here. The scheduler shuts down after us and
-    // drains completed_ops_, calling destroy() on each queued op. Letting
-    // ~state_ release the ptrs (during service destruction, after scheduler
-    // shutdown) keeps every impl alive until all ops have been drained.
+    }
 }
 
-tcp_socket::socket_impl&
+std::shared_ptr<tcp_socket::socket_impl>
 select_socket_service::
 create_impl()
 {
     auto impl = std::make_shared<select_socket_impl>(*this);
-    auto* raw = impl.get();
 
     {
         std::lock_guard lock(state_->mutex_);
-        state_->socket_list_.push_back(raw);
-        state_->socket_ptrs_.emplace(raw, std::move(impl));
+        state_->socket_list_.push_back(impl.get());
+        impl->in_service_list_ = true;
     }
 
-    return *raw;
+    return impl;
 }
 
 void
 select_socket_service::
-destroy_impl(tcp_socket::socket_impl& impl)
+close(io_object::handle& h)
 {
-    auto* select_impl = static_cast<select_socket_impl*>(&impl);
-    std::lock_guard lock(state_->mutex_);
-    state_->socket_list_.remove(select_impl);
-    state_->socket_ptrs_.erase(select_impl);
+    auto* select_impl = static_cast<select_socket_impl*>(h.get());
+    select_impl->close_socket();
+    {
+        std::lock_guard lock(state_->mutex_);
+        if (select_impl->in_service_list_)
+        {
+            state_->socket_list_.remove(select_impl);
+            select_impl->in_service_list_ = false;
+        }
+    }
+    h.reset();
 }
 
 std::error_code

@@ -322,30 +322,25 @@ struct select_write_op : select_op
 struct select_accept_op : select_op
 {
     int accepted_fd = -1;
-    io_object::io_object_impl* peer_impl = nullptr;
-    io_object::io_object_impl** impl_out = nullptr;
+    io_object::handle* handle_out = nullptr;
+    sockaddr_in peer_addr{};
 
     void reset() noexcept
     {
         select_op::reset();
         accepted_fd = -1;
-        peer_impl = nullptr;
-        impl_out = nullptr;
+        handle_out = nullptr;
+        peer_addr = {};
     }
 
     void perform_io() noexcept override
     {
-        sockaddr_in addr{};
-        socklen_t addrlen = sizeof(addr);
+        socklen_t addrlen = sizeof(peer_addr);
 
-        // Note: select backend uses accept() + fcntl instead of accept4()
-        // for broader POSIX compatibility
-        int new_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen);
+        int new_fd = ::accept(fd, reinterpret_cast<sockaddr*>(&peer_addr), &addrlen);
 
         if (new_fd >= 0)
         {
-            // Reject fds that exceed select()'s FD_SETSIZE limit.
-            // Better to fail now than during later async operations.
             if (new_fd >= FD_SETSIZE)
             {
                 ::close(new_fd);
@@ -353,9 +348,6 @@ struct select_accept_op : select_op
                 return;
             }
 
-            // Set non-blocking and close-on-exec flags.
-            // A non-blocking socket is essential for the async reactor;
-            // if we can't configure it, fail rather than risk blocking.
             int flags = ::fcntl(new_fd, F_GETFL, 0);
             if (flags == -1)
             {

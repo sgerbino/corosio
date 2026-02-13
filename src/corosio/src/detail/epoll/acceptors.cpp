@@ -62,7 +62,8 @@ operator()()
             ->service().socket_service();
         if (socket_svc)
         {
-            auto& impl = static_cast<epoll_socket_impl&>(socket_svc->create_impl());
+            auto sp = socket_svc->create_impl();
+            auto& impl = static_cast<epoll_socket_impl&>(*sp);
             impl.set_socket(accepted_fd);
 
             impl.desc_state_.fd = accepted_fd;
@@ -78,8 +79,8 @@ operator()()
                 static_cast<epoll_acceptor_impl*>(acceptor_impl_)->local_endpoint(),
                 from_sockaddr_in(peer_addr));
 
-            if (impl_out)
-                *impl_out = &impl;
+            if (handle_out)
+                *handle_out = io_object::handle(*socket_svc, std::move(sp));
             accepted_fd = -1;
         }
         else
@@ -97,8 +98,6 @@ operator()()
             ::close(accepted_fd);
             accepted_fd = -1;
         }
-        if (impl_out)
-            *impl_out = nullptr;
     }
 
     // Move to stack before resuming. See epoll_op::operator()() for rationale.
@@ -114,14 +113,6 @@ epoll_acceptor_impl(epoll_acceptor_service& svc) noexcept
 {
 }
 
-void
-epoll_acceptor_impl::
-release()
-{
-    close_socket();
-    svc_.destroy_acceptor_impl(*this);
-}
-
 std::coroutine_handle<>
 epoll_acceptor_impl::
 accept(
@@ -129,14 +120,14 @@ accept(
     capy::executor_ref ex,
     std::stop_token token,
     std::error_code* ec,
-    io_object::io_object_impl** impl_out)
+    io_object::handle* handle_out)
 {
     auto& op = acc_;
     op.reset();
     op.h = h;
     op.ex = ex;
     op.ec_out = ec;
-    op.impl_out = impl_out;
+    op.handle_out = handle_out;
     op.fd = fd_;
     op.start(token, this);
 
@@ -160,7 +151,8 @@ accept(
             auto* socket_svc = svc_.socket_service();
             if (socket_svc)
             {
-                auto& impl = static_cast<epoll_socket_impl&>(socket_svc->create_impl());
+                auto sp = socket_svc->create_impl();
+                auto& impl = static_cast<epoll_socket_impl&>(*sp);
                 impl.set_socket(accepted);
 
                 impl.desc_state_.fd = accepted;
@@ -175,15 +167,13 @@ accept(
                 impl.set_endpoints(local_endpoint_, from_sockaddr_in(addr));
 
                 *ec = {};
-                if (impl_out)
-                    *impl_out = &impl;
+                if (handle_out)
+                    *handle_out = io_object::handle(*socket_svc, std::move(sp));
             }
             else
             {
                 ::close(accepted);
                 *ec = make_err(ENOENT);
-                if (impl_out)
-                    *impl_out = nullptr;
             }
             return ex.dispatch(h);
         }
@@ -313,35 +303,45 @@ shutdown()
     std::lock_guard lock(state_->mutex_);
 
     while (auto* impl = state_->acceptor_list_.pop_front())
+    {
+        impl->in_service_list_ = false;
         impl->close_socket();
-
-    // Don't clear acceptor_ptrs_ here — same rationale as
-    // epoll_socket_service::shutdown(). Let ~state_ release ptrs
-    // after scheduler shutdown has drained all queued ops.
+    }
 }
 
-tcp_acceptor::acceptor_impl&
+std::shared_ptr<tcp_acceptor::acceptor_impl>
 epoll_acceptor_service::
 create_acceptor_impl()
 {
     auto impl = std::make_shared<epoll_acceptor_impl>(*this);
-    auto* raw = impl.get();
 
     std::lock_guard lock(state_->mutex_);
-    state_->acceptor_list_.push_back(raw);
-    state_->acceptor_ptrs_.emplace(raw, std::move(impl));
+    state_->acceptor_list_.push_back(impl.get());
+    impl->in_service_list_ = true;
 
-    return *raw;
+    return impl;
 }
 
 void
 epoll_acceptor_service::
-destroy_acceptor_impl(tcp_acceptor::acceptor_impl& impl)
+close(io_object::handle& h)
 {
-    auto* epoll_impl = static_cast<epoll_acceptor_impl*>(&impl);
-    std::lock_guard lock(state_->mutex_);
-    state_->acceptor_list_.remove(epoll_impl);
-    state_->acceptor_ptrs_.erase(epoll_impl);
+    if (!h)
+        return;
+
+    auto* epoll_impl = static_cast<epoll_acceptor_impl*>(h.get());
+    epoll_impl->close_socket();
+
+    {
+        std::lock_guard lock(state_->mutex_);
+        if (epoll_impl->in_service_list_)
+        {
+            state_->acceptor_list_.remove(epoll_impl);
+            epoll_impl->in_service_list_ = false;
+        }
+    }
+
+    h.reset();
 }
 
 std::error_code

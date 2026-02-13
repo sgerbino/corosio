@@ -53,69 +53,40 @@ operator()()
             *ec_out = {};
     }
 
-    if (success && accepted_fd >= 0)
+    // Set up the peer socket on success
+    if (success && accepted_fd >= 0 && acceptor_impl_)
     {
-        if (acceptor_impl_)
+        auto* socket_svc = static_cast<select_acceptor_impl*>(acceptor_impl_)
+            ->service().socket_service();
+        if (socket_svc)
         {
-            auto* socket_svc = static_cast<select_acceptor_impl*>(acceptor_impl_)
-                ->service().socket_service();
-            if (socket_svc)
-            {
-                auto& impl = static_cast<select_socket_impl&>(socket_svc->create_impl());
-                impl.set_socket(accepted_fd);
+            auto sp = socket_svc->create_impl();
+            auto& impl = static_cast<select_socket_impl&>(*sp);
+            impl.set_socket(accepted_fd);
 
-                sockaddr_in local_addr{};
-                socklen_t local_len = sizeof(local_addr);
-                sockaddr_in remote_addr{};
-                socklen_t remote_len = sizeof(remote_addr);
+            impl.set_endpoints(
+                static_cast<select_acceptor_impl*>(acceptor_impl_)->local_endpoint(),
+                from_sockaddr_in(peer_addr));
 
-                endpoint local_ep, remote_ep;
-                if (::getsockname(accepted_fd, reinterpret_cast<sockaddr*>(&local_addr), &local_len) == 0)
-                    local_ep = from_sockaddr_in(local_addr);
-                if (::getpeername(accepted_fd, reinterpret_cast<sockaddr*>(&remote_addr), &remote_len) == 0)
-                    remote_ep = from_sockaddr_in(remote_addr);
-
-                impl.set_endpoints(local_ep, remote_ep);
-
-                if (impl_out)
-                    *impl_out = &impl;
-
-                accepted_fd = -1;
-            }
-            else
-            {
-                if (ec_out && !*ec_out)
-                    *ec_out = make_err(ENOENT);
-                ::close(accepted_fd);
-                accepted_fd = -1;
-                if (impl_out)
-                    *impl_out = nullptr;
-            }
+            if (handle_out)
+                *handle_out = io_object::handle(*socket_svc, std::move(sp));
+            accepted_fd = -1;
         }
         else
         {
-            ::close(accepted_fd);
-            accepted_fd = -1;
-            if (impl_out)
-                *impl_out = nullptr;
+            // No socket service -- treat as error
+            *ec_out = make_err(ENOENT);
+            success = false;
         }
     }
-    else
+
+    if (!success || !acceptor_impl_)
     {
         if (accepted_fd >= 0)
         {
             ::close(accepted_fd);
             accepted_fd = -1;
         }
-
-        if (peer_impl)
-        {
-            peer_impl->release();
-            peer_impl = nullptr;
-        }
-
-        if (impl_out)
-            *impl_out = nullptr;
     }
 
     // Move to stack before destroying the frame
@@ -131,14 +102,6 @@ select_acceptor_impl(select_acceptor_service& svc) noexcept
 {
 }
 
-void
-select_acceptor_impl::
-release()
-{
-    close_socket();
-    svc_.destroy_acceptor_impl(*this);
-}
-
 std::coroutine_handle<>
 select_acceptor_impl::
 accept(
@@ -146,14 +109,14 @@ accept(
     capy::executor_ref ex,
     std::stop_token token,
     std::error_code* ec,
-    io_object::io_object_impl** impl_out)
+    io_object::handle* handle_out)
 {
     auto& op = acc_;
     op.reset();
     op.h = h;
     op.ex = ex;
     op.ec_out = ec;
-    op.impl_out = impl_out;
+    op.handle_out = handle_out;
     op.fd = fd_;
     op.start(token, this);
 
@@ -164,7 +127,6 @@ accept(
     if (accepted >= 0)
     {
         // Reject fds that exceed select()'s FD_SETSIZE limit.
-        // Better to fail now than during later async operations.
         if (accepted >= FD_SETSIZE)
         {
             ::close(accepted);
@@ -172,13 +134,10 @@ accept(
             op.complete(EINVAL, 0);
             op.impl_ptr = shared_from_this();
             svc_.post(&op);
-            // completion is always posted to scheduler queue, never inline.
             return std::noop_coroutine();
         }
 
         // Set non-blocking and close-on-exec flags.
-        // A non-blocking socket is essential for the async reactor;
-        // if we can't configure it, fail rather than risk blocking.
         int flags = ::fcntl(accepted, F_GETFL, 0);
         if (flags == -1)
         {
@@ -188,7 +147,6 @@ accept(
             op.complete(err, 0);
             op.impl_ptr = shared_from_this();
             svc_.post(&op);
-            // completion is always posted to scheduler queue, never inline.
             return std::noop_coroutine();
         }
 
@@ -200,7 +158,6 @@ accept(
             op.complete(err, 0);
             op.impl_ptr = shared_from_this();
             svc_.post(&op);
-            // completion is always posted to scheduler queue, never inline.
             return std::noop_coroutine();
         }
 
@@ -212,15 +169,14 @@ accept(
             op.complete(err, 0);
             op.impl_ptr = shared_from_this();
             svc_.post(&op);
-            // completion is always posted to scheduler queue, never inline.
             return std::noop_coroutine();
         }
 
         op.accepted_fd = accepted;
+        op.peer_addr = addr;
         op.complete(0, 0);
         op.impl_ptr = shared_from_this();
         svc_.post(&op);
-        // completion is always posted to scheduler queue, never inline.
         return std::noop_coroutine();
     }
 
@@ -357,35 +313,45 @@ shutdown()
     std::lock_guard lock(state_->mutex_);
 
     while (auto* impl = state_->acceptor_list_.pop_front())
+    {
+        impl->in_service_list_ = false;
         impl->close_socket();
-
-    // Don't clear acceptor_ptrs_ here — same rationale as
-    // select_socket_service::shutdown(). Let ~state_ release ptrs
-    // after scheduler shutdown has drained all queued ops.
+    }
 }
 
-tcp_acceptor::acceptor_impl&
+std::shared_ptr<tcp_acceptor::acceptor_impl>
 select_acceptor_service::
 create_acceptor_impl()
 {
     auto impl = std::make_shared<select_acceptor_impl>(*this);
-    auto* raw = impl.get();
 
     std::lock_guard lock(state_->mutex_);
-    state_->acceptor_list_.push_back(raw);
-    state_->acceptor_ptrs_.emplace(raw, std::move(impl));
+    state_->acceptor_list_.push_back(impl.get());
+    impl->in_service_list_ = true;
 
-    return *raw;
+    return impl;
 }
 
 void
 select_acceptor_service::
-destroy_acceptor_impl(tcp_acceptor::acceptor_impl& impl)
+close(io_object::handle& h)
 {
-    auto* select_impl = static_cast<select_acceptor_impl*>(&impl);
-    std::lock_guard lock(state_->mutex_);
-    state_->acceptor_list_.remove(select_impl);
-    state_->acceptor_ptrs_.erase(select_impl);
+    if (!h)
+        return;
+
+    auto* select_impl = static_cast<select_acceptor_impl*>(h.get());
+    select_impl->close_socket();
+
+    {
+        std::lock_guard lock(state_->mutex_);
+        if (select_impl->in_service_list_)
+        {
+            state_->acceptor_list_.remove(select_impl);
+            select_impl->in_service_list_ = false;
+        }
+    }
+
+    h.reset();
 }
 
 std::error_code

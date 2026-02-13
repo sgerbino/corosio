@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <memory>
 
 namespace boost::corosio::detail {
 
@@ -42,7 +43,7 @@ public:
     };
 
     // Create timer implementation
-    virtual timer::timer_impl* create_impl() = 0;
+    virtual std::shared_ptr<io_object::implementation> create_impl() = 0;
 
     // Query methods for scheduler
     virtual bool empty() const noexcept = 0;

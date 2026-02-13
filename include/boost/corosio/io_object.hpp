@@ -13,6 +13,9 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
+#include <memory>
+#include <utility>
+
 namespace boost::corosio {
 
 /** Base class for platform I/O objects.
@@ -32,93 +35,108 @@ namespace boost::corosio {
     Shared objects: Unsafe. All operations on a single I/O object
     must be serialized.
 
-    @note Intended as a protected base class. The implementation
-        pointer `impl_` is accessible to derived classes.
+    @note Intended as a protected base class. The handle `h_` is
+        accessible to derived classes.
 
     @see io_stream, tcp_socket, tcp_acceptor
 */
 class BOOST_COROSIO_DECL io_object
 {
 public:
-    /// Forward declaration for platform-specific implementation.
-    struct implementation;
+    /** Polymorphic base for platform-specific implementations.
+
+        Each backend (epoll, select, kqueue, IOCP) provides concrete
+        types that derive from this through intermediate interfaces
+        (socket_impl, acceptor_impl, timer_impl, etc.).
+    */
+    struct implementation
+    {
+        virtual ~implementation() = default;
+    };
 
     class handle;
 
-    /** Service interface for I/O object lifecycle management.
+    /** Service interface for closing I/O objects.
 
-        Platform backends implement this interface to manage the
-        creation, opening, closing, and destruction of I/O object
-        implementations.
+        Platform backends implement this to release kernel resources
+        (file descriptors, IOCP handles) and remove the implementation
+        from service tracking structures.
     */
     struct io_service
     {
-        /// Open the I/O object for use.
-        virtual void open(handle&) = 0;
+        virtual ~io_service() = default;
 
         /// Close the I/O object, releasing kernel resources.
         virtual void close(handle&) = 0;
-
-        /// Destroy the implementation, freeing memory.
-        virtual void destroy(implementation*) = 0;
-
-        /// Construct a new implementation instance.
-        virtual implementation* construct() = 0;
     };
 
-    /** RAII wrapper for I/O object implementation lifetime.
+    /** Ownership wrapper for I/O object implementations.
 
-        Manages ownership of the platform-specific implementation,
-        automatically destroying it when the handle goes out of scope.
+        Holds a `shared_ptr<implementation>` as the master reference.
+        In-flight operations extend the implementation's lifetime
+        via `shared_from_this()`.
     */
     class handle
     {
-        capy::execution_context* ctx_ = nullptr;
         io_service* svc_ = nullptr;
-        implementation* impl_ = nullptr;
+        std::shared_ptr<implementation> impl_;
 
     public:
-        /// Destroy the handle and its implementation.
+        /// Close the I/O object if this handle still owns one.
         ~handle()
         {
-            if(impl_)
-                svc_->destroy(impl_);
+            if (impl_ && svc_)
+                svc_->close(*this);
         }
 
         /// Construct an empty handle.
         handle() = default;
 
-        /// Construct a handle bound to a context and service.
+        /// Construct a handle with a service and implementation.
         handle(
-            capy::execution_context& ctx,
-            io_service& svc)
-            : ctx_(&ctx)
-            , svc_(&svc)
-            , impl_(svc_->construct())
+            io_service& svc,
+            std::shared_ptr<implementation> impl) noexcept
+            : svc_(&svc)
+            , impl_(std::move(impl))
+        {
+        }
+
+        /// Construct a handle without a service (timers, signals, resolver).
+        explicit
+        handle(
+            std::shared_ptr<implementation> impl) noexcept
+            : impl_(std::move(impl))
         {
         }
 
         /// Move construct from another handle.
-        handle(handle&& other)
-            : ctx_(std::exchange(other.ctx_, nullptr))
-            , svc_(std::exchange(other.svc_, nullptr))
-            , impl_(std::exchange(other.impl_, nullptr))
+        handle(handle&& other) noexcept
+            : svc_(std::exchange(other.svc_, nullptr))
+            , impl_(std::move(other.impl_))
         {
         }
 
         /// Move assign from another handle.
         handle& operator=(handle&& other) noexcept
         {
-            ctx_ = std::exchange(other.ctx_, nullptr);
             svc_ = std::exchange(other.svc_, nullptr);
-            impl_ = std::exchange(other.impl_, nullptr);
+            impl_ = std::move(other.impl_);
             return *this;
         }
 
-        /// Return the execution context.
-        capy::execution_context& context() const noexcept
+        handle(handle const&) = delete;
+        handle& operator=(handle const&) = delete;
+
+        /// Return true if the handle holds an implementation.
+        explicit operator bool() const noexcept
         {
-            return *ctx_;
+            return impl_ != nullptr;
+        }
+
+        /// Return the platform implementation.
+        implementation* get() const noexcept
+        {
+            return impl_.get();
         }
 
         /// Return the associated I/O service.
@@ -127,23 +145,12 @@ public:
             return *svc_;
         }
 
-        /// Return the platform implementation.
-        implementation& get() const noexcept
+        /// Release the implementation and clear the service.
+        void reset() noexcept
         {
-            return *impl_;
+            impl_.reset();
+            svc_ = nullptr;
         }
-    };
-
-    /** Base interface for platform I/O implementations.
-
-        Derived classes provide platform-specific operation dispatch.
-    */
-    struct io_object_impl
-    {
-        virtual ~io_object_impl() = default;
-
-        /// Release associated resources without closing.
-        virtual void release() = 0;
     };
 
     /// Return the execution context.
@@ -164,8 +171,13 @@ protected:
     {
     }
 
+    io_object(io_object&&) noexcept = default;
+    io_object& operator=(io_object&&) noexcept = default;
+    io_object(io_object const&) = delete;
+    io_object& operator=(io_object const&) = delete;
+
     capy::execution_context* ctx_ = nullptr;
-    io_object_impl* impl_ = nullptr;
+    handle h_;
 };
 
 } // namespace boost::corosio

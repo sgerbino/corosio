@@ -199,7 +199,7 @@ private:
     };
 
 public:
-    struct signal_set_impl : io_object_impl
+    struct signal_set_impl : implementation
     {
         virtual std::coroutine_handle<> wait(
             std::coroutine_handle<>,
@@ -377,7 +377,7 @@ public:
 private:
     signal_set_impl& get() const noexcept
     {
-        return *static_cast<signal_set_impl*>(impl_);
+        return *static_cast<signal_set_impl*>(h_.get());
     }
 };
 

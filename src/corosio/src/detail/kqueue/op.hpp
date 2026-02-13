@@ -348,15 +348,13 @@ struct kqueue_write_op : kqueue_op
 struct kqueue_accept_op : kqueue_op
 {
     int accepted_fd = -1;
-    io_object::io_object_impl* peer_impl = nullptr;
-    io_object::io_object_impl** impl_out = nullptr;
+    io_object::handle* handle_out = nullptr;
 
     void reset() noexcept
     {
         kqueue_op::reset();
         accepted_fd = -1;
-        peer_impl = nullptr;
-        impl_out = nullptr;
+        handle_out = nullptr;
     }
 
     void perform_io() noexcept override

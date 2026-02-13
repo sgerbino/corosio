@@ -179,9 +179,6 @@ struct timer_impl
 
     explicit timer_impl(timer_service_impl& svc) noexcept;
 
-
-    void release() override;
-
     std::coroutine_handle<> wait(
         std::coroutine_handle<>,
         capy::executor_ref,
@@ -277,7 +274,7 @@ public:
         }
     }
 
-    timer::timer_impl* create_impl() override
+    std::shared_ptr<io_object::implementation> create_impl() override
     {
         timer_impl* impl = try_pop_tl_cache(this);
         if (impl)
@@ -285,24 +282,33 @@ public:
             impl->svc_ = this;
             impl->heap_index_ = (std::numeric_limits<std::size_t>::max)();
             impl->might_have_pending_waits_ = false;
-            return impl;
-        }
-
-        std::lock_guard lock(mutex_);
-        if (free_list_)
-        {
-            impl = free_list_;
-            free_list_ = impl->next_free_;
-            impl->next_free_ = nullptr;
-            impl->svc_ = this;
-            impl->heap_index_ = (std::numeric_limits<std::size_t>::max)();
-            impl->might_have_pending_waits_ = false;
         }
         else
         {
-            impl = new timer_impl(*this);
+            std::lock_guard lock(mutex_);
+            if (free_list_)
+            {
+                impl = free_list_;
+                free_list_ = impl->next_free_;
+                impl->next_free_ = nullptr;
+                impl->svc_ = this;
+                impl->heap_index_ = (std::numeric_limits<std::size_t>::max)();
+                impl->might_have_pending_waits_ = false;
+            }
+            else
+            {
+                impl = new timer_impl(*this);
+            }
         }
-        return impl;
+
+        // Custom deleter recycles via destroy_impl instead of delete
+        auto* svc = this;
+        return std::shared_ptr<io_object::implementation>(
+            impl,
+            [svc](io_object::implementation* p) {
+                svc->destroy_impl(
+                    static_cast<timer_impl&>(*p));
+            });
     }
 
     void destroy_impl(timer_impl& impl)
@@ -678,13 +684,6 @@ operator()()
     sched.on_work_finished();
 }
 
-void
-timer_impl::
-release()
-{
-    svc_->destroy_impl(*this);
-}
-
 std::coroutine_handle<>
 timer_impl::
 wait(
@@ -810,7 +809,7 @@ struct timer_service_access
     }
 };
 
-timer::timer_impl*
+std::shared_ptr<io_object::implementation>
 timer_service_create(capy::execution_context& ctx)
 {
     if (!ctx.target<basic_io_context>())
@@ -821,12 +820,6 @@ timer_service_create(capy::execution_context& ctx)
     if (!svc)
         detail::throw_logic_error();
     return svc->create_impl();
-}
-
-void
-timer_service_destroy(timer::timer_impl& base) noexcept
-{
-    static_cast<timer_impl&>(base).release();
 }
 
 std::size_t

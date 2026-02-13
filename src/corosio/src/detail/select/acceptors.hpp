@@ -26,7 +26,6 @@
 
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 
 namespace boost::corosio::detail {
 
@@ -45,14 +44,12 @@ class select_acceptor_impl
 public:
     explicit select_acceptor_impl(select_acceptor_service& svc) noexcept;
 
-    void release() override;
-
     std::coroutine_handle<> accept(
         std::coroutine_handle<>,
         capy::executor_ref,
         std::stop_token,
         std::error_code*,
-        io_object::io_object_impl**) override;
+        io_object::handle*) override;
 
     int native_handle() const noexcept { return fd_; }
     endpoint local_endpoint() const noexcept override { return local_endpoint_; }
@@ -65,6 +62,7 @@ public:
     select_acceptor_service& service() noexcept { return svc_; }
 
     select_accept_op acc_;
+    bool in_service_list_ = false;
 
 private:
     select_acceptor_service& svc_;
@@ -84,7 +82,6 @@ public:
     select_scheduler& sched_;
     std::mutex mutex_;
     intrusive_list<select_acceptor_impl> acceptor_list_;
-    std::unordered_map<select_acceptor_impl*, std::shared_ptr<select_acceptor_impl>> acceptor_ptrs_;
 };
 
 /** select acceptor service implementation.
@@ -103,8 +100,9 @@ public:
 
     void shutdown() override;
 
-    tcp_acceptor::acceptor_impl& create_acceptor_impl() override;
-    void destroy_acceptor_impl(tcp_acceptor::acceptor_impl& impl) override;
+    std::shared_ptr<tcp_acceptor::acceptor_impl>
+    create_acceptor_impl() override;
+    void close(io_object::handle&) override;
     std::error_code open_acceptor(
         tcp_acceptor::acceptor_impl& impl,
         endpoint ep,

@@ -183,14 +183,6 @@ epoll_socket_impl(epoll_socket_service& svc) noexcept
 epoll_socket_impl::
 ~epoll_socket_impl() = default;
 
-void
-epoll_socket_impl::
-release()
-{
-    close_socket();
-    svc_.destroy_impl(*this);
-}
-
 std::coroutine_handle<>
 epoll_socket_impl::
 connect(
@@ -656,8 +648,8 @@ close_socket() noexcept
     cancel();
 
     // Keep impl alive if descriptor_state is queued in the scheduler.
-    // Without this, destroy_impl() drops the last shared_ptr while
-    // the queued descriptor_state node would become dangling.
+    // Without this, close() drops the last shared_ptr while the
+    // queued descriptor_state node would become dangling.
     if (desc_state_.is_enqueued_.load(std::memory_order_acquire))
     {
         try {
@@ -709,41 +701,42 @@ shutdown()
     std::lock_guard lock(state_->mutex_);
 
     while (auto* impl = state_->socket_list_.pop_front())
+    {
+        impl->in_service_list_ = false;
         impl->close_socket();
-
-    // Don't clear socket_ptrs_ here. The scheduler shuts down after us and
-    // drains completed_ops_, calling destroy() on each queued op. If we
-    // released our shared_ptrs now, an epoll_op::destroy() could free the
-    // last ref to an impl whose embedded descriptor_state is still linked
-    // in the queue — use-after-free on the next pop(). Letting ~state_
-    // release the ptrs (during service destruction, after scheduler
-    // shutdown) keeps every impl alive until all ops have been drained.
+    }
 }
 
-tcp_socket::socket_impl&
+std::shared_ptr<tcp_socket::socket_impl>
 epoll_socket_service::
 create_impl()
 {
     auto impl = std::make_shared<epoll_socket_impl>(*this);
-    auto* raw = impl.get();
 
     {
         std::lock_guard lock(state_->mutex_);
-        state_->socket_list_.push_back(raw);
-        state_->socket_ptrs_.emplace(raw, std::move(impl));
+        state_->socket_list_.push_back(impl.get());
+        impl->in_service_list_ = true;
     }
 
-    return *raw;
+    return impl;
 }
 
 void
 epoll_socket_service::
-destroy_impl(tcp_socket::socket_impl& impl)
+close(io_object::handle& h)
 {
-    auto* epoll_impl = static_cast<epoll_socket_impl*>(&impl);
-    std::lock_guard lock(state_->mutex_);
-    state_->socket_list_.remove(epoll_impl);
-    state_->socket_ptrs_.erase(epoll_impl);
+    auto* epoll_impl = static_cast<epoll_socket_impl*>(h.get());
+    epoll_impl->close_socket();
+    {
+        std::lock_guard lock(state_->mutex_);
+        if (epoll_impl->in_service_list_)
+        {
+            state_->socket_list_.remove(epoll_impl);
+            epoll_impl->in_service_list_ = false;
+        }
+    }
+    h.reset();
 }
 
 std::error_code

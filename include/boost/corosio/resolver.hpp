@@ -324,8 +324,7 @@ public:
     resolver(resolver&& other) noexcept
         : io_object(other.context())
     {
-        impl_ = other.impl_;
-        other.impl_ = nullptr;
+        h_ = std::move(other.h_);
     }
 
     /** Move assignment operator.
@@ -348,8 +347,7 @@ public:
                 detail::throw_logic_error(
                     "cannot move resolver across execution contexts");
             cancel();
-            impl_ = other.impl_;
-            other.impl_ = nullptr;
+            h_ = std::move(other.h_);
         }
         return *this;
     }
@@ -450,7 +448,7 @@ public:
     void cancel();
 
 public:
-    struct resolver_impl : io_object_impl
+    struct resolver_impl : implementation
     {
         virtual std::coroutine_handle<> resolve(
             std::coroutine_handle<>,
@@ -477,7 +475,7 @@ public:
 private:
     inline resolver_impl& get() const noexcept
     {
-        return *static_cast<resolver_impl*>(impl_);
+        return *static_cast<resolver_impl*>(h_.get());
     }
 };
 

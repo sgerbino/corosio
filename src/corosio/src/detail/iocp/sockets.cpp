@@ -167,8 +167,10 @@ accept_op::do_complete(
         op->peer_wrapper->get_internal()->set_endpoints(local_ep, remote_ep);
         op->accepted_socket = INVALID_SOCKET;
 
-        if (op->impl_out)
-            *op->impl_out = op->peer_wrapper;
+        if (op->handle_out)
+            *op->handle_out = io_object::handle(
+                op->peer_wrapper->get_internal()->svc_,
+                std::move(op->peer_sp));
     }
     else
     {
@@ -178,14 +180,11 @@ accept_op::do_complete(
             op->accepted_socket = INVALID_SOCKET;
         }
 
-        if (op->peer_wrapper)
-        {
-            op->peer_wrapper->release();
-            op->peer_wrapper = nullptr;
-        }
+        op->peer_sp.reset();
+        op->peer_wrapper = nullptr;
 
-        if (op->impl_out)
-            *op->impl_out = nullptr;
+        if (op->handle_out)
+            *op->handle_out = {};
     }
 
     auto saved_h = op->h;
@@ -288,7 +287,8 @@ win_socket_impl_internal(win_sockets& svc) noexcept
 win_socket_impl_internal::
 ~win_socket_impl_internal()
 {
-    svc_.unregister_impl(*this);
+    if (in_service_list_)
+        svc_.unregister_impl(*this);
 }
 
 void
@@ -580,19 +580,6 @@ close_socket() noexcept
     remote_endpoint_ = endpoint{};
 }
 
-void
-win_socket_impl::
-release()
-{
-    if (internal_)
-    {
-        auto& svc = internal_->svc_;
-        internal_->release_internal();
-        internal_.reset();
-        svc.destroy_impl(*this);
-    }
-}
-
 win_sockets::
 win_sockets(
     capy::execution_context& ctx)
@@ -613,36 +600,43 @@ shutdown()
 {
     std::lock_guard<win_mutex> lock(mutex_);
 
-    // Just close sockets and remove from list
-    // The shared_ptrs held by socket objects and operations will handle destruction
     for (auto* impl = socket_list_.pop_front(); impl != nullptr;
          impl = socket_list_.pop_front())
     {
+        impl->in_service_list_ = false;
         impl->close_socket();
-        // Note: impl may still be alive if operations hold shared_ptr
     }
 
     for (auto* impl = acceptor_list_.pop_front(); impl != nullptr;
          impl = acceptor_list_.pop_front())
     {
+        impl->in_service_list_ = false;
         impl->close_socket();
-    }
-
-    // Cleanup wrappers
-    for (auto* w = socket_wrapper_list_.pop_front(); w != nullptr;
-         w = socket_wrapper_list_.pop_front())
-    {
-        delete w;
-    }
-
-    for (auto* w = acceptor_wrapper_list_.pop_front(); w != nullptr;
-         w = acceptor_wrapper_list_.pop_front())
-    {
-        delete w;
     }
 }
 
-win_socket_impl&
+void
+win_sockets::
+close(io_object::handle& h)
+{
+    auto* wrapper = static_cast<win_socket_impl*>(h.get());
+    if (wrapper && wrapper->get_internal())
+    {
+        auto* internal = wrapper->get_internal();
+        internal->release_internal();
+        {
+            std::lock_guard<win_mutex> lock(mutex_);
+            if (internal->in_service_list_)
+            {
+                socket_list_.remove(internal);
+                internal->in_service_list_ = false;
+            }
+        }
+    }
+    h.reset();
+}
+
+std::shared_ptr<tcp_socket::socket_impl>
 win_sockets::
 create_impl()
 {
@@ -651,27 +645,11 @@ create_impl()
     {
         std::lock_guard<win_mutex> lock(mutex_);
         socket_list_.push_back(internal.get());
+        internal->in_service_list_ = true;
     }
 
-    auto* wrapper = new win_socket_impl(std::move(internal));
-
-    {
-        std::lock_guard<win_mutex> lock(mutex_);
-        socket_wrapper_list_.push_back(wrapper);
-    }
-
-    return *wrapper;
-}
-
-void
-win_sockets::
-destroy_impl(win_socket_impl& impl)
-{
-    {
-        std::lock_guard<win_mutex> lock(mutex_);
-        socket_wrapper_list_.remove(&impl);
-    }
-    delete &impl;
+    auto wrapper = std::make_shared<win_socket_impl>(std::move(internal));
+    return wrapper;
 }
 
 void
@@ -684,8 +662,10 @@ unregister_impl(win_socket_impl_internal& impl)
 
 std::error_code
 win_sockets::
-open_socket(win_socket_impl_internal& impl)
+open_socket(tcp_socket::socket_impl& impl_base)
 {
+    auto* wrapper = static_cast<win_socket_impl*>(&impl_base);
+    auto& impl = *wrapper->get_internal();
     impl.close_socket();
 
     SOCKET sock = ::WSASocketW(
@@ -781,7 +761,7 @@ load_extension_functions()
     ::closesocket(sock);
 }
 
-win_acceptor_impl&
+std::shared_ptr<tcp_acceptor::acceptor_impl>
 win_sockets::
 create_acceptor_impl()
 {
@@ -790,27 +770,11 @@ create_acceptor_impl()
     {
         std::lock_guard<win_mutex> lock(mutex_);
         acceptor_list_.push_back(internal.get());
+        internal->in_service_list_ = true;
     }
 
-    auto* wrapper = new win_acceptor_impl(std::move(internal));
-
-    {
-        std::lock_guard<win_mutex> lock(mutex_);
-        acceptor_wrapper_list_.push_back(wrapper);
-    }
-
-    return *wrapper;
-}
-
-void
-win_sockets::
-destroy_acceptor_impl(win_acceptor_impl& impl)
-{
-    {
-        std::lock_guard<win_mutex> lock(mutex_);
-        acceptor_wrapper_list_.remove(&impl);
-    }
-    delete &impl;
+    auto wrapper = std::make_shared<win_acceptor_impl>(std::move(internal));
+    return wrapper;
 }
 
 void
@@ -824,10 +788,12 @@ unregister_acceptor_impl(win_acceptor_impl_internal& impl)
 std::error_code
 win_sockets::
 open_acceptor(
-    win_acceptor_impl_internal& impl,
+    tcp_acceptor::acceptor_impl& impl_base,
     endpoint ep,
     int backlog)
 {
+    auto* wrapper = static_cast<win_acceptor_impl*>(&impl_base);
+    auto& impl = *wrapper->get_internal();
     impl.close_socket();
 
     SOCKET sock = ::WSASocketW(
@@ -898,7 +864,8 @@ win_acceptor_impl_internal(win_sockets& svc) noexcept
 win_acceptor_impl_internal::
 ~win_acceptor_impl_internal()
 {
-    svc_.unregister_acceptor_impl(*this);
+    if (in_service_list_)
+        svc_.unregister_acceptor_impl(*this);
 }
 
 void
@@ -924,7 +891,7 @@ accept(
     capy::executor_ref d,
     std::stop_token token,
     std::error_code* ec,
-    io_object::io_object_impl** impl_out)
+    io_object::handle* handle_out)
 {
     // Keep acceptor internal alive during I/O
     acc_.acceptor_ptr = shared_from_this();
@@ -934,11 +901,13 @@ accept(
     op.h = h;
     op.ex = d;
     op.ec_out = ec;
-    op.impl_out = impl_out;
+    op.handle_out = handle_out;
     op.start(token);
 
-    // Create wrapper for the peer socket (service owns it)
-    auto& peer_wrapper = svc_.create_impl();
+    // Create wrapper for the peer socket
+    auto peer_sp = svc_.create_impl();
+    auto* peer_wrapper = static_cast<win_socket_impl*>(peer_sp.get());
+    op.peer_sp = std::move(peer_sp);
 
     // Create the accepted socket
     SOCKET accepted = ::WSASocketW(
@@ -951,10 +920,10 @@ accept(
 
     if (accepted == INVALID_SOCKET)
     {
-        peer_wrapper.release();
+        op.peer_sp.reset();
+        op.peer_wrapper = nullptr;
         op.dwError = ::WSAGetLastError();
         svc_.post(&op);
-        // completion is always posted to scheduler queue, never inline.
         return std::noop_coroutine();
     }
 
@@ -968,28 +937,27 @@ accept(
     {
         DWORD err = ::GetLastError();
         ::closesocket(accepted);
-        peer_wrapper.release();
+        op.peer_sp.reset();
+        op.peer_wrapper = nullptr;
         op.dwError = err;
         svc_.post(&op);
-        // completion is always posted to scheduler queue, never inline.
         return std::noop_coroutine();
     }
 
     // Set up the accept operation
     op.accepted_socket = accepted;
-    op.peer_wrapper = &peer_wrapper;
+    op.peer_wrapper = peer_wrapper;
     op.listen_socket = socket_;
 
     auto accept_ex = svc_.accept_ex();
     if (!accept_ex)
     {
         ::closesocket(accepted);
-        peer_wrapper.release();
+        op.peer_sp.reset();
         op.peer_wrapper = nullptr;
         op.accepted_socket = INVALID_SOCKET;
         op.dwError = WSAEOPNOTSUPP;
         svc_.post(&op);
-        // completion is always posted to scheduler queue, never inline.
         return std::noop_coroutine();
     }
 
@@ -1013,17 +981,15 @@ accept(
         {
             svc_.work_finished();
             ::closesocket(accepted);
-            peer_wrapper.release();
+            op.peer_sp.reset();
             op.peer_wrapper = nullptr;
             op.accepted_socket = INVALID_SOCKET;
             op.dwError = err;
             svc_.post(&op);
-            // completion is always posted to scheduler queue, never inline.
             return std::noop_coroutine();
         }
     }
     // Synchronous completion: IOCP will deliver the completion packet
-    // completion is always posted to scheduler queue, never inline.
     return std::noop_coroutine();
 }
 
@@ -1053,19 +1019,6 @@ close_socket() noexcept
 
     // Clear cached endpoint
     local_endpoint_ = endpoint{};
-}
-
-void
-win_acceptor_impl::
-release()
-{
-    if (internal_)
-    {
-        auto& svc = internal_->svc_;
-        internal_->release_internal();
-        internal_.reset();
-        svc.destroy_acceptor_impl(*this);
-    }
 }
 
 } // namespace boost::corosio::detail

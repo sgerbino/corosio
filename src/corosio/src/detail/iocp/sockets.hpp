@@ -97,9 +97,10 @@ struct accept_op : overlapped_op
 {
     SOCKET accepted_socket = INVALID_SOCKET;
     win_socket_impl* peer_wrapper = nullptr;
+    std::shared_ptr<tcp_socket::socket_impl> peer_sp;
     std::shared_ptr<win_acceptor_impl_internal> acceptor_ptr;
     SOCKET listen_socket = INVALID_SOCKET;
-    io_object::io_object_impl** impl_out = nullptr;
+    io_object::handle* handle_out = nullptr;
     char addr_buf[2 * (sizeof(sockaddr_in6) + 16)];
 
     static void do_complete(void* owner, scheduler_op* base,
@@ -186,6 +187,8 @@ public:
     /** Execute the write I/O operation (called by initiator coroutine). */
     void do_write_io();
 
+    bool in_service_list_ = false;
+
 private:
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
@@ -202,7 +205,6 @@ private:
 */
 class win_socket_impl
     : public tcp_socket::socket_impl
-    , public intrusive_list<win_socket_impl>::node
 {
     std::shared_ptr<win_socket_impl_internal> internal_;
 
@@ -211,8 +213,6 @@ public:
         : internal_(std::move(internal))
     {
     }
-
-    void release() override;
 
     std::coroutine_handle<> connect(
         std::coroutine_handle<> h,
@@ -430,7 +430,7 @@ public:
         capy::executor_ref,
         std::stop_token,
         std::error_code*,
-        io_object::io_object_impl**);
+        io_object::handle*);
 
     SOCKET native_handle() const noexcept { return socket_; }
     endpoint local_endpoint() const noexcept { return local_endpoint_; }
@@ -440,6 +440,7 @@ public:
     void set_local_endpoint(endpoint ep) noexcept { local_endpoint_ = ep; }
 
     accept_op acc_;
+    bool in_service_list_ = false;
 
 private:
     win_sockets& svc_;
@@ -458,7 +459,6 @@ private:
 */
 class win_acceptor_impl
     : public tcp_acceptor::acceptor_impl
-    , public intrusive_list<win_acceptor_impl>::node
 {
     std::shared_ptr<win_acceptor_impl_internal> internal_;
 
@@ -468,16 +468,14 @@ public:
     {
     }
 
-    void release() override;
-
     std::coroutine_handle<> accept(
         std::coroutine_handle<> h,
         capy::executor_ref d,
         std::stop_token token,
         std::error_code* ec,
-        io_object::io_object_impl** impl_out) override
+        io_object::handle* handle_out) override
     {
-        return internal_->accept(h, d, token, ec, impl_out);
+        return internal_->accept(h, d, token, ec, handle_out);
     }
 
     endpoint local_endpoint() const noexcept override
@@ -518,11 +516,6 @@ class win_sockets
 public:
     using key_type = win_sockets;
 
-    void open(io_object::handle&) override {}
-    void close(io_object::handle&) override {}
-    void destroy(io_object::implementation*) override {}
-    io_object::implementation* construct() override { return nullptr; }
-
     /** Construct the socket service.
 
         Obtains the IOCP handle from the scheduler service and
@@ -541,15 +534,14 @@ public:
     /** Shut down the service. */
     void shutdown() override;
 
-    /** Create a new socket implementation wrapper.
-        The service owns the returned object.
-    */
-    win_socket_impl& create_impl();
+    /// Close a socket handle, releasing kernel resources.
+    void close(io_object::handle& h) override;
 
-    /** Destroy a socket implementation wrapper.
-        Removes from tracking list and deletes.
+    /** Create a new socket implementation.
+
+        @return Shared pointer to the newly created socket implementation.
     */
-    void destroy_impl(win_socket_impl& impl);
+    std::shared_ptr<tcp_socket::socket_impl> create_impl();
 
     /** Unregister a socket implementation from the service list.
         Called by the internal impl destructor.
@@ -558,20 +550,16 @@ public:
 
     /** Create and register a socket with the IOCP.
 
-        @param impl The socket implementation internal to initialize.
+        @param impl The socket implementation to initialize.
         @return Error code, or success.
     */
-    std::error_code open_socket(win_socket_impl_internal& impl);
+    std::error_code open_socket(tcp_socket::socket_impl& impl);
 
-    /** Create a new acceptor implementation wrapper.
-        The service owns the returned object.
-    */
-    win_acceptor_impl& create_acceptor_impl();
+    /** Create a new acceptor implementation.
 
-    /** Destroy an acceptor implementation wrapper.
-        Removes from tracking list and deletes.
+        @return Shared pointer to the newly created acceptor implementation.
     */
-    void destroy_acceptor_impl(win_acceptor_impl& impl);
+    std::shared_ptr<tcp_acceptor::acceptor_impl> create_acceptor_impl();
 
     /** Unregister an acceptor implementation from the service list.
         Called by the internal impl destructor.
@@ -580,13 +568,13 @@ public:
 
     /** Create, bind, and listen on an acceptor socket.
 
-        @param impl The acceptor implementation internal to initialize.
+        @param impl The acceptor implementation to initialize.
         @param ep The local endpoint to bind to.
         @param backlog The listen backlog.
         @return Error code, or success.
     */
     std::error_code open_acceptor(
-        win_acceptor_impl_internal& impl,
+        tcp_acceptor::acceptor_impl& impl,
         endpoint ep,
         int backlog);
 
@@ -615,8 +603,6 @@ private:
     win_mutex mutex_;
     intrusive_list<win_socket_impl_internal> socket_list_;
     intrusive_list<win_acceptor_impl_internal> acceptor_list_;
-    intrusive_list<win_socket_impl> socket_wrapper_list_;
-    intrusive_list<win_acceptor_impl> acceptor_wrapper_list_;
     void* iocp_;
     LPFN_CONNECTEX connect_ex_ = nullptr;
     LPFN_ACCEPTEX accept_ex_ = nullptr;

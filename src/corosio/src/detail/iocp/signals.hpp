@@ -19,6 +19,7 @@
 #include <boost/capy/ex/executor_ref.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include "src/detail/intrusive.hpp"
+#include <memory>
 #include <system_error>
 
 #include <system_error>
@@ -118,11 +119,10 @@ class win_signal_impl
     signal_registration* signals_ = nullptr;
     signal_op pending_op_;
     bool waiting_ = false;
+    bool in_service_list_ = false;
 
 public:
     explicit win_signal_impl(win_signals& svc) noexcept;
-
-    void release() override;
 
     std::coroutine_handle<> wait(
         std::coroutine_handle<>,
@@ -175,10 +175,7 @@ public:
     void shutdown() override;
 
     /** Create a new signal implementation. */
-    win_signal_impl& create_impl();
-
-    /** Destroy a signal implementation. */
-    void destroy_impl(win_signal_impl& impl);
+    std::shared_ptr<signal_set::signal_set_impl> create_impl();
 
     /** Add a signal to a signal set.
 

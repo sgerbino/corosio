@@ -91,105 +91,76 @@ operator()()
 
     bool success = (errn == 0 && !cancelled.load(std::memory_order_acquire));
 
-    if (ec_out)
-    {
-        if (cancelled.load(std::memory_order_acquire))
-            *ec_out = capy::error::canceled;
-        else if (errn != 0)
-            *ec_out = make_err(errn);
-        else
-            *ec_out = {};
-    }
+    if (cancelled.load(std::memory_order_acquire))
+        *ec_out = capy::error::canceled;
+    else if (errn != 0)
+        *ec_out = make_err(errn);
+    else
+        *ec_out = {};
 
-    if (success && accepted_fd >= 0)
+    // Set up the peer socket on success
+    if (success && accepted_fd >= 0 && acceptor_impl_)
     {
-        if (acceptor_impl_)
+        auto* socket_svc = static_cast<kqueue_acceptor_impl*>(acceptor_impl_)
+            ->service().socket_service();
+        if (socket_svc)
         {
-            auto* socket_svc = static_cast<kqueue_acceptor_impl*>(acceptor_impl_)
-                ->service().socket_service();
-            if (socket_svc)
+            auto sp = socket_svc->create_impl();
+            auto& impl = static_cast<kqueue_socket_impl&>(*sp);
+            impl.set_socket(accepted_fd);
+
+            // Register accepted socket with kqueue (edge-triggered via EV_CLEAR)
+            impl.desc_state_.fd = accepted_fd;
             {
-                auto& impl = static_cast<kqueue_socket_impl&>(socket_svc->create_impl());
-                impl.set_socket(accepted_fd);
+                std::lock_guard lock(impl.desc_state_.mutex);
+                impl.desc_state_.read_op = nullptr;
+                impl.desc_state_.write_op = nullptr;
+                impl.desc_state_.connect_op = nullptr;
+            }
+            socket_svc->scheduler().register_descriptor(accepted_fd, &impl.desc_state_);
 
-                // Register accepted socket with kqueue (edge-triggered via EV_CLEAR)
-                impl.desc_state_.fd = accepted_fd;
-                {
-                    std::lock_guard lock(impl.desc_state_.mutex);
-                    impl.desc_state_.read_op = nullptr;
-                    impl.desc_state_.write_op = nullptr;
-                    impl.desc_state_.connect_op = nullptr;
-                }
-                socket_svc->scheduler().register_descriptor(accepted_fd, &impl.desc_state_);
-
-                // Suppress SIGPIPE on the accepted socket; macOS lacks MSG_NOSIGNAL
-                int one = 1;
-                if (::setsockopt(accepted_fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)) == -1)
-                {
-                    if (ec_out)
-                        *ec_out = make_err(errno);
-                    ::close(accepted_fd);
-                    accepted_fd = -1;
-                    socket_svc->destroy_impl(impl);
-                    if (impl_out)
-                        *impl_out = nullptr;
-                }
-                else
-                {
-                    sockaddr_in local_addr{};
-                    socklen_t local_len = sizeof(local_addr);
-                    sockaddr_in remote_addr{};
-                    socklen_t remote_len = sizeof(remote_addr);
-
-                    endpoint local_ep, remote_ep;
-                    if (::getsockname(accepted_fd, reinterpret_cast<sockaddr*>(&local_addr), &local_len) == 0)
-                        local_ep = from_sockaddr_in(local_addr);
-                    if (::getpeername(accepted_fd, reinterpret_cast<sockaddr*>(&remote_addr), &remote_len) == 0)
-                        remote_ep = from_sockaddr_in(remote_addr);
-
-                    impl.set_endpoints(local_ep, remote_ep);
-
-                    if (impl_out)
-                        *impl_out = &impl;
-
-                    accepted_fd = -1;
-                }
+            // Suppress SIGPIPE on the accepted socket; macOS lacks MSG_NOSIGNAL
+            int one = 1;
+            if (::setsockopt(accepted_fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)) == -1)
+            {
+                *ec_out = make_err(errno);
+                success = false;
             }
             else
             {
-                // Socket service not registered in execution_context
-                if (ec_out && !*ec_out)
-                    *ec_out = make_err(ENOENT);
-                ::close(accepted_fd);
+                sockaddr_in local_addr{};
+                socklen_t local_len = sizeof(local_addr);
+                sockaddr_in remote_addr{};
+                socklen_t remote_len = sizeof(remote_addr);
+
+                endpoint local_ep, remote_ep;
+                if (::getsockname(accepted_fd, reinterpret_cast<sockaddr*>(&local_addr), &local_len) == 0)
+                    local_ep = from_sockaddr_in(local_addr);
+                if (::getpeername(accepted_fd, reinterpret_cast<sockaddr*>(&remote_addr), &remote_len) == 0)
+                    remote_ep = from_sockaddr_in(remote_addr);
+
+                impl.set_endpoints(local_ep, remote_ep);
+
+                if (handle_out)
+                    *handle_out = io_object::handle(*socket_svc, std::move(sp));
                 accepted_fd = -1;
-                if (impl_out)
-                    *impl_out = nullptr;
             }
         }
         else
         {
-            ::close(accepted_fd);
-            accepted_fd = -1;
-            if (impl_out)
-                *impl_out = nullptr;
+            // No socket service — treat as error
+            *ec_out = make_err(ENOENT);
+            success = false;
         }
     }
-    else
+
+    if (!success || !acceptor_impl_)
     {
         if (accepted_fd >= 0)
         {
             ::close(accepted_fd);
             accepted_fd = -1;
         }
-
-        if (peer_impl)
-        {
-            peer_impl->release();
-            peer_impl = nullptr;
-        }
-
-        if (impl_out)
-            *impl_out = nullptr;
     }
 
     // Move to stack before resuming. See kqueue_op::operator()() for rationale.
@@ -205,14 +176,6 @@ kqueue_acceptor_impl(kqueue_acceptor_service& svc) noexcept
 {
 }
 
-void
-kqueue_acceptor_impl::
-release()
-{
-    close_socket();
-    svc_.destroy_acceptor_impl(*this);
-}
-
 std::coroutine_handle<>
 kqueue_acceptor_impl::
 accept(
@@ -220,14 +183,14 @@ accept(
     capy::executor_ref ex,
     std::stop_token token,
     std::error_code* ec,
-    io_object::io_object_impl** impl_out)
+    io_object::handle* handle_out)
 {
     auto& op = acc_;
     op.reset();
     op.h = h;
     op.ex = ex;
     op.ec_out = ec;
-    op.impl_out = impl_out;
+    op.handle_out = handle_out;
     op.fd = fd_;
     op.start(token, this);
 
@@ -436,35 +399,40 @@ shutdown()
     std::lock_guard lock(state_->mutex_);
 
     while (auto* impl = state_->acceptor_list_.pop_front())
+    {
+        impl->in_service_list_ = false;
         impl->close_socket();
-
-    // Don't clear acceptor_ptrs_ here — same rationale as
-    // kqueue_socket_service::shutdown(). Let ~state_ release ptrs
-    // after scheduler shutdown has drained all queued ops.
+    }
 }
 
-tcp_acceptor::acceptor_impl&
+std::shared_ptr<tcp_acceptor::acceptor_impl>
 kqueue_acceptor_service::
 create_acceptor_impl()
 {
     auto impl = std::make_shared<kqueue_acceptor_impl>(*this);
-    auto* raw = impl.get();
 
     std::lock_guard lock(state_->mutex_);
-    state_->acceptor_list_.push_back(raw);
-    state_->acceptor_ptrs_.emplace(raw, std::move(impl));
+    state_->acceptor_list_.push_back(impl.get());
+    impl->in_service_list_ = true;
 
-    return *raw;
+    return impl;
 }
 
 void
 kqueue_acceptor_service::
-destroy_acceptor_impl(tcp_acceptor::acceptor_impl& impl)
+close(io_object::handle& h)
 {
-    auto* kq_impl = static_cast<kqueue_acceptor_impl*>(&impl);
-    std::lock_guard lock(state_->mutex_);
-    state_->acceptor_list_.remove(kq_impl);
-    state_->acceptor_ptrs_.erase(kq_impl);
+    auto* kq_impl = static_cast<kqueue_acceptor_impl*>(h.get());
+    kq_impl->close_socket();
+    {
+        std::lock_guard lock(state_->mutex_);
+        if (kq_impl->in_service_list_)
+        {
+            state_->acceptor_list_.remove(kq_impl);
+            kq_impl->in_service_list_ = false;
+        }
+    }
+    h.reset();
 }
 
 std::error_code

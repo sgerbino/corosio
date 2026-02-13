@@ -26,7 +26,6 @@
 
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 
 /*
     select Socket Implementation
@@ -47,10 +46,10 @@
 
     Impl Lifetime with shared_ptr
     -----------------------------
-    Socket impls use enable_shared_from_this. The service owns impls via
-    shared_ptr maps (socket_ptrs_) keyed by raw pointer for O(1) lookup and
-    removal. When a user calls close(), we call cancel() which posts pending
-    ops to the scheduler.
+    Socket impls use enable_shared_from_this. The io_object::handle holds
+    the master shared_ptr; in-flight operations extend the impl's lifetime
+    via shared_from_this(). When a user calls close(), we call cancel()
+    which posts pending ops to the scheduler.
 
     CRITICAL: The posted ops must keep the impl alive until they complete.
     Otherwise the scheduler would process a freed op (use-after-free). The
@@ -60,10 +59,11 @@
 
     Service Ownership
     -----------------
-    select_socket_service owns all socket impls. destroy_impl() removes the
-    shared_ptr from the map, but the impl may survive if ops still hold
-    impl_ptr refs. shutdown() closes all sockets and clears the map; any
-    in-flight ops will complete and release their refs.
+    The service tracks impls in an intrusive_list for shutdown iteration.
+    close() removes the impl from the list and resets the handle's
+    shared_ptr. The impl may survive if in-flight ops still hold refs.
+    shutdown() closes all sockets; any in-flight ops will complete and
+    release their refs.
 */
 
 namespace boost::corosio::detail {
@@ -81,8 +81,6 @@ class select_socket_impl
 
 public:
     explicit select_socket_impl(select_socket_service& svc) noexcept;
-
-    void release() override;
 
     std::coroutine_handle<> connect(
         std::coroutine_handle<>,
@@ -147,6 +145,7 @@ public:
 private:
     select_socket_service& svc_;
     int fd_ = -1;
+    bool in_service_list_ = false;
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
 };
@@ -163,7 +162,6 @@ public:
     select_scheduler& sched_;
     std::mutex mutex_;
     intrusive_list<select_socket_impl> socket_list_;
-    std::unordered_map<select_socket_impl*, std::shared_ptr<select_socket_impl>> socket_ptrs_;
 };
 
 /** select socket service implementation.
@@ -182,8 +180,8 @@ public:
 
     void shutdown() override;
 
-    tcp_socket::socket_impl& create_impl() override;
-    void destroy_impl(tcp_socket::socket_impl& impl) override;
+    std::shared_ptr<tcp_socket::socket_impl> create_impl() override;
+    void close(io_object::handle&) override;
     std::error_code open_socket(tcp_socket::socket_impl& impl) override;
 
     select_scheduler& scheduler() const noexcept { return state_->sched_; }
@@ -194,9 +192,6 @@ public:
 private:
     std::unique_ptr<select_socket_state> state_;
 };
-
-// Backward compatibility alias
-using select_sockets = select_socket_service;
 
 } // namespace boost::corosio::detail
 

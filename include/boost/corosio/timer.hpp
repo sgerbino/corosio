@@ -97,7 +97,7 @@ class BOOST_COROSIO_DECL timer : public io_object
     };
 
 public:
-    struct timer_impl : io_object_impl
+    struct timer_impl : implementation
     {
         static constexpr std::size_t npos =
             (std::numeric_limits<std::size_t>::max)();
@@ -327,7 +327,7 @@ private:
     /// Return the underlying implementation.
     timer_impl& get() const noexcept
     {
-        return *static_cast<timer_impl*>(impl_);
+        return *static_cast<timer_impl*>(h_.get());
     }
 };
 

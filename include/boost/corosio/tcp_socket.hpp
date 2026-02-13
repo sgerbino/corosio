@@ -208,8 +208,7 @@ public:
     tcp_socket(tcp_socket&& other) noexcept
         : io_stream(other.context())
     {
-        impl_ = other.impl_;
-        other.impl_ = nullptr;
+        h_ = std::move(other.h_);
     }
 
     /** Move assignment operator.
@@ -231,8 +230,7 @@ public:
                 detail::throw_logic_error(
                     "cannot move socket across execution contexts");
             close();
-            impl_ = other.impl_;
-            other.impl_ = nullptr;
+            h_ = std::move(other.h_);
         }
         return *this;
     }
@@ -263,7 +261,7 @@ public:
     */
     bool is_open() const noexcept
     {
-        return impl_ != nullptr;
+        return static_cast<bool>(h_);
     }
 
     /** Initiate an asynchronous connect operation.
@@ -300,7 +298,7 @@ public:
     */
     auto connect(endpoint ep)
     {
-        if (!impl_)
+        if (!h_)
             detail::throw_logic_error("connect: socket not open");
         return connect_awaitable(*this, ep);
     }
@@ -515,7 +513,7 @@ private:
 
     inline socket_impl& get() const noexcept
     {
-        return *static_cast<socket_impl*>(impl_);
+        return *static_cast<socket_impl*>(h_.get());
     }
 };
 

@@ -26,7 +26,6 @@
 
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 
 /*
     kqueue acceptor components:
@@ -65,8 +64,6 @@ class kqueue_acceptor_impl
 public:
     explicit kqueue_acceptor_impl(kqueue_acceptor_service& svc) noexcept;
 
-    void release() override;
-
     /** Initiate an asynchronous accept on the listening socket.
 
         Attempts a synchronous accept first. If the socket would block
@@ -91,10 +88,10 @@ public:
             Must remain valid until the completion handler runs.
             Set to {} on success, capy::error::canceled on
             cancellation, or a POSIX errno mapping on failure.
-        @param out_impl Points to storage for the accepted socket
-            impl. Must remain valid until the completion handler
-            runs. Set to the new socket impl on success, nullptr
-            on error or cancellation.
+        @param handle_out Points to storage for the accepted socket
+            handle. Must remain valid until the completion handler
+            runs. Set to a valid io_object::handle on success,
+            default-constructed on error or cancellation.
 
         @return std::noop_coroutine() unconditionally; the caller
             is always resumed asynchronously via the scheduler.
@@ -102,11 +99,11 @@ public:
         @par Example
         @code
         std::error_code ec;
-        io_object::io_object_impl* peer = nullptr;
+        io_object::handle peer;
         co_await acceptor_impl.accept(
             my_handle, ex, stop_source.get_token(), &ec, &peer);
         if (!ec)
-            // peer is a valid kqueue_socket_impl
+            // peer is a valid handle to a kqueue_socket_impl
         @endcode
     */
     std::coroutine_handle<> accept(
@@ -114,7 +111,7 @@ public:
         capy::executor_ref ex,
         std::stop_token token,
         std::error_code* ec,
-        io_object::io_object_impl** out_impl) override;
+        io_object::handle* handle_out) override;
 
     int native_handle() const noexcept { return fd_; }
     endpoint local_endpoint() const noexcept override { return local_endpoint_; }
@@ -165,6 +162,7 @@ private:
     kqueue_accept_op acc_;
     descriptor_state desc_state_;
     int fd_ = -1;
+    bool in_service_list_ = false;
     endpoint local_endpoint_;
 };
 
@@ -183,7 +181,6 @@ private:
     kqueue_scheduler& sched_;
     std::mutex mutex_;
     intrusive_list<kqueue_acceptor_impl> acceptor_list_;
-    std::unordered_map<kqueue_acceptor_impl*, std::shared_ptr<kqueue_acceptor_impl>> acceptor_ptrs_;
 };
 
 /** kqueue acceptor service implementation.
@@ -205,16 +202,12 @@ public:
     */
     void shutdown() override;
 
-    /** Create a new acceptor impl owned by this service.
-        The returned tcp_acceptor::acceptor_impl must be destroyed
-        via destroy_acceptor_impl() or by shutdown().
-    */
-    tcp_acceptor::acceptor_impl& create_acceptor_impl() override;
+    /** Create a new acceptor impl owned by this service. */
+    std::shared_ptr<tcp_acceptor::acceptor_impl>
+    create_acceptor_impl() override;
 
-    /** Remove and destroy an impl previously returned by
-        create_acceptor_impl(). Closes the socket if still open.
-    */
-    void destroy_acceptor_impl(tcp_acceptor::acceptor_impl& impl) override;
+    /** Close and release the acceptor referenced by @a h. */
+    void close(io_object::handle&) override;
 
     /** Bind and listen on @p ep with the given @p backlog.
         Registers the fd with kqueue on success and caches the

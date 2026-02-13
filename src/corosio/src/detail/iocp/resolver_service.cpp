@@ -318,14 +318,6 @@ win_resolver_impl(win_resolver_service& svc) noexcept
 {
 }
 
-void
-win_resolver_impl::
-release()
-{
-    cancel();
-    svc_.destroy_impl(*this);
-}
-
 std::coroutine_handle<>
 win_resolver_impl::
 resolve(
@@ -536,12 +528,10 @@ shutdown()
         for (auto* impl = resolver_list_.pop_front(); impl != nullptr;
              impl = resolver_list_.pop_front())
         {
+            impl->in_service_list_ = false;
             impl->cancel();
         }
-
-        // Clear the map which releases shared_ptrs
-        // Note: impls may still be alive if worker threads hold references
-        resolver_ptrs_.clear();
+        // Don't delete -- shared_ptr (handle) owns impls
     }
 
     // Wait for all worker threads to finish before service is destroyed
@@ -551,29 +541,32 @@ shutdown()
     }
 }
 
-win_resolver_impl&
+std::shared_ptr<resolver::resolver_impl>
 win_resolver_service::
 create_impl()
 {
-    auto ptr = std::make_shared<win_resolver_impl>(*this);
-    auto* impl = ptr.get();
-
+    auto* raw = new win_resolver_impl(*this);
     {
         std::lock_guard<win_mutex> lock(mutex_);
-        resolver_list_.push_back(impl);
-        resolver_ptrs_[impl] = std::move(ptr);
+        resolver_list_.push_back(raw);
+        raw->in_service_list_ = true;
     }
-
-    return *impl;
-}
-
-void
-win_resolver_service::
-destroy_impl(win_resolver_impl& impl)
-{
-    std::lock_guard<win_mutex> lock(mutex_);
-    resolver_list_.remove(&impl);
-    resolver_ptrs_.erase(&impl);
+    return std::shared_ptr<resolver::resolver_impl>(
+        raw,
+        [this](resolver::resolver_impl* p)
+        {
+            auto* impl = static_cast<win_resolver_impl*>(p);
+            impl->cancel();
+            {
+                std::lock_guard<win_mutex> lock(mutex_);
+                if (impl->in_service_list_)
+                {
+                    resolver_list_.remove(impl);
+                    impl->in_service_list_ = false;
+                }
+            }
+            delete impl;
+        });
 }
 
 void

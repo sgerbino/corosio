@@ -18,6 +18,8 @@
 #include <boost/corosio/resolver.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
+#include <memory>
+
 /*
     POSIX Resolver Service
     ======================
@@ -61,7 +63,7 @@ class posix_resolver_service : public capy::execution_context::service
 {
 public:
     /** Create a new resolver implementation. */
-    virtual resolver::resolver_impl& create_impl() = 0;
+    virtual std::shared_ptr<resolver::resolver_impl> create_impl() = 0;
 
 protected:
     posix_resolver_service() = default;

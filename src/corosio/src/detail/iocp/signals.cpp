@@ -188,16 +188,6 @@ win_signal_impl(win_signals& svc) noexcept
 {
 }
 
-void
-win_signal_impl::
-release()
-{
-    // Clear all signals and cancel pending wait
-    clear();
-    cancel();
-    svc_.destroy_impl(*this);
-}
-
 std::coroutine_handle<>
 win_signal_impl::
 wait(
@@ -286,43 +276,47 @@ shutdown()
 {
     std::lock_guard<win_mutex> lock(mutex_);
 
-    for (auto* impl = impl_list_.pop_front(); impl != nullptr;
-         impl = impl_list_.pop_front())
+    while (auto* impl = impl_list_.pop_front())
     {
-        // Clear registrations
+        impl->in_service_list_ = false;
         while (auto* reg = impl->signals_)
         {
             impl->signals_ = reg->next_in_set;
             delete reg;
         }
-        delete impl;
+        // Don't delete — shared_ptr (handle) owns it
     }
 }
 
-win_signal_impl&
+std::shared_ptr<signal_set::signal_set_impl>
 win_signals::
 create_impl()
 {
-    auto* impl = new win_signal_impl(*this);
+    auto* raw = new win_signal_impl(*this);
 
     {
         std::lock_guard<win_mutex> lock(mutex_);
-        impl_list_.push_back(impl);
+        impl_list_.push_back(raw);
+        raw->in_service_list_ = true;
     }
 
-    return *impl;
-}
-
-void
-win_signals::
-destroy_impl(win_signal_impl& impl)
-{
-    {
-        std::lock_guard<win_mutex> lock(mutex_);
-        impl_list_.remove(&impl);
-    }
-
-    delete &impl;
+    return std::shared_ptr<signal_set::signal_set_impl>(
+        raw,
+        [this](signal_set::signal_set_impl* p)
+        {
+            auto* impl = static_cast<win_signal_impl*>(p);
+            impl->clear();
+            impl->cancel();
+            {
+                std::lock_guard<win_mutex> lock(mutex_);
+                if (impl->in_service_list_)
+                {
+                    impl_list_.remove(impl);
+                    impl->in_service_list_ = false;
+                }
+            }
+            delete impl;
+        });
 }
 
 std::error_code
@@ -650,23 +644,19 @@ remove_service(win_signals* service)
 signal_set::
 ~signal_set()
 {
-    if (impl_)
-        impl_->release();
 }
 
 signal_set::
 signal_set(capy::execution_context& ctx)
     : io_object(ctx)
 {
-    impl_ = &ctx.use_service<detail::win_signals>().create_impl();
+    h_ = io_object::handle(ctx.use_service<detail::win_signals>().create_impl());
 }
 
 signal_set::
 signal_set(signal_set&& other) noexcept
     : io_object(std::move(other))
 {
-    impl_ = other.impl_;
-    other.impl_ = nullptr;
 }
 
 signal_set&
@@ -677,12 +667,7 @@ operator=(signal_set&& other)
     {
         if (ctx_ != other.ctx_)
             detail::throw_logic_error("signal_set::operator=: context mismatch");
-
-        if (impl_)
-            impl_->release();
-
-        impl_ = other.impl_;
-        other.impl_ = nullptr;
+        h_ = std::move(other.h_);
     }
     return *this;
 }

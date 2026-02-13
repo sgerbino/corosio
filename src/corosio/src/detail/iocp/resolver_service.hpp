@@ -40,7 +40,6 @@
 #include <condition_variable>
 #include <memory>
 #include <string>
-#include <unordered_map>
 
 /*
     Windows IOCP Resolver Service
@@ -204,8 +203,6 @@ class win_resolver_impl
 public:
     explicit win_resolver_impl(win_resolver_service& svc) noexcept;
 
-    void release() override;
-
     std::coroutine_handle<> resolve(
         std::coroutine_handle<>,
         capy::executor_ref,
@@ -229,6 +226,8 @@ public:
 
     resolve_op op_;
     reverse_resolve_op reverse_op_;
+
+    bool in_service_list_ = false;
 
 private:
     win_resolver_service& svc_;
@@ -274,10 +273,7 @@ public:
     void shutdown() override;
 
     /** Create a new resolver implementation. */
-    win_resolver_impl& create_impl();
-
-    /** Destroy a resolver implementation. */
-    void destroy_impl(win_resolver_impl& impl);
+    std::shared_ptr<resolver::resolver_impl> create_impl();
 
     /** Post an operation for completion. */
     void post(overlapped_op* op);
@@ -304,8 +300,6 @@ private:
     std::atomic<bool> shutting_down_{false};
     std::size_t active_threads_ = 0;
     intrusive_list<win_resolver_impl> resolver_list_;
-    std::unordered_map<win_resolver_impl*,
-        std::shared_ptr<win_resolver_impl>> resolver_ptrs_;
 };
 
 } // namespace boost::corosio::detail
