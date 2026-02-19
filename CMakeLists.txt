@@ -110,52 +110,45 @@ if (BOOST_COROSIO_IS_ROOT)
         set(BUILD_TESTING ${PREV_BUILD_TESTING} CACHE BOOL "Build the tests." FORCE)
         set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${BOOST_SRC_DIR}/tools/cmake/include")
     else ()
-        # Try installed Boost package first
-        find_package(Boost QUIET)
-        if (Boost_FOUND)
-            message(STATUS "Using installed Boost package")
-            foreach (BOOST_INCLUDE_LIBRARY ${BOOST_COROSIO_INCLUDE_LIBRARIES})
-                if (NOT TARGET Boost::${BOOST_INCLUDE_LIBRARY})
-                    add_library(Boost::${BOOST_INCLUDE_LIBRARY} ALIAS Boost::headers)
+        set(CAPY_REPO "https://github.com/cppalliance/capy.git")
+        set(CAPY_BRANCH develop)
+
+        # Try to match the current project branch on capy's remote
+        find_package(Git QUIET)
+        if (GIT_FOUND)
+            execute_process(
+                COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                OUTPUT_VARIABLE GIT_BRANCH
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+                RESULT_VARIABLE GIT_BRANCH_RESULT)
+            if (GIT_BRANCH_RESULT EQUAL 0 AND NOT GIT_BRANCH STREQUAL "")
+                execute_process(
+                    COMMAND "${GIT_EXECUTABLE}" ls-remote --heads "${CAPY_REPO}" "${GIT_BRANCH}"
+                    OUTPUT_VARIABLE CAPY_LS_REMOTE
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET
+                    RESULT_VARIABLE CAPY_LS_RESULT)
+                if (CAPY_LS_RESULT EQUAL 0 AND NOT CAPY_LS_REMOTE STREQUAL "")
+                    set(CAPY_BRANCH "${GIT_BRANCH}")
                 endif ()
-            endforeach ()
-        else ()
-            # Fallback: FetchContent to download Boost and capy
-            message(STATUS "No local Boost found, using FetchContent to download dependencies")
-            include(FetchContent)
-
-            # capy is not in Boost repo - exclude it from BOOST_INCLUDE_LIBRARIES
-            # before fetching Boost, then fetch capy separately
-            list(REMOVE_ITEM BOOST_INCLUDE_LIBRARIES capy)
-
-            FetchContent_Declare(
-                boost
-                URL https://github.com/boostorg/boost/releases/download/boost-1.90.0/boost-1.90.0-cmake.tar.xz
-                DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-            )
-
-            FetchContent_Declare(
-                capy
-                GIT_REPOSITORY https://github.com/cppalliance/capy.git
-                GIT_TAG master
-                GIT_SHALLOW TRUE
-            )
-
-            # Fetch Boost first
-            message(STATUS "Fetching Boost (this may take a while on first run)...")
-            set(PREV_BUILD_TESTING ${BUILD_TESTING})
-            set(BUILD_TESTING OFF CACHE BOOL "Build the tests." FORCE)
-            FetchContent_MakeAvailable(boost)
-            set(BUILD_TESTING ${PREV_BUILD_TESTING} CACHE BOOL "Build the tests." FORCE)
-
-            # Fetch capy from cppalliance/capy (not part of Boost)
-            message(STATUS "Fetching capy...")
-            set(BOOST_CAPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-            set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-            FetchContent_MakeAvailable(capy)
-
-            set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${boost_SOURCE_DIR}/tools/cmake/include")
+            endif ()
         endif ()
+
+        message(STATUS "Using FetchContent to download capy (branch: ${CAPY_BRANCH})")
+        include(FetchContent)
+
+        FetchContent_Declare(
+            capy
+            GIT_REPOSITORY "${CAPY_REPO}"
+            GIT_TAG "${CAPY_BRANCH}"
+            GIT_SHALLOW TRUE
+        )
+
+        set(BOOST_CAPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(capy)
     endif ()
     unset(CMAKE_FOLDER)
 endif ()

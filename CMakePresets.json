@@ -16,7 +16,7 @@
                 "CMAKE_CXX_STANDARD": "20",
                 "CMAKE_BUILD_TYPE": "Release",
                 "BOOST_COROSIO_BUILD_TESTS": "OFF",
-                "BOOST_COROSIO_BUILD_BENCH": "OFF",
+                "BOOST_COROSIO_BUILD_PERF": "OFF",
                 "BOOST_COROSIO_BUILD_EXAMPLES": "OFF"
             }
         }
