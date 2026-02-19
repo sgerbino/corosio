@@ -92,15 +92,14 @@ if (BOOST_COROSIO_IS_ROOT)
     set(BOOST_SRC_DIR_IS_VALID ON)
     foreach (F "CMakeLists.txt" "Jamroot" "boost-build.jam" "bootstrap.sh" "libs")
         if (NOT EXISTS "${BOOST_SRC_DIR}/${F}")
-            message(STATUS "${BOOST_SRC_DIR}/${F} does not exist. Fallback to find_package.")
+            message(STATUS "${BOOST_SRC_DIR}/${F} does not exist. Fallback to FetchContent.")
             set(BOOST_SRC_DIR_IS_VALID OFF)
             break()
         endif ()
     endforeach ()
 
-    # Create Boost interface targets
+    # From BOOST_SRC_DIR
     if (BOOST_SRC_DIR_IS_VALID)
-        # From BOOST_SRC_DIR
         if (BUILD_SHARED_LIBS)
             set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
@@ -109,48 +108,52 @@ if (BOOST_COROSIO_IS_ROOT)
         add_subdirectory(${BOOST_SRC_DIR} Dependencies/boost EXCLUDE_FROM_ALL)
         set(BUILD_TESTING ${PREV_BUILD_TESTING} CACHE BOOL "Build the tests." FORCE)
         set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${BOOST_SRC_DIR}/tools/cmake/include")
-    else ()
-        set(CAPY_REPO "https://github.com/cppalliance/capy.git")
-        set(CAPY_BRANCH develop)
-
-        # Try to match the current project branch on capy's remote
-        find_package(Git QUIET)
-        if (GIT_FOUND)
-            execute_process(
-                COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
-                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-                OUTPUT_VARIABLE GIT_BRANCH
-                OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET
-                RESULT_VARIABLE GIT_BRANCH_RESULT)
-            if (GIT_BRANCH_RESULT EQUAL 0 AND NOT GIT_BRANCH STREQUAL "")
-                execute_process(
-                    COMMAND "${GIT_EXECUTABLE}" ls-remote --heads "${CAPY_REPO}" "${GIT_BRANCH}"
-                    OUTPUT_VARIABLE CAPY_LS_REMOTE
-                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                    ERROR_QUIET
-                    RESULT_VARIABLE CAPY_LS_RESULT)
-                if (CAPY_LS_RESULT EQUAL 0 AND NOT CAPY_LS_REMOTE STREQUAL "")
-                    set(CAPY_BRANCH "${GIT_BRANCH}")
-                endif ()
-            endif ()
-        endif ()
-
-        message(STATUS "Using FetchContent to download capy (branch: ${CAPY_BRANCH})")
-        include(FetchContent)
-
-        FetchContent_Declare(
-            capy
-            GIT_REPOSITORY "${CAPY_REPO}"
-            GIT_TAG "${CAPY_BRANCH}"
-            GIT_SHALLOW TRUE
-        )
-
-        set(BOOST_CAPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-        FetchContent_MakeAvailable(capy)
     endif ()
     unset(CMAKE_FOLDER)
+endif ()
+
+# Fetch capy when not in Boost superproject and target doesn't exist yet
+if (NOT BOOST_SUPERPROJECT_VERSION AND NOT TARGET Boost::capy)
+    set(CAPY_REPO "https://github.com/cppalliance/capy.git")
+    set(CAPY_BRANCH develop)
+
+    # Try to match the current project branch on capy's remote
+    find_package(Git QUIET)
+    if (GIT_FOUND)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            OUTPUT_VARIABLE GIT_BRANCH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE GIT_BRANCH_RESULT)
+        if (GIT_BRANCH_RESULT EQUAL 0 AND NOT GIT_BRANCH STREQUAL "")
+            execute_process(
+                COMMAND "${GIT_EXECUTABLE}" ls-remote --heads "${CAPY_REPO}" "${GIT_BRANCH}"
+                OUTPUT_VARIABLE CAPY_LS_REMOTE
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+                RESULT_VARIABLE CAPY_LS_RESULT)
+            if (CAPY_LS_RESULT EQUAL 0 AND NOT CAPY_LS_REMOTE STREQUAL "")
+                set(CAPY_BRANCH "${GIT_BRANCH}")
+            endif ()
+        endif ()
+    endif ()
+
+    message(STATUS "Using FetchContent to download capy (branch: ${CAPY_BRANCH})")
+    include(FetchContent)
+
+    FetchContent_Declare(
+        capy
+        GIT_REPOSITORY "${CAPY_REPO}"
+        GIT_TAG "${CAPY_BRANCH}"
+        GIT_SHALLOW TRUE
+    )
+
+    set(BOOST_CAPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BOOST_CAPY_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(capy)
 endif ()
 
 #-------------------------------------------------
@@ -179,7 +182,9 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src/corosio/src" PREFIX "src" FIL
 
 function(boost_corosio_setup_properties target)
     target_compile_features(${target} PUBLIC cxx_std_20)
-    target_include_directories(${target} PUBLIC "${PROJECT_SOURCE_DIR}/include")
+    target_include_directories(${target} PUBLIC
+        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:include>")
     target_include_directories(${target} PRIVATE
         "${PROJECT_SOURCE_DIR}/src/corosio")
     target_link_libraries(${target}
@@ -219,6 +224,7 @@ endif()
 add_library(boost_corosio ${BOOST_COROSIO_HEADERS} ${BOOST_COROSIO_SOURCES})
 add_library(Boost::corosio ALIAS boost_corosio)
 boost_corosio_setup_properties(boost_corosio)
+set_target_properties(boost_corosio PROPERTIES EXPORT_NAME corosio)
 
 #-------------------------------------------------
 #
@@ -245,6 +251,7 @@ if (WolfSSL_FOUND)
     add_library(boost_corosio_wolfssl ${BOOST_COROSIO_WOLFSSL_HEADERS} ${BOOST_COROSIO_WOLFSSL_SOURCES})
     add_library(Boost::corosio_wolfssl ALIAS boost_corosio_wolfssl)
     boost_corosio_setup_properties(boost_corosio_wolfssl)
+    set_target_properties(boost_corosio_wolfssl PROPERTIES EXPORT_NAME corosio_wolfssl)
     target_link_libraries(boost_corosio_wolfssl PUBLIC boost_corosio)
     # PUBLIC ensures WolfSSL is linked into final executables (static lib deps don't embed)
     target_link_libraries(boost_corosio_wolfssl PUBLIC WolfSSL::WolfSSL)
@@ -284,6 +291,7 @@ if (OpenSSL_FOUND)
     add_library(boost_corosio_openssl ${BOOST_COROSIO_OPENSSL_HEADERS} ${BOOST_COROSIO_OPENSSL_SOURCES})
     add_library(Boost::corosio_openssl ALIAS boost_corosio_openssl)
     boost_corosio_setup_properties(boost_corosio_openssl)
+    set_target_properties(boost_corosio_openssl PROPERTIES EXPORT_NAME corosio_openssl)
     target_link_libraries(boost_corosio_openssl PUBLIC boost_corosio)
     # PUBLIC ensures OpenSSL is linked into final executables (static lib deps don't embed)
     target_link_libraries(boost_corosio_openssl PUBLIC OpenSSL::SSL OpenSSL::Crypto)
@@ -293,6 +301,51 @@ if (OpenSSL_FOUND)
         target_link_libraries(boost_corosio_openssl PUBLIC ws2_32 crypt32)
     endif ()
     target_compile_definitions(boost_corosio_openssl PUBLIC BOOST_COROSIO_HAS_OPENSSL)
+endif ()
+
+#-------------------------------------------------
+#
+# Install
+#
+#-------------------------------------------------
+if (NOT BOOST_SUPERPROJECT_VERSION)
+    include(CMakePackageConfigHelpers)
+    include(GNUInstallDirs)
+
+    set(BOOST_COROSIO_INSTALL_TARGETS boost_corosio)
+    if (TARGET boost_corosio_wolfssl)
+        list(APPEND BOOST_COROSIO_INSTALL_TARGETS boost_corosio_wolfssl)
+    endif ()
+    if (TARGET boost_corosio_openssl)
+        list(APPEND BOOST_COROSIO_INSTALL_TARGETS boost_corosio_openssl)
+    endif ()
+
+    install(TARGETS ${BOOST_COROSIO_INSTALL_TARGETS}
+        EXPORT boost_corosio-targets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+    install(DIRECTORY include/boost
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+
+    install(EXPORT boost_corosio-targets
+        NAMESPACE Boost::
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/boost_corosio")
+
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/boost_corosio-config-version.cmake"
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY AnyNewerVersion)
+
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/boost_corosio-config.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/boost_corosio-config-version.cmake"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/boost_corosio")
+
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindWolfSSL.cmake"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/boost_corosio")
 endif ()
 
 #-------------------------------------------------
