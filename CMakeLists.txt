@@ -308,7 +308,18 @@ endif ()
 # Install
 #
 #-------------------------------------------------
-if (NOT BOOST_SUPERPROJECT_VERSION)
+if (BOOST_SUPERPROJECT_VERSION AND NOT CMAKE_VERSION VERSION_LESS 3.13)
+    set(BOOST_COROSIO_BOOST_INSTALL_TARGETS boost_corosio)
+    if (TARGET boost_corosio_wolfssl)
+        list(APPEND BOOST_COROSIO_BOOST_INSTALL_TARGETS boost_corosio_wolfssl)
+    endif ()
+    if (TARGET boost_corosio_openssl)
+        list(APPEND BOOST_COROSIO_BOOST_INSTALL_TARGETS boost_corosio_openssl)
+    endif ()
+    boost_install(TARGETS ${BOOST_COROSIO_BOOST_INSTALL_TARGETS}
+        VERSION ${BOOST_SUPERPROJECT_VERSION}
+        HEADER_DIRECTORY include)
+elseif (NOT BOOST_SUPERPROJECT_VERSION)
     include(CMakePackageConfigHelpers)
     include(GNUInstallDirs)
 
