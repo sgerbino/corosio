@@ -19,6 +19,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 
 #include <boost/corosio/native/detail/select/select_op.hpp>
+#include <boost/corosio/native/detail/reactor_socket.hpp>
 
 #include <memory>
 
@@ -29,13 +30,16 @@ class select_socket_service;
 /// Socket implementation for select backend.
 class select_socket final
     : public tcp_socket::implementation
+    , private reactor_socket<select_socket>
     , public std::enable_shared_from_this<select_socket>
     , public intrusive_list<select_socket>::node
 {
+    friend class reactor_socket<select_socket>;
     friend class select_socket_service;
 
 public:
     explicit select_socket(select_socket_service& svc) noexcept;
+    ~select_socket() override;
 
     std::coroutine_handle<> connect(
         std::coroutine_handle<>,
@@ -105,11 +109,24 @@ public:
     select_read_op rd_;
     select_write_op wr_;
 
+    /// Per-descriptor state for persistent select registration
+    select_descriptor_state desc_state_;
+
 private:
+    friend struct reactor_socket_io;
+
     select_socket_service& svc_;
     int fd_ = -1;
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
+
+    void on_pre_close_fd() noexcept;
+    void on_register_read() noexcept;
+    void on_register_write() noexcept;
+
+    friend struct select_connect_op;
+    friend struct select_read_op;
+    friend struct select_write_op;
 };
 
 } // namespace boost::corosio::detail

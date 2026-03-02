@@ -19,6 +19,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 
 #include <boost/corosio/native/detail/epoll/epoll_op.hpp>
+#include <boost/corosio/native/detail/reactor_socket.hpp>
 
 #include <memory>
 
@@ -29,9 +30,11 @@ class epoll_socket_service;
 /// Socket implementation for epoll backend.
 class epoll_socket final
     : public tcp_socket::implementation
+    , private reactor_socket<epoll_socket>
     , public std::enable_shared_from_this<epoll_socket>
     , public intrusive_list<epoll_socket>::node
 {
+    friend class reactor_socket<epoll_socket>;
     friend class epoll_socket_service;
 
 public:
@@ -115,14 +118,12 @@ private:
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
 
-    void register_op(
-        epoll_op& op,
-        epoll_op*& desc_slot,
-        bool& ready_flag,
-        bool& cancel_flag) noexcept;
+    void on_pre_close_fd() noexcept;
 
-    friend struct epoll_op;
+    friend struct reactor_socket_io;
     friend struct epoll_connect_op;
+    friend struct epoll_read_op;
+    friend struct epoll_write_op;
 };
 
 } // namespace boost::corosio::detail

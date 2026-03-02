@@ -20,6 +20,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 
 #include <boost/corosio/native/detail/kqueue/kqueue_op.hpp>
+#include <boost/corosio/native/detail/reactor_acceptor.hpp>
 
 #include <memory>
 
@@ -30,10 +31,15 @@ class kqueue_acceptor_service;
 /// Acceptor implementation for kqueue backend.
 class kqueue_acceptor final
     : public tcp_acceptor::implementation
+    , private reactor_acceptor<kqueue_acceptor>
     , public std::enable_shared_from_this<kqueue_acceptor>
     , public intrusive_list<kqueue_acceptor>::node
 {
+    friend class reactor_acceptor<kqueue_acceptor>;
     friend class kqueue_acceptor_service;
+
+    template<typename, typename, typename, typename>
+    friend class reactor_acceptor_service;
 
 public:
     explicit kqueue_acceptor(kqueue_acceptor_service& svc) noexcept;
@@ -114,6 +120,8 @@ private:
     descriptor_state desc_state_;
     int fd_ = -1;
     endpoint local_endpoint_;
+
+    void on_pre_close_fd() noexcept {}
 };
 
 } // namespace boost::corosio::detail

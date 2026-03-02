@@ -24,6 +24,10 @@
 #include <boost/corosio/native/detail/endpoint_convert.hpp>
 #include <boost/corosio/detail/dispatch_coro.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
+#include <boost/corosio/native/detail/posix/posix_socket_ops.hpp>
+#include <boost/corosio/native/detail/reactor_op_complete.hpp>
+#include <boost/corosio/native/detail/reactor_socket_service.hpp>
+#include <boost/corosio/native/detail/reactor_socket_io.hpp>
 
 #include <boost/corosio/detail/except.hpp>
 
@@ -36,10 +40,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <memory>
-#include <mutex>
-#include <unordered_map>
-
 /*
     select Socket Implementation
     ============================
@@ -47,15 +47,20 @@
     This mirrors the epoll_sockets design for behavioral consistency.
     Each I/O operation follows the same pattern:
       1. Try the syscall immediately (non-blocking socket)
-      2. If it succeeds or fails with a real error, post to completion queue
-      3. If EAGAIN/EWOULDBLOCK, register with select scheduler and wait
+      2. If it succeeds or fails with a real error, complete inline or post
+      3. If EAGAIN/EWOULDBLOCK, register with descriptor_state and wait
+
+    Persistent Descriptor Registration
+    -----------------------------------
+    File descriptors are registered via descriptor_state once and stay
+    registered until closed. The descriptor_state tracks pending operations
+    and handles the deferred I/O model matching epoll/kqueue.
 
     Cancellation
     ------------
-    See op.hpp for the completion/cancellation race handling via the
-    `registered` atomic. cancel() must complete pending operations (post
-    them with cancelled flag) so coroutines waiting on them can resume.
-    close_socket() calls cancel() first to ensure this.
+    Uses mutex-based claiming via descriptor_state matching epoll/kqueue.
+    cancel() acquires the descriptor_state mutex, claims pending ops, posts
+    them as cancelled. close_socket() calls cancel first.
 
     Impl Lifetime with shared_ptr
     -----------------------------
@@ -80,29 +85,23 @@
 
 namespace boost::corosio::detail {
 
-/** State for select socket service. */
-class select_socket_state
-{
-public:
-    explicit select_socket_state(select_scheduler& sched) noexcept
-        : sched_(sched)
-    {
-    }
-
-    select_scheduler& sched_;
-    std::mutex mutex_;
-    intrusive_list<select_socket> socket_list_;
-    std::unordered_map<select_socket*, std::shared_ptr<select_socket>>
-        socket_ptrs_;
-};
-
 /** select socket service implementation.
 
     Inherits from socket_service to enable runtime polymorphism.
     Uses key_type = socket_service for service lookup.
 */
-class BOOST_COROSIO_DECL select_socket_service final : public socket_service
+class BOOST_COROSIO_DECL select_socket_service final
+    : public socket_service
+    , public reactor_socket_service<
+          select_socket_service,
+          select_socket,
+          select_scheduler>
 {
+    using base_type = reactor_socket_service<
+        select_socket_service,
+        select_socket,
+        select_scheduler>;
+
 public:
     explicit select_socket_service(capy::execution_context& ctx);
     ~select_socket_service() override;
@@ -123,97 +122,62 @@ public:
 
     select_scheduler& scheduler() const noexcept
     {
-        return state_->sched_;
+        return do_scheduler();
     }
     void post(select_op* op);
     void work_started() noexcept;
     void work_finished() noexcept;
-
-private:
-    std::unique_ptr<select_socket_state> state_;
 };
 
 // Backward compatibility alias
 using select_sockets = select_socket_service;
 
 inline void
-select_op::canceller::operator()() const noexcept
+select_socket::on_pre_close_fd() noexcept
 {
-    op->cancel();
+    if (desc_state_.registered_events != 0)
+        svc_.scheduler().deregister_descriptor(fd_);
 }
 
 inline void
-select_connect_op::cancel() noexcept
+select_socket::on_register_read() noexcept
 {
-    if (socket_impl_)
-        socket_impl_->cancel_single_op(*this);
-    else
-        request_cancel();
+    svc_.scheduler().start_op(fd_, select_scheduler::event_read);
 }
 
 inline void
-select_read_op::cancel() noexcept
+select_socket::on_register_write() noexcept
 {
-    if (socket_impl_)
-        socket_impl_->cancel_single_op(*this);
-    else
-        request_cancel();
+    svc_.scheduler().start_op(fd_, select_scheduler::event_write);
 }
 
 inline void
-select_write_op::cancel() noexcept
+select_read_op::operator()()
 {
-    if (socket_impl_)
-        socket_impl_->cancel_single_op(*this);
-    else
-        request_cancel();
+    socket_impl_->svc_.scheduler().reset_inline_budget();
+    reactor_io_op_complete(*this);
+}
+
+inline void
+select_write_op::operator()()
+{
+    socket_impl_->svc_.scheduler().reset_inline_budget();
+    reactor_io_op_complete(*this);
 }
 
 inline void
 select_connect_op::operator()()
 {
-    stop_cb.reset();
-
-    bool success = (errn == 0 && !cancelled.load(std::memory_order_acquire));
-
-    // Cache endpoints on successful connect
-    if (success && socket_impl_)
-    {
-        endpoint local_ep;
-        sockaddr_storage local_storage{};
-        socklen_t local_len = sizeof(local_storage);
-        if (::getsockname(
-                fd, reinterpret_cast<sockaddr*>(&local_storage), &local_len) ==
-            0)
-            local_ep = from_sockaddr(local_storage);
-        static_cast<select_socket*>(socket_impl_)
-            ->set_endpoints(local_ep, target_endpoint);
-    }
-
-    if (ec_out)
-    {
-        if (cancelled.load(std::memory_order_acquire))
-            *ec_out = capy::error::canceled;
-        else if (errn != 0)
-            *ec_out = make_err(errn);
-        else
-            *ec_out = {};
-    }
-
-    if (bytes_out)
-        *bytes_out = bytes_transferred;
-
-    // Move to stack before destroying the frame
-    capy::executor_ref saved_ex(ex);
-    std::coroutine_handle<> saved_h(h);
-    impl_ptr.reset();
-    dispatch_coro(saved_ex, saved_h).resume();
+    socket_impl_->svc_.scheduler().reset_inline_budget();
+    reactor_connect_op_complete<select_socket>(*this);
 }
 
 inline select_socket::select_socket(select_socket_service& svc) noexcept
     : svc_(svc)
 {
 }
+
+inline select_socket::~select_socket() = default;
 
 inline std::coroutine_handle<>
 select_socket::connect(
@@ -223,88 +187,7 @@ select_socket::connect(
     std::stop_token token,
     std::error_code* ec)
 {
-    auto& op = conn_;
-    op.reset();
-    op.h               = h;
-    op.ex              = ex;
-    op.ec_out          = ec;
-    op.fd              = fd_;
-    op.target_endpoint = ep; // Store target for endpoint caching
-    op.start(token, this);
-
-    sockaddr_storage storage{};
-    socklen_t addrlen =
-        detail::to_sockaddr(ep, detail::socket_family(fd_), storage);
-    int result = ::connect(fd_, reinterpret_cast<sockaddr*>(&storage), addrlen);
-
-    if (result == 0)
-    {
-        // Sync success — cache endpoints immediately
-        sockaddr_storage local_storage{};
-        socklen_t local_len = sizeof(local_storage);
-        if (::getsockname(
-                fd_, reinterpret_cast<sockaddr*>(&local_storage), &local_len) ==
-            0)
-            local_endpoint_ = detail::from_sockaddr(local_storage);
-        remote_endpoint_ = ep;
-
-        op.complete(0, 0);
-        op.impl_ptr = shared_from_this();
-        svc_.post(&op);
-        // completion is always posted to scheduler queue, never inline.
-        return std::noop_coroutine();
-    }
-
-    if (errno == EINPROGRESS)
-    {
-        svc_.work_started();
-        op.impl_ptr = shared_from_this();
-
-        // Set registering BEFORE register_fd to close the race window where
-        // reactor sees an event before we set registered. The reactor treats
-        // registering the same as registered when claiming the op.
-        op.registered.store(
-            select_registration_state::registering, std::memory_order_release);
-        svc_.scheduler().register_fd(fd_, &op, select_scheduler::event_write);
-
-        // Transition to registered. If this fails, reactor or cancel already
-        // claimed the op (state is now unregistered), so we're done. However,
-        // we must still deregister the fd because cancel's deregister_fd may
-        // have run before our register_fd, leaving the fd orphaned.
-        auto expected = select_registration_state::registering;
-        if (!op.registered.compare_exchange_strong(
-                expected, select_registration_state::registered,
-                std::memory_order_acq_rel))
-        {
-            svc_.scheduler().deregister_fd(fd_, select_scheduler::event_write);
-            // completion is always posted to scheduler queue, never inline.
-            return std::noop_coroutine();
-        }
-
-        // If cancelled was set before we registered, handle it now.
-        if (op.cancelled.load(std::memory_order_acquire))
-        {
-            auto prev = op.registered.exchange(
-                select_registration_state::unregistered,
-                std::memory_order_acq_rel);
-            if (prev != select_registration_state::unregistered)
-            {
-                svc_.scheduler().deregister_fd(
-                    fd_, select_scheduler::event_write);
-                op.impl_ptr = shared_from_this();
-                svc_.post(&op);
-                svc_.work_finished();
-            }
-        }
-        // completion is always posted to scheduler queue, never inline.
-        return std::noop_coroutine();
-    }
-
-    op.complete(errno, 0);
-    op.impl_ptr = shared_from_this();
-    svc_.post(&op);
-    // completion is always posted to scheduler queue, never inline.
-    return std::noop_coroutine();
+    return reactor_socket_io::do_connect(*this, h, ex, ep, token, ec);
 }
 
 inline std::coroutine_handle<>
@@ -316,98 +199,8 @@ select_socket::read_some(
     std::error_code* ec,
     std::size_t* bytes_out)
 {
-    auto& op = rd_;
-    op.reset();
-    op.h         = h;
-    op.ex        = ex;
-    op.ec_out    = ec;
-    op.bytes_out = bytes_out;
-    op.fd        = fd_;
-    op.start(token, this);
-
-    capy::mutable_buffer bufs[select_read_op::max_buffers];
-    op.iovec_count =
-        static_cast<int>(param.copy_to(bufs, select_read_op::max_buffers));
-
-    if (op.iovec_count == 0 || (op.iovec_count == 1 && bufs[0].size() == 0))
-    {
-        op.empty_buffer_read = true;
-        op.complete(0, 0);
-        op.impl_ptr = shared_from_this();
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    for (int i = 0; i < op.iovec_count; ++i)
-    {
-        op.iovecs[i].iov_base = bufs[i].data();
-        op.iovecs[i].iov_len  = bufs[i].size();
-    }
-
-    ssize_t n = ::readv(fd_, op.iovecs, op.iovec_count);
-
-    if (n > 0)
-    {
-        op.complete(0, static_cast<std::size_t>(n));
-        op.impl_ptr = shared_from_this();
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    if (n == 0)
-    {
-        op.complete(0, 0);
-        op.impl_ptr = shared_from_this();
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-    {
-        svc_.work_started();
-        op.impl_ptr = shared_from_this();
-
-        // Set registering BEFORE register_fd to close the race window where
-        // reactor sees an event before we set registered.
-        op.registered.store(
-            select_registration_state::registering, std::memory_order_release);
-        svc_.scheduler().register_fd(fd_, &op, select_scheduler::event_read);
-
-        // Transition to registered. If this fails, reactor or cancel already
-        // claimed the op (state is now unregistered), so we're done. However,
-        // we must still deregister the fd because cancel's deregister_fd may
-        // have run before our register_fd, leaving the fd orphaned.
-        auto expected = select_registration_state::registering;
-        if (!op.registered.compare_exchange_strong(
-                expected, select_registration_state::registered,
-                std::memory_order_acq_rel))
-        {
-            svc_.scheduler().deregister_fd(fd_, select_scheduler::event_read);
-            return std::noop_coroutine();
-        }
-
-        // If cancelled was set before we registered, handle it now.
-        if (op.cancelled.load(std::memory_order_acquire))
-        {
-            auto prev = op.registered.exchange(
-                select_registration_state::unregistered,
-                std::memory_order_acq_rel);
-            if (prev != select_registration_state::unregistered)
-            {
-                svc_.scheduler().deregister_fd(
-                    fd_, select_scheduler::event_read);
-                op.impl_ptr = shared_from_this();
-                svc_.post(&op);
-                svc_.work_finished();
-            }
-        }
-        return std::noop_coroutine();
-    }
-
-    op.complete(errno, 0);
-    op.impl_ptr = shared_from_this();
-    svc_.post(&op);
-    return std::noop_coroutine();
+    return reactor_socket_io::do_read_some(
+        *this, h, ex, param, token, ec, bytes_out);
 }
 
 inline std::coroutine_handle<>
@@ -419,235 +212,51 @@ select_socket::write_some(
     std::error_code* ec,
     std::size_t* bytes_out)
 {
-    auto& op = wr_;
-    op.reset();
-    op.h         = h;
-    op.ex        = ex;
-    op.ec_out    = ec;
-    op.bytes_out = bytes_out;
-    op.fd        = fd_;
-    op.start(token, this);
-
-    capy::mutable_buffer bufs[select_write_op::max_buffers];
-    op.iovec_count =
-        static_cast<int>(param.copy_to(bufs, select_write_op::max_buffers));
-
-    if (op.iovec_count == 0 || (op.iovec_count == 1 && bufs[0].size() == 0))
-    {
-        op.complete(0, 0);
-        op.impl_ptr = shared_from_this();
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    for (int i = 0; i < op.iovec_count; ++i)
-    {
-        op.iovecs[i].iov_base = bufs[i].data();
-        op.iovecs[i].iov_len  = bufs[i].size();
-    }
-
-    msghdr msg{};
-    msg.msg_iov    = op.iovecs;
-    msg.msg_iovlen = static_cast<std::size_t>(op.iovec_count);
-
-    ssize_t n = ::sendmsg(fd_, &msg, MSG_NOSIGNAL);
-
-    if (n > 0)
-    {
-        op.complete(0, static_cast<std::size_t>(n));
-        op.impl_ptr = shared_from_this();
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-    {
-        svc_.work_started();
-        op.impl_ptr = shared_from_this();
-
-        // Set registering BEFORE register_fd to close the race window where
-        // reactor sees an event before we set registered.
-        op.registered.store(
-            select_registration_state::registering, std::memory_order_release);
-        svc_.scheduler().register_fd(fd_, &op, select_scheduler::event_write);
-
-        // Transition to registered. If this fails, reactor or cancel already
-        // claimed the op (state is now unregistered), so we're done. However,
-        // we must still deregister the fd because cancel's deregister_fd may
-        // have run before our register_fd, leaving the fd orphaned.
-        auto expected = select_registration_state::registering;
-        if (!op.registered.compare_exchange_strong(
-                expected, select_registration_state::registered,
-                std::memory_order_acq_rel))
-        {
-            svc_.scheduler().deregister_fd(fd_, select_scheduler::event_write);
-            return std::noop_coroutine();
-        }
-
-        // If cancelled was set before we registered, handle it now.
-        if (op.cancelled.load(std::memory_order_acquire))
-        {
-            auto prev = op.registered.exchange(
-                select_registration_state::unregistered,
-                std::memory_order_acq_rel);
-            if (prev != select_registration_state::unregistered)
-            {
-                svc_.scheduler().deregister_fd(
-                    fd_, select_scheduler::event_write);
-                op.impl_ptr = shared_from_this();
-                svc_.post(&op);
-                svc_.work_finished();
-            }
-        }
-        return std::noop_coroutine();
-    }
-
-    op.complete(errno ? errno : EIO, 0);
-    op.impl_ptr = shared_from_this();
-    svc_.post(&op);
-    return std::noop_coroutine();
+    return reactor_socket_io::do_write_some(
+        *this, h, ex, param, token, ec, bytes_out);
 }
 
 inline std::error_code
 select_socket::shutdown(tcp_socket::shutdown_type what) noexcept
 {
-    int how;
-    switch (what)
-    {
-    case tcp_socket::shutdown_receive:
-        how = SHUT_RD;
-        break;
-    case tcp_socket::shutdown_send:
-        how = SHUT_WR;
-        break;
-    case tcp_socket::shutdown_both:
-        how = SHUT_RDWR;
-        break;
-    default:
-        return make_err(EINVAL);
-    }
-    if (::shutdown(fd_, how) != 0)
-        return make_err(errno);
-    return {};
+    return posix::do_shutdown(fd_, what);
 }
 
 inline std::error_code
 select_socket::set_option(
     int level, int optname, void const* data, std::size_t size) noexcept
 {
-    if (::setsockopt(fd_, level, optname, data, static_cast<socklen_t>(size)) !=
-        0)
-        return make_err(errno);
-    return {};
+    return posix::do_set_option(fd_, level, optname, data, size);
 }
 
 inline std::error_code
 select_socket::get_option(
     int level, int optname, void* data, std::size_t* size) const noexcept
 {
-    socklen_t len = static_cast<socklen_t>(*size);
-    if (::getsockopt(fd_, level, optname, data, &len) != 0)
-        return make_err(errno);
-    *size = static_cast<std::size_t>(len);
-    return {};
+    return posix::do_get_option(fd_, level, optname, data, size);
 }
 
 inline void
 select_socket::cancel() noexcept
 {
-    auto self = weak_from_this().lock();
-    if (!self)
-        return;
-
-    auto cancel_op = [this, &self](select_op& op, int events) {
-        auto prev = op.registered.exchange(
-            select_registration_state::unregistered, std::memory_order_acq_rel);
-        op.request_cancel();
-        if (prev != select_registration_state::unregistered)
-        {
-            svc_.scheduler().deregister_fd(fd_, events);
-            op.impl_ptr = self;
-            svc_.post(&op);
-            svc_.work_finished();
-        }
-    };
-
-    cancel_op(conn_, select_scheduler::event_write);
-    cancel_op(rd_, select_scheduler::event_read);
-    cancel_op(wr_, select_scheduler::event_write);
+    do_cancel();
 }
 
 inline void
 select_socket::cancel_single_op(select_op& op) noexcept
 {
-    auto self = weak_from_this().lock();
-    if (!self)
-        return;
-
-    // Called from stop_token callback to cancel a specific pending operation.
-    auto prev = op.registered.exchange(
-        select_registration_state::unregistered, std::memory_order_acq_rel);
-    op.request_cancel();
-
-    if (prev != select_registration_state::unregistered)
-    {
-        // Determine which event type to deregister
-        int events = 0;
-        if (&op == &conn_ || &op == &wr_)
-            events = select_scheduler::event_write;
-        else if (&op == &rd_)
-            events = select_scheduler::event_read;
-
-        svc_.scheduler().deregister_fd(fd_, events);
-
-        op.impl_ptr = self;
-        svc_.post(&op);
-        svc_.work_finished();
-    }
+    do_cancel_single_op(op);
 }
 
 inline void
 select_socket::close_socket() noexcept
 {
-    auto self = weak_from_this().lock();
-    if (self)
-    {
-        auto cancel_op = [this, &self](select_op& op, int events) {
-            auto prev = op.registered.exchange(
-                select_registration_state::unregistered,
-                std::memory_order_acq_rel);
-            op.request_cancel();
-            if (prev != select_registration_state::unregistered)
-            {
-                svc_.scheduler().deregister_fd(fd_, events);
-                op.impl_ptr = self;
-                svc_.post(&op);
-                svc_.work_finished();
-            }
-        };
-
-        cancel_op(conn_, select_scheduler::event_write);
-        cancel_op(rd_, select_scheduler::event_read);
-        cancel_op(wr_, select_scheduler::event_write);
-    }
-
-    if (fd_ >= 0)
-    {
-        svc_.scheduler().deregister_fd(
-            fd_, select_scheduler::event_read | select_scheduler::event_write);
-        ::close(fd_);
-        fd_ = -1;
-    }
-
-    local_endpoint_  = endpoint{};
-    remote_endpoint_ = endpoint{};
+    do_close_socket();
 }
 
 inline select_socket_service::select_socket_service(
     capy::execution_context& ctx)
-    : state_(
-          std::make_unique<select_socket_state>(
-              ctx.use_service<select_scheduler>()))
+    : base_type(ctx)
 {
 }
 
@@ -656,40 +265,19 @@ inline select_socket_service::~select_socket_service() {}
 inline void
 select_socket_service::shutdown()
 {
-    std::lock_guard lock(state_->mutex_);
-
-    while (auto* impl = state_->socket_list_.pop_front())
-        impl->close_socket();
-
-    // Don't clear socket_ptrs_ here. The scheduler shuts down after us and
-    // drains completed_ops_, calling destroy() on each queued op. Letting
-    // ~state_ release the ptrs (during service destruction, after scheduler
-    // shutdown) keeps every impl alive until all ops have been drained.
+    do_shutdown();
 }
 
 inline io_object::implementation*
 select_socket_service::construct()
 {
-    auto impl = std::make_shared<select_socket>(*this);
-    auto* raw = impl.get();
-
-    {
-        std::lock_guard lock(state_->mutex_);
-        state_->socket_list_.push_back(raw);
-        state_->socket_ptrs_.emplace(raw, std::move(impl));
-    }
-
-    return raw;
+    return do_construct();
 }
 
 inline void
 select_socket_service::destroy(io_object::implementation* impl)
 {
-    auto* select_impl = static_cast<select_socket*>(impl);
-    select_impl->close_socket();
-    std::lock_guard lock(state_->mutex_);
-    state_->socket_list_.remove(select_impl);
-    state_->socket_ptrs_.erase(select_impl);
+    do_destroy(impl);
 }
 
 inline std::error_code
@@ -734,35 +322,41 @@ select_socket_service::open_socket(
     if (fd >= FD_SETSIZE)
     {
         ::close(fd);
-        return make_err(EMFILE); // Too many open files
+        return make_err(EMFILE);
     }
 
     select_impl->fd_ = fd;
+
+    // Register fd with scheduler for persistent monitoring
+    select_impl->desc_state_.fd = fd;
+    select_impl->desc_state_.init_ops();
+    scheduler().register_descriptor(fd, &select_impl->desc_state_);
+
     return {};
 }
 
 inline void
 select_socket_service::close(io_object::handle& h)
 {
-    static_cast<select_socket*>(h.get())->close_socket();
+    do_close(h);
 }
 
 inline void
 select_socket_service::post(select_op* op)
 {
-    state_->sched_.post(op);
+    do_post(op);
 }
 
 inline void
 select_socket_service::work_started() noexcept
 {
-    state_->sched_.work_started();
+    do_work_started();
 }
 
 inline void
 select_socket_service::work_finished() noexcept
 {
-    state_->sched_.work_finished();
+    do_work_finished();
 }
 
 } // namespace boost::corosio::detail

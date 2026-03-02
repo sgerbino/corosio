@@ -82,8 +82,6 @@
 
 namespace boost::corosio::detail {
 
-struct kqueue_op;
-struct descriptor_state;
 namespace kqueue {
 struct BOOST_COROSIO_SYMBOL_VISIBLE scheduler_context;
 } // namespace kqueue

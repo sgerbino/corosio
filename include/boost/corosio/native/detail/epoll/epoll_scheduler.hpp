@@ -48,8 +48,6 @@
 
 namespace boost::corosio::detail {
 
-struct epoll_op;
-struct descriptor_state;
 namespace epoll {
 struct BOOST_COROSIO_SYMBOL_VISIBLE scheduler_context;
 } // namespace epoll

@@ -19,6 +19,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 
 #include <boost/corosio/native/detail/epoll/epoll_op.hpp>
+#include <boost/corosio/native/detail/reactor_acceptor.hpp>
 
 #include <memory>
 
@@ -29,10 +30,15 @@ class epoll_acceptor_service;
 /// Acceptor implementation for epoll backend.
 class epoll_acceptor final
     : public tcp_acceptor::implementation
+    , private reactor_acceptor<epoll_acceptor>
     , public std::enable_shared_from_this<epoll_acceptor>
     , public intrusive_list<epoll_acceptor>::node
 {
+    friend class reactor_acceptor<epoll_acceptor>;
     friend class epoll_acceptor_service;
+
+    template<typename, typename, typename, typename>
+    friend class reactor_acceptor_service;
 
 public:
     explicit epoll_acceptor(epoll_acceptor_service& svc) noexcept;
@@ -85,6 +91,8 @@ private:
     epoll_acceptor_service& svc_;
     int fd_ = -1;
     endpoint local_endpoint_;
+
+    void on_pre_close_fd() noexcept;
 };
 
 } // namespace boost::corosio::detail

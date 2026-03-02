@@ -19,6 +19,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 
 #include <boost/corosio/native/detail/select/select_op.hpp>
+#include <boost/corosio/native/detail/reactor_acceptor.hpp>
 
 #include <memory>
 
@@ -30,10 +31,15 @@ class select_socket_service;
 /// Acceptor implementation for select backend.
 class select_acceptor final
     : public tcp_acceptor::implementation
+    , private reactor_acceptor<select_acceptor>
     , public std::enable_shared_from_this<select_acceptor>
     , public intrusive_list<select_acceptor>::node
 {
+    friend class reactor_acceptor<select_acceptor>;
     friend class select_acceptor_service;
+
+    template<typename, typename, typename, typename>
+    friend class reactor_acceptor_service;
 
 public:
     explicit select_acceptor(select_acceptor_service& svc) noexcept;
@@ -80,11 +86,14 @@ public:
     }
 
     select_accept_op acc_;
+    select_descriptor_state desc_state_;
 
 private:
     select_acceptor_service& svc_;
     int fd_ = -1;
     endpoint local_endpoint_;
+
+    void on_pre_close_fd() noexcept;
 };
 
 } // namespace boost::corosio::detail

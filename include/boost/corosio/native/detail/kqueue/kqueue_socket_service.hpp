@@ -25,14 +25,14 @@
 #include <boost/corosio/native/detail/endpoint_convert.hpp>
 #include <boost/corosio/detail/dispatch_coro.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
+#include <boost/corosio/native/detail/posix/posix_socket_ops.hpp>
+#include <boost/corosio/native/detail/reactor_op_complete.hpp>
+#include <boost/corosio/native/detail/reactor_socket_service.hpp>
+#include <boost/corosio/native/detail/reactor_socket_io.hpp>
 #include <boost/corosio/detail/except.hpp>
 #include <boost/capy/buffers.hpp>
 
 #include <coroutine>
-#include <memory>
-#include <mutex>
-#include <unordered_map>
-#include <utility>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -119,29 +119,23 @@
 
 namespace boost::corosio::detail {
 
-/** State for kqueue socket service. */
-class kqueue_socket_state
-{
-public:
-    explicit kqueue_socket_state(kqueue_scheduler& sched) noexcept
-        : sched_(sched)
-    {
-    }
-
-    kqueue_scheduler& sched_;
-    std::mutex mutex_;
-    intrusive_list<kqueue_socket> socket_list_;
-    std::unordered_map<kqueue_socket*, std::shared_ptr<kqueue_socket>>
-        socket_ptrs_;
-};
-
 /** kqueue socket service implementation.
 
     Inherits from socket_service to enable runtime polymorphism.
     Uses key_type = socket_service for service lookup.
 */
-class BOOST_COROSIO_DECL kqueue_socket_service final : public socket_service
+class BOOST_COROSIO_DECL kqueue_socket_service final
+    : public socket_service
+    , public reactor_socket_service<
+          kqueue_socket_service,
+          kqueue_socket,
+          kqueue_scheduler>
 {
+    using base_type = reactor_socket_service<
+        kqueue_socket_service,
+        kqueue_socket,
+        kqueue_scheduler>;
+
 public:
     explicit kqueue_socket_service(capy::execution_context& ctx);
     ~kqueue_socket_service();
@@ -162,125 +156,39 @@ public:
 
     kqueue_scheduler& scheduler() const noexcept
     {
-        return state_->sched_;
+        return do_scheduler();
     }
     void post(kqueue_op* op);
     void work_started() noexcept;
     void work_finished() noexcept;
 
-private:
-    std::unique_ptr<kqueue_socket_state> state_;
+    // CRTP hooks: clear SO_LINGER before close so destructor doesn't
+    // block and close() sends FIN instead of RST.
+    void on_pre_shutdown(kqueue_socket* impl) noexcept;
+    void on_pre_destroy(kqueue_socket* impl) noexcept;
 };
 
 // -- Implementation ---------------------------------------------------------
 
 inline void
-kqueue_op::canceller::operator()() const noexcept
+kqueue_read_op::operator()()
 {
-    op->cancel();
-}
-
-inline void
-kqueue_connect_op::cancel() noexcept
-{
-    if (socket_impl_)
-        socket_impl_->cancel_single_op(*this);
-    else
-        request_cancel();
-}
-
-inline void
-kqueue_read_op::cancel() noexcept
-{
-    if (socket_impl_)
-        socket_impl_->cancel_single_op(*this);
-    else
-        request_cancel();
-}
-
-inline void
-kqueue_write_op::cancel() noexcept
-{
-    if (socket_impl_)
-        socket_impl_->cancel_single_op(*this);
-    else
-        request_cancel();
-}
-
-inline void
-kqueue_op::operator()()
-{
-    stop_cb.reset();
-
     socket_impl_->desc_state_.scheduler_->reset_inline_budget();
+    reactor_io_op_complete(*this);
+}
 
-    if (ec_out)
-    {
-        if (cancelled.load(std::memory_order_acquire))
-            *ec_out = capy::error::canceled;
-        else if (errn != 0)
-            *ec_out = make_err(errn);
-        else if (is_read_operation() && bytes_transferred == 0)
-            *ec_out = capy::error::eof;
-        else
-            *ec_out = {};
-    }
-
-    if (bytes_out)
-        *bytes_out = bytes_transferred;
-
-    // Move to stack before resuming coroutine. The coroutine might close
-    // the socket, releasing the last wrapper ref. If impl_ptr were the
-    // last ref and we destroyed it while still in operator(), we'd have
-    // use-after-free. Moving to local ensures destruction happens at
-    // function exit, after all member accesses are complete.
-    capy::executor_ref saved_ex(std::move(ex));
-    std::coroutine_handle<> saved_h(std::move(h));
-    auto prevent_premature_destruction = std::move(impl_ptr);
-    dispatch_coro(saved_ex, saved_h).resume();
+inline void
+kqueue_write_op::operator()()
+{
+    socket_impl_->desc_state_.scheduler_->reset_inline_budget();
+    reactor_io_op_complete(*this);
 }
 
 inline void
 kqueue_connect_op::operator()()
 {
-    stop_cb.reset();
-
     socket_impl_->desc_state_.scheduler_->reset_inline_budget();
-
-    bool success = (errn == 0 && !cancelled.load(std::memory_order_acquire));
-
-    // Cache endpoints on successful connect
-    if (success && socket_impl_)
-    {
-        endpoint local_ep;
-        sockaddr_storage local_storage{};
-        socklen_t local_len = sizeof(local_storage);
-        if (::getsockname(
-                fd, reinterpret_cast<sockaddr*>(&local_storage), &local_len) ==
-            0)
-            local_ep = from_sockaddr(local_storage);
-        static_cast<kqueue_socket*>(socket_impl_)
-            ->set_endpoints(local_ep, target_endpoint);
-    }
-
-    if (ec_out)
-    {
-        if (cancelled.load(std::memory_order_acquire))
-            *ec_out = capy::error::canceled;
-        else if (errn != 0)
-            *ec_out = make_err(errn);
-        else
-            *ec_out = {};
-    }
-
-    if (bytes_out)
-        *bytes_out = bytes_transferred;
-
-    // Move to stack before resuming. See kqueue_op::operator()() for rationale.
-    capy::executor_ref saved_ex(std::move(ex));
-    std::coroutine_handle<> saved_h(std::move(h));
-    auto prevent_premature_destruction = std::move(impl_ptr);
-    dispatch_coro(saved_ex, saved_h).resume();
+    reactor_connect_op_complete<kqueue_socket>(*this);
 }
 
 inline kqueue_socket::kqueue_socket(kqueue_socket_service& svc) noexcept
@@ -298,102 +206,7 @@ kqueue_socket::connect(
     std::stop_token token,
     std::error_code* ec)
 {
-    auto& op = conn_;
-
-    sockaddr_storage storage{};
-    socklen_t addrlen =
-        detail::to_sockaddr(ep, detail::socket_family(fd_), storage);
-    int result = ::connect(fd_, reinterpret_cast<sockaddr*>(&storage), addrlen);
-
-    // Cache endpoints on sync success
-    if (result == 0)
-    {
-        sockaddr_storage local_storage{};
-        socklen_t local_len = sizeof(local_storage);
-        if (::getsockname(
-                fd_, reinterpret_cast<sockaddr*>(&local_storage), &local_len) ==
-            0)
-            local_endpoint_ = detail::from_sockaddr(local_storage);
-        remote_endpoint_ = ep;
-    }
-
-    if (result == 0 || errno != EINPROGRESS)
-    {
-        int err = (result < 0) ? errno : 0;
-
-        if (svc_.scheduler().try_consume_inline_budget())
-        {
-            *ec = err ? make_err(err) : std::error_code{};
-            return dispatch_coro(ex, h);
-        }
-
-        // Budget exhausted — post through queue
-        op.reset();
-        op.h               = h;
-        op.ex              = ex;
-        op.ec_out          = ec;
-        op.fd              = fd_;
-        op.target_endpoint = ep;
-        op.start(token, this);
-        op.impl_ptr = shared_from_this();
-        op.complete(err, 0);
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    // EINPROGRESS — async path
-    op.reset();
-    op.h               = h;
-    op.ex              = ex;
-    op.ec_out          = ec;
-    op.fd              = fd_;
-    op.target_endpoint = ep;
-    op.start(token, this);
-    op.impl_ptr = shared_from_this();
-
-    register_op(
-        op, desc_state_.connect_op, desc_state_.write_ready,
-        desc_state_.connect_cancel_pending);
-    return std::noop_coroutine();
-}
-
-// Register an op with the reactor, handling cached edge events.
-// Called under the EAGAIN path when speculative I/O failed.
-inline void
-kqueue_socket::register_op(
-    kqueue_op& op,
-    kqueue_op*& desc_slot,
-    bool& ready_flag,
-    bool& cancel_flag) noexcept
-{
-    svc_.work_started();
-
-    std::lock_guard lock(desc_state_.mutex);
-    bool io_done = false;
-    if (ready_flag)
-    {
-        ready_flag = false;
-        op.perform_io();
-        io_done = (op.errn != EAGAIN && op.errn != EWOULDBLOCK);
-        if (!io_done)
-            op.errn = 0;
-    }
-
-    if (cancel_flag)
-    {
-        cancel_flag = false;
-        op.cancelled.store(true, std::memory_order_relaxed);
-    }
-
-    if (io_done || op.cancelled.load(std::memory_order_acquire))
-    {
-        svc_.post(&op);
-        svc_.work_finished();
-    }
-    else
-    {
-        desc_slot = &op;
-    }
+    return reactor_socket_io::do_connect(*this, h, ex, ep, token, ec);
 }
 
 inline std::coroutine_handle<>
@@ -405,87 +218,8 @@ kqueue_socket::read_some(
     std::error_code* ec,
     std::size_t* bytes_out)
 {
-    auto& op = rd_;
-    op.reset();
-
-    capy::mutable_buffer bufs[kqueue_read_op::max_buffers];
-    op.iovec_count =
-        static_cast<int>(param.copy_to(bufs, kqueue_read_op::max_buffers));
-
-    if (op.iovec_count == 0 || (op.iovec_count == 1 && bufs[0].size() == 0))
-    {
-        op.empty_buffer_read = true;
-        op.h                 = h;
-        op.ex                = ex;
-        op.ec_out            = ec;
-        op.bytes_out         = bytes_out;
-        op.start(token, this);
-        op.impl_ptr = shared_from_this();
-        op.complete(0, 0);
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    for (int i = 0; i < op.iovec_count; ++i)
-    {
-        op.iovecs[i].iov_base = bufs[i].data();
-        op.iovecs[i].iov_len  = bufs[i].size();
-    }
-
-    // Speculative read: try I/O before suspending. On success, return via
-    // symmetric transfer without touching the scheduler queue — this creates
-    // a tight pump loop for back-to-back reads on a hot socket.
-    // Budget limits consecutive inline completions to prevent starvation
-    // of other connections competing for scheduler time.
-    ssize_t n;
-    do
-    {
-        n = ::readv(fd_, op.iovecs, op.iovec_count);
-    }
-    while (n < 0 && errno == EINTR);
-
-    if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
-    {
-        int err    = (n < 0) ? errno : 0;
-        auto bytes = (n > 0) ? static_cast<std::size_t>(n) : std::size_t(0);
-
-        if (svc_.scheduler().try_consume_inline_budget())
-        {
-            if (err)
-                *ec = make_err(err);
-            else if (n == 0)
-                *ec = capy::error::eof;
-            else
-                *ec = {};
-            *bytes_out = bytes;
-            return dispatch_coro(ex, h);
-        }
-
-        // Budget exhausted — fall through to queue
-        op.h         = h;
-        op.ex        = ex;
-        op.ec_out    = ec;
-        op.bytes_out = bytes_out;
-        op.start(token, this);
-        op.impl_ptr = shared_from_this();
-        op.complete(err, bytes);
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    // EAGAIN — register with reactor
-    op.h         = h;
-    op.ex        = ex;
-    op.ec_out    = ec;
-    op.bytes_out = bytes_out;
-    op.fd        = fd_;
-    op.start(token, this);
-    op.impl_ptr = shared_from_this();
-
-    register_op(
-        op, desc_state_.read_op, desc_state_.read_ready,
-        desc_state_.read_cancel_pending);
-    return std::noop_coroutine();
+    return reactor_socket_io::do_read_some(
+        *this, h, ex, param, token, ec, bytes_out);
 }
 
 inline std::coroutine_handle<>
@@ -497,287 +231,56 @@ kqueue_socket::write_some(
     std::error_code* ec,
     std::size_t* bytes_out)
 {
-    auto& op = wr_;
-    op.reset();
-
-    capy::mutable_buffer bufs[kqueue_write_op::max_buffers];
-    op.iovec_count =
-        static_cast<int>(param.copy_to(bufs, kqueue_write_op::max_buffers));
-
-    if (op.iovec_count == 0 || (op.iovec_count == 1 && bufs[0].size() == 0))
-    {
-        op.h         = h;
-        op.ex        = ex;
-        op.ec_out    = ec;
-        op.bytes_out = bytes_out;
-        op.start(token, this);
-        op.impl_ptr = shared_from_this();
-        op.complete(0, 0);
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    for (int i = 0; i < op.iovec_count; ++i)
-    {
-        op.iovecs[i].iov_base = bufs[i].data();
-        op.iovecs[i].iov_len  = bufs[i].size();
-    }
-
-    // Speculative write: try I/O before suspending. On success, return via
-    // symmetric transfer without touching the scheduler queue — this creates
-    // a tight pump loop for back-to-back writes on a hot socket.
-    // Budget limits consecutive inline completions to prevent starvation.
-    ssize_t n;
-    do
-    {
-        n = ::writev(fd_, op.iovecs, op.iovec_count);
-    }
-    while (n < 0 && errno == EINTR);
-
-    if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
-    {
-        int err    = (n < 0) ? errno : 0;
-        auto bytes = (n > 0) ? static_cast<std::size_t>(n) : std::size_t(0);
-
-        if (svc_.scheduler().try_consume_inline_budget())
-        {
-            *ec        = err ? make_err(err) : std::error_code{};
-            *bytes_out = bytes;
-            return dispatch_coro(ex, h);
-        }
-
-        // Budget exhausted — fall through to queue
-        op.h         = h;
-        op.ex        = ex;
-        op.ec_out    = ec;
-        op.bytes_out = bytes_out;
-        op.start(token, this);
-        op.impl_ptr = shared_from_this();
-        op.complete(err, bytes);
-        svc_.post(&op);
-        return std::noop_coroutine();
-    }
-
-    // EAGAIN — register with reactor
-    op.h         = h;
-    op.ex        = ex;
-    op.ec_out    = ec;
-    op.bytes_out = bytes_out;
-    op.fd        = fd_;
-    op.start(token, this);
-    op.impl_ptr = shared_from_this();
-
-    register_op(
-        op, desc_state_.write_op, desc_state_.write_ready,
-        desc_state_.write_cancel_pending);
-    return std::noop_coroutine();
+    return reactor_socket_io::do_write_some(
+        *this, h, ex, param, token, ec, bytes_out);
 }
 
 inline std::error_code
 kqueue_socket::shutdown(tcp_socket::shutdown_type what) noexcept
 {
-    int how;
-    switch (what)
-    {
-    case tcp_socket::shutdown_receive:
-        how = SHUT_RD;
-        break;
-    case tcp_socket::shutdown_send:
-        how = SHUT_WR;
-        break;
-    case tcp_socket::shutdown_both:
-        how = SHUT_RDWR;
-        break;
-    default:
-        return make_err(EINVAL);
-    }
-    if (::shutdown(fd_, how) != 0)
-        return make_err(errno);
-    return {};
+    return posix::do_shutdown(fd_, what);
 }
 
 inline std::error_code
 kqueue_socket::set_option(
     int level, int optname, void const* data, std::size_t size) noexcept
 {
-    if (::setsockopt(fd_, level, optname, data, static_cast<socklen_t>(size)) !=
-        0)
-        return make_err(errno);
-    if (level == SOL_SOCKET && optname == SO_LINGER &&
+    auto ec = posix::do_set_option(fd_, level, optname, data, size);
+    if (!ec && level == SOL_SOCKET && optname == SO_LINGER &&
         size >= sizeof(struct ::linger))
         user_set_linger_ =
             static_cast<struct ::linger const*>(data)->l_onoff != 0;
-    return {};
+    return ec;
 }
 
 inline std::error_code
 kqueue_socket::get_option(
     int level, int optname, void* data, std::size_t* size) const noexcept
 {
-    socklen_t len = static_cast<socklen_t>(*size);
-    if (::getsockopt(fd_, level, optname, data, &len) != 0)
-        return make_err(errno);
-    *size = static_cast<std::size_t>(len);
-    return {};
+    return posix::do_get_option(fd_, level, optname, data, size);
 }
 
 inline void
 kqueue_socket::cancel() noexcept
 {
-    auto self = weak_from_this().lock();
-    if (!self)
-        return;
-
-    conn_.request_cancel();
-    rd_.request_cancel();
-    wr_.request_cancel();
-
-    kqueue_op* conn_claimed = nullptr;
-    kqueue_op* rd_claimed   = nullptr;
-    kqueue_op* wr_claimed   = nullptr;
-    {
-        std::lock_guard lock(desc_state_.mutex);
-        if (desc_state_.connect_op == &conn_)
-            conn_claimed = std::exchange(desc_state_.connect_op, nullptr);
-        else
-            desc_state_.connect_cancel_pending = true;
-        if (desc_state_.read_op == &rd_)
-            rd_claimed = std::exchange(desc_state_.read_op, nullptr);
-        else
-            desc_state_.read_cancel_pending = true;
-        if (desc_state_.write_op == &wr_)
-            wr_claimed = std::exchange(desc_state_.write_op, nullptr);
-        else
-            desc_state_.write_cancel_pending = true;
-    }
-
-    if (conn_claimed)
-    {
-        conn_.impl_ptr = self;
-        svc_.post(&conn_);
-        svc_.work_finished();
-    }
-    if (rd_claimed)
-    {
-        rd_.impl_ptr = self;
-        svc_.post(&rd_);
-        svc_.work_finished();
-    }
-    if (wr_claimed)
-    {
-        wr_.impl_ptr = self;
-        svc_.post(&wr_);
-        svc_.work_finished();
-    }
+    do_cancel();
 }
 
 inline void
 kqueue_socket::cancel_single_op(kqueue_op& op) noexcept
 {
-    auto self = weak_from_this().lock();
-    if (!self)
-        return;
-
-    op.request_cancel();
-
-    kqueue_op** desc_op_ptr = nullptr;
-    if (&op == &conn_)
-        desc_op_ptr = &desc_state_.connect_op;
-    else if (&op == &rd_)
-        desc_op_ptr = &desc_state_.read_op;
-    else if (&op == &wr_)
-        desc_op_ptr = &desc_state_.write_op;
-
-    if (desc_op_ptr)
-    {
-        kqueue_op* claimed = nullptr;
-        {
-            std::lock_guard lock(desc_state_.mutex);
-            if (*desc_op_ptr == &op)
-                claimed = std::exchange(*desc_op_ptr, nullptr);
-            else if (&op == &conn_)
-                desc_state_.connect_cancel_pending = true;
-            else if (&op == &rd_)
-                desc_state_.read_cancel_pending = true;
-            else if (&op == &wr_)
-                desc_state_.write_cancel_pending = true;
-        }
-        if (claimed)
-        {
-            op.impl_ptr = self;
-            svc_.post(&op);
-            svc_.work_finished();
-        }
-    }
+    do_cancel_single_op(op);
 }
 
 inline void
 kqueue_socket::close_socket() noexcept
 {
-    auto self = weak_from_this().lock();
-    if (self)
-    {
-        conn_.request_cancel();
-        rd_.request_cancel();
-        wr_.request_cancel();
-
-        kqueue_op* conn_claimed = nullptr;
-        kqueue_op* rd_claimed   = nullptr;
-        kqueue_op* wr_claimed   = nullptr;
-        {
-            std::lock_guard lock(desc_state_.mutex);
-            conn_claimed = std::exchange(desc_state_.connect_op, nullptr);
-            rd_claimed   = std::exchange(desc_state_.read_op, nullptr);
-            wr_claimed   = std::exchange(desc_state_.write_op, nullptr);
-            desc_state_.read_ready             = false;
-            desc_state_.write_ready            = false;
-            desc_state_.read_cancel_pending    = false;
-            desc_state_.write_cancel_pending   = false;
-            desc_state_.connect_cancel_pending = false;
-        }
-
-        if (conn_claimed)
-        {
-            conn_.impl_ptr = self;
-            svc_.post(&conn_);
-            svc_.work_finished();
-        }
-        if (rd_claimed)
-        {
-            rd_.impl_ptr = self;
-            svc_.post(&rd_);
-            svc_.work_finished();
-        }
-        if (wr_claimed)
-        {
-            wr_.impl_ptr = self;
-            svc_.post(&wr_);
-            svc_.work_finished();
-        }
-
-        if (desc_state_.is_enqueued_.load(std::memory_order_acquire))
-            desc_state_.impl_ref_ = self;
-    }
-
-    if (fd_ >= 0)
-    {
-        ::close(fd_);
-        fd_ = -1;
-    }
-
-    desc_state_.fd                = -1;
-    desc_state_.registered_events = 0;
-    user_set_linger_              = false;
-
-    local_endpoint_  = endpoint{};
-    remote_endpoint_ = endpoint{};
+    do_close_socket();
 }
 
 inline kqueue_socket_service::kqueue_socket_service(
     capy::execution_context& ctx)
-    : state_(
-          std::make_unique<kqueue_socket_state>(
-              ctx.use_service<kqueue_scheduler>()))
+    : base_type(ctx)
 {
 }
 
@@ -786,64 +289,37 @@ inline kqueue_socket_service::~kqueue_socket_service() {}
 inline void
 kqueue_socket_service::shutdown()
 {
-    std::lock_guard lock(state_->mutex_);
-
-    while (auto* impl = state_->socket_list_.pop_front())
-    {
-        if (impl->user_set_linger_ && impl->fd_ >= 0)
-        {
-            struct ::linger lg;
-            lg.l_onoff  = 0;
-            lg.l_linger = 0;
-            ::setsockopt(impl->fd_, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
-        }
-        impl->close_socket();
-    }
-
-    // Don't clear socket_ptrs_ here. The scheduler shuts down after us and
-    // drains completed_ops_, calling destroy() on each queued op. If we
-    // released our shared_ptrs now, a kqueue_op::destroy() could free the
-    // last ref to an impl whose embedded descriptor_state is still linked
-    // in the queue — use-after-free on the next pop(). Letting ~state_
-    // release the ptrs (during service destruction, after scheduler
-    // shutdown) keeps every impl alive until all ops have been drained.
+    do_shutdown();
 }
 
 inline io_object::implementation*
 kqueue_socket_service::construct()
 {
-    auto impl = std::make_shared<kqueue_socket>(*this);
-    auto* raw = impl.get();
-
-    {
-        std::lock_guard lock(state_->mutex_);
-        state_->socket_list_.push_back(raw);
-        state_->socket_ptrs_.emplace(raw, std::move(impl));
-    }
-
-    return raw;
+    return do_construct();
 }
 
 inline void
 kqueue_socket_service::destroy(io_object::implementation* impl)
 {
-    auto* kq_impl = static_cast<kqueue_socket*>(impl);
+    do_destroy(impl);
+}
 
-    // Match asio: if the user set SO_LINGER, clear it before close so
-    // the destructor doesn't block and close() sends FIN instead of RST.
-    // RST doesn't reliably trigger EV_EOF on macOS kqueue.
-    if (kq_impl->user_set_linger_ && kq_impl->fd_ >= 0)
+inline void
+kqueue_socket_service::on_pre_shutdown(kqueue_socket* impl) noexcept
+{
+    if (impl->user_set_linger_ && impl->fd_ >= 0)
     {
         struct ::linger lg;
         lg.l_onoff  = 0;
         lg.l_linger = 0;
-        ::setsockopt(kq_impl->fd_, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+        ::setsockopt(impl->fd_, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
     }
+}
 
-    kq_impl->close_socket();
-    std::lock_guard lock(state_->mutex_);
-    state_->socket_list_.remove(kq_impl);
-    state_->socket_ptrs_.erase(kq_impl);
+inline void
+kqueue_socket_service::on_pre_destroy(kqueue_socket* impl) noexcept
+{
+    on_pre_shutdown(impl);
 }
 
 inline std::error_code
@@ -900,12 +376,7 @@ kqueue_socket_service::open_socket(
 
     // Register fd with kqueue (edge-triggered mode via EV_CLEAR)
     kq_impl->desc_state_.fd = fd;
-    {
-        std::lock_guard lock(kq_impl->desc_state_.mutex);
-        kq_impl->desc_state_.read_op    = nullptr;
-        kq_impl->desc_state_.write_op   = nullptr;
-        kq_impl->desc_state_.connect_op = nullptr;
-    }
+    kq_impl->desc_state_.init_ops();
     scheduler().register_descriptor(fd, &kq_impl->desc_state_);
 
     return {};
@@ -914,25 +385,25 @@ kqueue_socket_service::open_socket(
 inline void
 kqueue_socket_service::close(io_object::handle& h)
 {
-    static_cast<kqueue_socket*>(h.get())->close_socket();
+    do_close(h);
 }
 
 inline void
 kqueue_socket_service::post(kqueue_op* op)
 {
-    state_->sched_.post(op);
+    do_post(op);
 }
 
 inline void
 kqueue_socket_service::work_started() noexcept
 {
-    state_->sched_.work_started();
+    do_work_started();
 }
 
 inline void
 kqueue_socket_service::work_finished() noexcept
 {
-    state_->sched_.work_finished();
+    do_work_finished();
 }
 
 } // namespace boost::corosio::detail

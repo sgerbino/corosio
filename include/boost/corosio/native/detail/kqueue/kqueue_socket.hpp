@@ -20,6 +20,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 
 #include <boost/corosio/native/detail/kqueue/kqueue_op.hpp>
+#include <boost/corosio/native/detail/reactor_socket.hpp>
 
 #include <memory>
 
@@ -30,9 +31,11 @@ class kqueue_socket_service;
 /// Socket implementation for kqueue backend.
 class kqueue_socket final
     : public tcp_socket::implementation
+    , private reactor_socket<kqueue_socket>
     , public std::enable_shared_from_this<kqueue_socket>
     , public intrusive_list<kqueue_socket>::node
 {
+    friend class reactor_socket<kqueue_socket>;
     friend class kqueue_socket_service;
 
 public:
@@ -114,18 +117,19 @@ public:
     kqueue_write_op wr_;
     descriptor_state desc_state_;
 
-    void register_op(
-        kqueue_op& op,
-        kqueue_op*& desc_slot,
-        bool& ready_flag,
-        bool& cancel_flag) noexcept;
-
 private:
+    friend struct reactor_socket_io;
+
     kqueue_socket_service& svc_;
     int fd_               = -1;
     bool user_set_linger_ = false;
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
+
+    void on_pre_close_fd() noexcept
+    {
+        user_set_linger_ = false;
+    }
 };
 
 } // namespace boost::corosio::detail
