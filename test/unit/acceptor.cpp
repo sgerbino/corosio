@@ -22,6 +22,14 @@
 #include "context.hpp"
 #include "test_suite.hpp"
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <poll.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 namespace boost::corosio {
 
 // Acceptor-specific tests
@@ -350,6 +358,50 @@ struct acceptor_test
         ec = acc.listen();
         BOOST_TEST(!ec);
         auto port = acc.local_endpoint().port();
+
+        // -- TEMPORARY DIAGNOSTIC --
+        // Probe raw syscall behavior to diagnose CI failure on FreeBSD.
+        // Remove once the root cause is confirmed.
+#if !defined(_WIN32)
+        {
+            int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+            BOOST_TEST(probe >= 0);
+            int flags = ::fcntl(probe, F_GETFL, 0);
+            ::fcntl(probe, F_SETFL, flags | O_NONBLOCK);
+
+            sockaddr_in sa{};
+            sa.sin_family      = AF_INET;
+            sa.sin_port        = htons(port);
+            sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+            int rc        = ::connect(probe, reinterpret_cast<sockaddr*>(&sa),
+                                      sizeof(sa));
+            int saved_err = errno;
+
+            // Non-blocking connect to a loopback port with no listener
+            // returns EINPROGRESS (not immediate ECONNREFUSED) — the
+            // kernel defers the refusal. This confirms the lazy
+            // write-filter registration fix is required.
+            BOOST_TEST(rc == -1);
+            BOOST_TEST_EQ(saved_err, EINPROGRESS);
+
+            // If EINPROGRESS, wait briefly and verify SO_ERROR
+            if (rc < 0 && saved_err == EINPROGRESS)
+            {
+                pollfd pfd{};
+                pfd.fd     = probe;
+                pfd.events = POLLOUT;
+                ::poll(&pfd, 1, 100);
+                int so_err       = 0;
+                socklen_t so_len = sizeof(so_err);
+                ::getsockopt(
+                    probe, SOL_SOCKET, SO_ERROR, &so_err, &so_len);
+                BOOST_TEST_EQ(so_err, ECONNREFUSED);
+            }
+            ::close(probe);
+        }
+#endif
+        // -- END DIAGNOSTIC --
 
         tcp_socket peer(ioc);
         tcp_socket client(ioc);
