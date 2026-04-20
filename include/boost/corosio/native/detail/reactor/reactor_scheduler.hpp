@@ -444,14 +444,15 @@ reactor_scheduler::reset_inline_budget() const noexcept
                 static_cast<int>(unassisted_budget_);
             return;
         }
-        // Ramp up when previous cycle fully consumed budget
+
         if (ctx->inline_budget == 0)
             ctx->inline_budget_max = (std::min)(
                 ctx->inline_budget_max * 2,
                 static_cast<int>(inline_budget_max_));
         else if (ctx->inline_budget < ctx->inline_budget_max)
-            ctx->inline_budget_max =
-                static_cast<int>(inline_budget_initial_);
+            ctx->inline_budget_max = (std::max)(
+                ctx->inline_budget_max / 2,
+                static_cast<int>(inline_budget_initial_));
         ctx->inline_budget = ctx->inline_budget_max;
     }
 }
