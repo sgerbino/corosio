@@ -76,4 +76,31 @@
 
 #endif // BOOST_COROSIO_MRDOCS
 
+// Cache-line prefetch hints. Pure optimization — every macro is a
+// safe no-op on compilers without a known intrinsic, so call sites
+// never need their own guards.
+//
+//   BOOST_COROSIO_PREFETCH_READ(p)
+//       Pull @a p into L1 for an upcoming read. Use when a pointer
+//       chase is likely to stall on a cache miss and there is work
+//       between the hint and the actual load.
+//
+//   BOOST_COROSIO_PREFETCH_WRITE(p)
+//       Issue a read-for-ownership so an upcoming store does not
+//       stall acquiring the line exclusive. On MSVC, falls back to
+//       the read intrinsic (no portable write hint).
+#if defined(__GNUC__) || defined(__clang__)
+#define BOOST_COROSIO_PREFETCH_READ(p)  __builtin_prefetch((p), 0, 0)
+#define BOOST_COROSIO_PREFETCH_WRITE(p) __builtin_prefetch((p), 1, 0)
+#elif defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+#include <xmmintrin.h>
+#define BOOST_COROSIO_PREFETCH_READ(p)  \
+    _mm_prefetch(reinterpret_cast<char const*>(p), _MM_HINT_T0)
+#define BOOST_COROSIO_PREFETCH_WRITE(p) \
+    _mm_prefetch(reinterpret_cast<char const*>(p), _MM_HINT_T0)
+#else
+#define BOOST_COROSIO_PREFETCH_READ(p)  ((void)(p))
+#define BOOST_COROSIO_PREFETCH_WRITE(p) ((void)(p))
+#endif
+
 #endif // BOOST_COROSIO_DETAIL_PLATFORM_HPP

@@ -10,6 +10,8 @@
 #ifndef BOOST_COROSIO_DETAIL_INTRUSIVE_HPP
 #define BOOST_COROSIO_DETAIL_INTRUSIVE_HPP
 
+#include <boost/corosio/detail/platform.hpp>
+
 namespace boost::corosio::detail {
 
 /** An intrusive doubly linked list.
@@ -221,8 +223,14 @@ public:
         if (!head_)
             return nullptr;
         T* w  = head_;
-        head_ = head_->next_;
-        if (!head_)
+        head_ = w->next_;
+        // Warm the cache line of the node that will be popped next.
+        // Scheduler hot paths ping-pong between pop() and handler
+        // invocation; the prefetch completes during the handler's
+        // work, hiding the pointer-chase miss from the next pop.
+        if (head_)
+            BOOST_COROSIO_PREFETCH_READ(head_);
+        else
             tail_ = nullptr;
         // Defensive: clear stale linkage on popped node.
         w->next_ = nullptr;
