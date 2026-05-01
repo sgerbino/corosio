@@ -34,7 +34,7 @@
 
 namespace boost::corosio::detail {
 
-class io_uring_tcp_service;  // defined in Task 13
+class io_uring_tcp_service;
 
 /** TCP socket implementation for io_uring.
 
@@ -61,7 +61,7 @@ class BOOST_COROSIO_DECL io_uring_tcp_socket final
     io_uring_scheduler*   sched_ = nullptr;  // set by service at construction
     io_uring_tcp_service* svc_   = nullptr;
 
-    // TODO(task13): populate via getsockname after open/bind/connect.
+    // TODO: populate after async_connect completes (post-Task 14 cancel-aware).
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
 
@@ -369,6 +369,9 @@ public:
             family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
         if (fd < 0)
             return make_err(errno);
+        // TODO(task14): cancel in-flight ops before re-opening; once cancel()
+        // is wired (Task 14), this path must drain pending ops referencing
+        // the old fd before close() to avoid dangling op pointers.
         if (sock.fd_ >= 0)
             ::close(sock.fd_);
         sock.fd_ = fd;
