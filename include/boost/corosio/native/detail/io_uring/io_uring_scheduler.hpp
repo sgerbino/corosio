@@ -31,6 +31,7 @@
 #include <boost/capy/ex/execution_context.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -108,6 +109,14 @@ private:
     mutable std::atomic<std::int64_t> outstanding_work_{0};
     std::atomic<bool>                 stopped_{false};
     bool                              single_threaded_ = false;
+
+    int                               cancel_sentinel_ = 0;
+    mutable std::atomic<bool>         wakeup_armed_{false};
+
+    std::size_t do_one(long timeout_us);
+    void        process_completions();
+    void        interrupt_reactor() const noexcept;
+    void        drain_wakeup_eventfd() const noexcept;
 };
 
 inline
@@ -176,27 +185,272 @@ io_uring_scheduler::shutdown()
     stopped_.store(true, std::memory_order_release);
 }
 
-// ---- Stub virtuals — bodies arrive in Task 6 ----
+inline void
+io_uring_scheduler::stop()
+{
+    stopped_.store(true, std::memory_order_release);
+}
 
-inline void io_uring_scheduler::post(std::coroutine_handle<>) const {}
-inline void io_uring_scheduler::post(scheduler_op*) const {}
-inline bool io_uring_scheduler::running_in_this_thread() const noexcept { return false; }
-inline void io_uring_scheduler::stop() { stopped_.store(true, std::memory_order_release); }
-inline bool io_uring_scheduler::stopped() const noexcept { return stopped_.load(std::memory_order_acquire); }
-inline void io_uring_scheduler::restart() { stopped_.store(false, std::memory_order_release); }
-inline std::size_t io_uring_scheduler::run() { return 0; }
-inline std::size_t io_uring_scheduler::run_one() { return 0; }
-inline std::size_t io_uring_scheduler::wait_one(long) { return 0; }
-inline std::size_t io_uring_scheduler::poll() { return 0; }
-inline std::size_t io_uring_scheduler::poll_one() { return 0; }
-inline void io_uring_scheduler::work_started() noexcept
+inline bool
+io_uring_scheduler::stopped() const noexcept
+{
+    return stopped_.load(std::memory_order_acquire);
+}
+
+inline void
+io_uring_scheduler::restart()
+{
+    stopped_.store(false, std::memory_order_release);
+}
+
+inline void
+io_uring_scheduler::work_started() noexcept
 {
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
 }
-inline void io_uring_scheduler::work_finished() noexcept
+
+inline void
+io_uring_scheduler::work_finished() noexcept
 {
     if (outstanding_work_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         stop();
+}
+
+inline void
+io_uring_scheduler::interrupt_reactor() const noexcept
+{
+    bool expected = false;
+    if (wakeup_armed_.compare_exchange_strong(
+            expected, true, std::memory_order_release,
+            std::memory_order_relaxed))
+    {
+        std::uint64_t v = 1;
+        [[maybe_unused]] auto r = ::write(wakeup_eventfd_, &v, sizeof(v));
+    }
+}
+
+inline void
+io_uring_scheduler::drain_wakeup_eventfd() const noexcept
+{
+    std::uint64_t v;
+    [[maybe_unused]] auto r = ::read(wakeup_eventfd_, &v, sizeof(v));
+    wakeup_armed_.store(false, std::memory_order_relaxed);
+}
+
+inline void
+io_uring_scheduler::post(std::coroutine_handle<> h) const
+{
+    struct post_handler final : scheduler_op
+    {
+        std::coroutine_handle<> h_;
+        explicit post_handler(std::coroutine_handle<> h) noexcept
+            : h_(h) {}
+        void operator()() override
+        {
+            auto saved = h_;
+            delete this;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            saved.resume();
+        }
+    };
+
+    auto* op = new post_handler(h);
+    outstanding_work_.fetch_add(1, std::memory_order_relaxed);
+    {
+        lock_type lock(dispatch_mutex_);
+        completed_ops_.push(op);
+    }
+    interrupt_reactor();
+}
+
+inline void
+io_uring_scheduler::post(scheduler_op* op) const
+{
+    outstanding_work_.fetch_add(1, std::memory_order_relaxed);
+    {
+        lock_type lock(dispatch_mutex_);
+        completed_ops_.push(op);
+    }
+    interrupt_reactor();
+}
+
+inline bool
+io_uring_scheduler::running_in_this_thread() const noexcept
+{
+    // v1: simple stub. A thread_local-based check is plan-4 territory;
+    // returning false is safe — executor falls back to post(), always correct.
+    return false;
+}
+
+inline std::size_t
+io_uring_scheduler::run()
+{
+    if (outstanding_work_.load(std::memory_order_acquire) == 0)
+    {
+        stop();
+        return 0;
+    }
+    std::size_t n = 0;
+    while (do_one(-1))
+    {
+        if (n != static_cast<std::size_t>(-1))
+            ++n;
+    }
+    return n;
+}
+
+inline std::size_t
+io_uring_scheduler::run_one()
+{
+    if (outstanding_work_.load(std::memory_order_acquire) == 0)
+    {
+        stop();
+        return 0;
+    }
+    return do_one(-1);
+}
+
+inline std::size_t
+io_uring_scheduler::wait_one(long usec)
+{
+    if (outstanding_work_.load(std::memory_order_acquire) == 0)
+    {
+        stop();
+        return 0;
+    }
+    return do_one(usec);
+}
+
+inline std::size_t
+io_uring_scheduler::poll()
+{
+    if (outstanding_work_.load(std::memory_order_acquire) == 0)
+    {
+        stop();
+        return 0;
+    }
+    std::size_t n = 0;
+    while (do_one(0))
+    {
+        if (n != static_cast<std::size_t>(-1))
+            ++n;
+    }
+    return n;
+}
+
+inline std::size_t
+io_uring_scheduler::poll_one()
+{
+    if (outstanding_work_.load(std::memory_order_acquire) == 0)
+    {
+        stop();
+        return 0;
+    }
+    return do_one(0);
+}
+
+inline std::size_t
+io_uring_scheduler::do_one(long timeout_us)
+{
+    if (stopped_.load(std::memory_order_acquire))
+        return 0;
+
+    // Drain any cross-thread-posted ops first.
+    scheduler_op* op = nullptr;
+    {
+        lock_type lock(dispatch_mutex_);
+        op = completed_ops_.pop();
+    }
+
+    if (!op)
+    {
+        // Compute kernel timeout: caller-driven OR timer-driven.
+        __kernel_timespec ts{};
+        __kernel_timespec* ts_ptr = nullptr;
+
+        auto next_expiry = timer_svc_->nearest_expiry();
+        auto now         = std::chrono::steady_clock::now();
+
+        if (timeout_us == 0)
+        {
+            ts.tv_sec  = 0;
+            ts.tv_nsec = 0;
+            ts_ptr     = &ts;
+        }
+        else if (next_expiry != timer_service::time_point::max())
+        {
+            auto delta_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    next_expiry - now)
+                    .count();
+            if (delta_ns < 0) delta_ns = 0;
+            ts.tv_sec  = delta_ns / 1'000'000'000;
+            ts.tv_nsec = delta_ns % 1'000'000'000;
+            ts_ptr     = &ts;
+        }
+        else if (timeout_us > 0)
+        {
+            ts.tv_sec  = timeout_us / 1'000'000;
+            ts.tv_nsec = (timeout_us % 1'000'000) * 1000;
+            ts_ptr     = &ts;
+        }
+
+        // Submit pending SQEs and wait for at least one CQE.
+        ::io_uring_cqe* cqe = nullptr;
+        int rc = ::io_uring_submit_and_wait_timeout(
+            &ring_, &cqe, 1, ts_ptr, nullptr);
+        if (rc < 0 && rc != -ETIME && rc != -EINTR)
+            detail::throw_system_error(
+                make_err(-rc), "io_uring_submit_and_wait_timeout");
+
+        // Drain all available completions.
+        process_completions();
+
+        // Process any timer expirations.
+        timer_svc_->process_expired();
+
+        // Re-check for posted ops after the wait.
+        lock_type lock(dispatch_mutex_);
+        op = completed_ops_.pop();
+        if (!op)
+            return 0;
+    }
+
+    // Execute one queued op outside the lock.
+    (*op)();
+    return 1;
+}
+
+inline void
+io_uring_scheduler::process_completions()
+{
+    unsigned head;
+    ::io_uring_cqe* cqe;
+    unsigned consumed = 0;
+
+    io_uring_for_each_cqe(&ring_, head, cqe)
+    {
+        void* ud = io_uring_cqe_get_data(cqe);
+        if (ud == nullptr)
+        {
+            // Wakeup eventfd CQE: drain the eventfd byte.
+            drain_wakeup_eventfd();
+        }
+        else if (ud == &cancel_sentinel_)
+        {
+            // CQE for an ASYNC_CANCEL op — ignore; the actual op's
+            // CQE arrives separately and is dispatched via cqe_func.
+        }
+        else
+        {
+            auto* iop = static_cast<io_uring_op*>(ud);
+            (*iop->cqe_func)(iop, cqe->res, cqe->flags);
+        }
+        ++consumed;
+    }
+
+    if (consumed)
+        io_uring_cq_advance(&ring_, consumed);
 }
 
 } // namespace boost::corosio::detail
