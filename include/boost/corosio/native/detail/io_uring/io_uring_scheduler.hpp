@@ -289,24 +289,22 @@ io_uring_scheduler::post(std::coroutine_handle<> h) const
     struct post_handler final : scheduler_op
     {
         std::coroutine_handle<> h_;
-        explicit post_handler(std::coroutine_handle<> h) noexcept
-            : scheduler_op(&do_complete), h_(h) {}
+        explicit post_handler(std::coroutine_handle<> h) noexcept : h_(h) {}
 
-        static void do_complete(
-            void* owner, scheduler_op* base,
-            std::uint32_t /*bytes*/, std::uint32_t /*error*/) noexcept
+        void operator()() override
         {
-            auto* self = static_cast<post_handler*>(base);
-            auto saved = self->h_;
-            delete self;
-            if (owner == nullptr)
-            {
-                // Shutdown / destroy mode — coroutine never resumes.
-                saved.destroy();
-                return;
-            }
+            auto saved = h_;
+            delete this;
             std::atomic_thread_fence(std::memory_order_acquire);
             saved.resume();
+        }
+
+        void destroy() override
+        {
+            auto saved = h_;
+            delete this;
+            if (saved)
+                saved.destroy();
         }
     };
 
@@ -483,9 +481,12 @@ io_uring_scheduler::do_one(long timeout_us)
             return 0;
     }
 
-    // Dispatch via func-pointer (proactor model — result already in op).
+    // Virtual dispatch — bridges both reactor-style services posted into
+    // our queue (e.g. posix_signal_op overrides operator()()) and
+    // proactor-style io_uring ops (io_uring_op overrides operator()()
+    // to forward to its func-pointer).
     // work_finished balances the work_started from post(), matching IOCP.
-    op->complete(this, 0, 0);
+    (*op)();
     work_finished();
     return 1;
 }

@@ -85,6 +85,11 @@ struct io_uring_op : scheduler_op
         cancelled.store(true, std::memory_order_release);
     }
 
+    /// Bridge virtual dispatch to func-pointer dispatch. Lets the run
+    /// loop dispatch any scheduler_op via `(*op)()` — both reactor-style
+    /// services posted into the queue and proactor-style io_uring ops.
+    void operator()() override { complete(nullptr, 0, 0); }
+
     /// Arm the stop-token callback. Must be called before the SQE submits.
     void start(std::stop_token const& token)
     {
