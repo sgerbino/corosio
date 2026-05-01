@@ -218,6 +218,17 @@ inline void
 io_uring_scheduler::shutdown()
 {
     stopped_.store(true, std::memory_order_release);
+
+    // Drain posted ops, calling destroy() on each so embedded handles
+    // (coroutine frames, error_code outputs) get torn down rather than
+    // leaked. Mirrors reactor_scheduler::shutdown_drain.
+    lock_type lock(dispatch_mutex_);
+    while (auto* op = completed_ops_.pop())
+    {
+        lock.unlock();
+        op->destroy();
+        lock.lock();
+    }
 }
 
 inline void
@@ -473,7 +484,9 @@ io_uring_scheduler::do_one(long timeout_us)
     }
 
     // Dispatch via func-pointer (proactor model — result already in op).
+    // work_finished balances the work_started from post(), matching IOCP.
     op->complete(this, 0, 0);
+    work_finished();
     return 1;
 }
 
