@@ -14,11 +14,8 @@
 
 #if BOOST_COROSIO_HAS_IO_URING
 
-#include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/continuation_op.hpp>
 #include <boost/corosio/detail/scheduler_op.hpp>
-#include <boost/corosio/native/detail/make_err.hpp>
-#include <boost/capy/error.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 
 #include <atomic>
@@ -27,7 +24,6 @@
 #include <memory>
 #include <optional>
 #include <stop_token>
-#include <system_error>
 
 #include <liburing.h>
 
@@ -41,7 +37,7 @@ namespace boost::corosio::detail {
     used by the scheduler to dispatch a CQE arrival.
 
     Concrete op types (uring_read_op, uring_write_op, etc.) set
-    `cqe_func_` at construction so the run loop's completion path
+    `cqe_func` at construction so the run loop's completion path
     has zero virtual indirection.
 */
 struct io_uring_op : scheduler_op
@@ -56,9 +52,9 @@ struct io_uring_op : scheduler_op
         void operator()() const noexcept { op->request_cancel(); }
     };
 
-    explicit io_uring_op(func_type post_func, cqe_func_type cqe_func) noexcept
+    explicit io_uring_op(func_type post_func, cqe_func_type cqe_fn) noexcept
         : scheduler_op(post_func)
-        , cqe_func_(cqe_func)
+        , cqe_func(cqe_fn)
     {}
 
     std::coroutine_handle<>                      h;
@@ -69,12 +65,12 @@ struct io_uring_op : scheduler_op
 
     int                                          res       = 0;
     unsigned                                     cqe_flags = 0;
-    bool                                         is_read_      = false;
-    bool                                         empty_buffer_ = false;
+    bool                                         is_read      = false;
+    bool                                         empty_buffer = false;
 
     std::atomic<bool>                            cancelled{false};
     std::optional<std::stop_callback<canceller>> stop_cb;
-    cqe_func_type                                cqe_func_;
+    cqe_func_type                                cqe_func;
 
     /// Keeps the owning impl alive while the op is in flight (kernel
     /// owns user buffers until completion).
@@ -88,7 +84,7 @@ struct io_uring_op : scheduler_op
     /// Arm the stop-token callback. Must be called before the SQE submits.
     void start(std::stop_token const& token)
     {
-        cancelled.store(false, std::memory_order_release);
+        cancelled.store(false, std::memory_order_relaxed);
         stop_cb.reset();
         if (token.stop_possible())
             stop_cb.emplace(token, canceller{this});
