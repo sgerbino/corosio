@@ -90,6 +90,19 @@ public:
     /// Return the dispatch mutex for SQE acquisition.
     mutex_type& dispatch_mutex() const noexcept { return dispatch_mutex_; }
 
+    /** Queue an already-counted op while the caller holds dispatch_mutex_.
+
+        Does NOT increment `outstanding_work_`. Use for synchronous
+        completion paths (e.g. SQE backpressure) where the caller called
+        `work_started()` and already holds the dispatch lock.
+
+        @pre `dispatch_mutex_` must be locked by the calling thread.
+    */
+    void push_completed_locked(scheduler_op* op) const noexcept
+    {
+        completed_ops_.push(op);
+    }
+
     /// Single-threaded mode toggle (matches reactor_scheduler API).
     void configure_single_threaded(bool v) noexcept
     {
@@ -447,6 +460,10 @@ io_uring_scheduler::process_completions()
     ::io_uring_cqe* cqe;
     unsigned consumed = 0;
 
+    // Collect completed I/O ops locally; splice into completed_ops_
+    // after the loop so do_one dispatches them one at a time.
+    op_queue local_ops;
+
     io_uring_for_each_cqe(&ring_, head, cqe)
     {
         void* ud = io_uring_cqe_get_data(cqe);
@@ -463,13 +480,22 @@ io_uring_scheduler::process_completions()
         else
         {
             auto* iop = static_cast<io_uring_op*>(ud);
-            (*iop->cqe_func)(iop, cqe->res, cqe->flags);
+            (*iop->cqe_func)(iop, cqe->res, cqe->flags, local_ops);
         }
         ++consumed;
     }
 
     if (consumed)
         io_uring_cq_advance(&ring_, consumed);
+
+    // do_one holds dispatch_mutex_ only for the pop(), not during the
+    // wait. process_completions runs inside do_one after the wait, so
+    // the lock is not held here — take it briefly for the splice.
+    if (!local_ops.empty())
+    {
+        lock_type lock(dispatch_mutex_);
+        completed_ops_.splice(local_ops);
+    }
 }
 
 } // namespace boost::corosio::detail

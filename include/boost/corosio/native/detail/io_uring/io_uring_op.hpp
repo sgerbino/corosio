@@ -43,7 +43,11 @@ namespace boost::corosio::detail {
 struct io_uring_op : scheduler_op
 {
     /// CQE-side dispatcher type. Called once per completion event.
-    using cqe_func_type = void (*)(io_uring_op*, int res, unsigned flags) noexcept;
+    /// Pushes self into `local` rather than dispatching inline so
+    /// process_completions can splice the batch into completed_ops_
+    /// atomically and do_one dispatches one handler at a time.
+    using cqe_func_type =
+        void (*)(io_uring_op*, int res, unsigned flags, op_queue& local) noexcept;
 
     /// Stop-callback handler: requests cancellation of this op.
     struct canceller
