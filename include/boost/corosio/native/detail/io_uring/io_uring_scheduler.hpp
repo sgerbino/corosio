@@ -244,11 +244,15 @@ io_uring_scheduler::post(std::coroutine_handle<> h) const
     {
         std::coroutine_handle<> h_;
         explicit post_handler(std::coroutine_handle<> h) noexcept
-            : h_(h) {}
-        void operator()() override
+            : scheduler_op(&do_complete), h_(h) {}
+
+        static void do_complete(
+            void* /*owner*/, scheduler_op* base,
+            std::uint32_t /*bytes*/, std::uint32_t /*error*/) noexcept
         {
-            auto saved = h_;
-            delete this;
+            auto* self = static_cast<post_handler*>(base);
+            auto saved = self->h_;
+            delete self;
             std::atomic_thread_fence(std::memory_order_acquire);
             saved.resume();
         }
@@ -416,8 +420,8 @@ io_uring_scheduler::do_one(long timeout_us)
             return 0;
     }
 
-    // Execute one queued op outside the lock.
-    (*op)();
+    // Dispatch via func-pointer (proactor model — result already in op).
+    op->complete(this, 0, 0);
     return 1;
 }
 
