@@ -156,6 +156,8 @@ struct mocket_test
 
 TEST_SUITE(mocket_test, "boost.corosio.mocket");
 
+// io_uring acceptor is not yet implemented (Task 18); exclude until then.
+#if !BOOST_COROSIO_HAS_IO_URING
 template<auto Backend>
 struct native_mocket_test
 {
@@ -203,5 +205,6 @@ struct native_mocket_test
 };
 
 COROSIO_BACKEND_TESTS(native_mocket_test, "boost.corosio.mocket.native");
+#endif // !BOOST_COROSIO_HAS_IO_URING
 
 } // namespace boost::corosio::test
