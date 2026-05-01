@@ -115,16 +115,17 @@ struct uring_read_op : io_uring_op
     }
 };
 
-/** Write via `IORING_OP_SENDMSG` with `MSG_NOSIGNAL`.
+/** Scatter-gather write via `IORING_OP_SENDMSG` with `MSG_NOSIGNAL`.
 
     `MSG_NOSIGNAL` prevents `SIGPIPE` when the peer has closed the
     connection; the error is surfaced as `EPIPE` instead.
 */
 struct uring_write_op : io_uring_op
 {
+    iovec  iovecs[io_uring_max_iov];
+    int    iovec_count = 0;
+    int    fd          = -1;
     msghdr msg{};
-    iovec  iov{};
-    int    fd = -1;
 
     uring_write_op() noexcept
         : io_uring_op(&do_handler, &do_cqe)
@@ -171,12 +172,16 @@ struct uring_write_op : io_uring_op
 /** Non-blocking connect via `IORING_OP_CONNECT`.
 
     Negative `res` is the connect error; zero means success.
+    `remote_endpoint_out` is written only on success so a failed
+    connect does not corrupt the socket's cached remote endpoint.
 */
 struct uring_connect_op : io_uring_op
 {
     sockaddr_storage addr{};
-    socklen_t        addrlen = 0;
-    int              fd      = -1;
+    socklen_t        addrlen            = 0;
+    int              fd                 = -1;
+    endpoint         target_endpoint{};
+    endpoint*        remote_endpoint_out = nullptr;
 
     uring_connect_op() noexcept
         : io_uring_op(&do_handler, &do_cqe)
@@ -208,6 +213,10 @@ struct uring_connect_op : io_uring_op
         }
 
         uring_set_result(self, false, false);
+
+        // Write remote endpoint only on success.
+        if (self->res >= 0 && self->remote_endpoint_out)
+            *self->remote_endpoint_out = self->target_endpoint;
 
         self->cont_op.cont.h = self->h;
         auto next = dispatch_coro(self->ex, self->cont_op.cont);

@@ -57,6 +57,7 @@ class BOOST_COROSIO_DECL io_uring_tcp_socket final
     io_uring_scheduler*   sched_ = nullptr;  // set by service at construction
     io_uring_tcp_service* svc_   = nullptr;
 
+    // TODO(task13): populate via getsockname after open/bind/connect.
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
 
@@ -95,7 +96,8 @@ public:
         std::error_code*        ec,
         std::size_t*            bytes) override
     {
-        auto* op = new uring_read_op();
+        auto op_guard = std::make_unique<uring_read_op>();
+        auto* op = op_guard.get();
         op->h         = h;
         op->ex        = ex;
         op->ec_out    = ec;
@@ -111,6 +113,8 @@ public:
                 io_uring_max_iov));
         op->empty_buffer = (op->iovec_count == 0);
 
+        // start() may throw (stop_callback ctor allocates); unique_ptr
+        // cleans up if it does.
         op->start(token);
         sched_->work_started();
 
@@ -119,11 +123,11 @@ public:
             // Zero-length read: complete immediately with res=0.
             // push_completed_locked requires the dispatch lock.
             io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
-            sched_->push_completed_locked(op);
+            sched_->push_completed_locked(op_guard.release());
             return std::noop_coroutine();
         }
 
-        io_uring_submit_op(*sched_, op, [op](::io_uring_sqe* sqe) {
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
             ::io_uring_prep_readv(sqe, op->fd, op->iovecs, op->iovec_count, 0);
         });
         return std::noop_coroutine();
@@ -137,7 +141,8 @@ public:
         std::error_code*        ec,
         std::size_t*            bytes) override
     {
-        auto* op = new uring_write_op();
+        auto op_guard = std::make_unique<uring_write_op>();
+        auto* op = op_guard.get();
         op->h         = h;
         op->ex        = ex;
         op->ec_out    = ec;
@@ -145,29 +150,32 @@ public:
         op->fd        = fd_;
         op->impl_ptr  = shared_from_this();
 
-        capy::mutable_buffer buf{};
-        std::size_t count = buffers.copy_to(&buf, 1);
-        op->empty_buffer  = (count == 0);
+        op->iovec_count = static_cast<int>(
+            buffers.copy_to(
+                reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
+                io_uring_max_iov));
+        op->empty_buffer = (op->iovec_count == 0);
 
         if (!op->empty_buffer)
         {
-            op->iov.iov_base = buf.data();
-            op->iov.iov_len  = buf.size();
-            op->msg.msg_iov  = &op->iov;
-            op->msg.msg_iovlen = 1;
+            op->msg.msg_iov    = op->iovecs;
+            op->msg.msg_iovlen = static_cast<decltype(op->msg.msg_iovlen)>(
+                op->iovec_count);
         }
 
+        // start() may throw (stop_callback ctor allocates); unique_ptr
+        // cleans up if it does.
         op->start(token);
         sched_->work_started();
 
         if (op->empty_buffer)
         {
             io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
-            sched_->push_completed_locked(op);
+            sched_->push_completed_locked(op_guard.release());
             return std::noop_coroutine();
         }
 
-        io_uring_submit_op(*sched_, op, [op](::io_uring_sqe* sqe) {
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
             ::io_uring_prep_sendmsg(sqe, op->fd, &op->msg, MSG_NOSIGNAL);
         });
         return std::noop_coroutine();
@@ -184,23 +192,23 @@ public:
         std::stop_token         token,
         std::error_code*        ec) override
     {
-        auto* op = new uring_connect_op();
-        op->h        = h;
-        op->ex       = ex;
-        op->ec_out   = ec;
-        op->fd       = fd_;
-        op->impl_ptr = shared_from_this();
-        op->addrlen  = endpoint_to_sockaddr(ep, op->addr);
+        auto op_guard = std::make_unique<uring_connect_op>();
+        auto* op = op_guard.get();
+        op->h                   = h;
+        op->ex                  = ex;
+        op->ec_out              = ec;
+        op->fd                  = fd_;
+        op->impl_ptr            = shared_from_this();
+        op->addrlen             = endpoint_to_sockaddr(ep, op->addr);
+        op->target_endpoint     = ep;
+        op->remote_endpoint_out = &remote_endpoint_;
 
-        // Store for endpoint caching on success (do_handler doesn't have
-        // access to `ep`, so we rely on post-connect getsockname in the
-        // service's open_socket path — endpoint set here for the remote side).
-        remote_endpoint_ = ep;
-
+        // start() may throw (stop_callback ctor allocates); unique_ptr
+        // cleans up if it does.
         op->start(token);
         sched_->work_started();
 
-        io_uring_submit_op(*sched_, op, [op](::io_uring_sqe* sqe) {
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
             ::io_uring_prep_connect(
                 sqe, op->fd,
                 reinterpret_cast<sockaddr const*>(&op->addr),
