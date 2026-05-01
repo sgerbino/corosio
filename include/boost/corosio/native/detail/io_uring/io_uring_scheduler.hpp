@@ -90,6 +90,30 @@ public:
     /// Return the dispatch mutex for SQE acquisition.
     mutex_type& dispatch_mutex() const noexcept { return dispatch_mutex_; }
 
+    /** Submit `IORING_OP_ASYNC_CANCEL` targeting an in-flight op by its
+        user_data pointer.
+
+        The kernel delivers `-ECANCELED` on the target's CQE if it was
+        still in flight; the op's completion handler then reports
+        `operation_aborted`.  Best-effort: if the SQ is full after one
+        flush attempt the function returns without cancelling (the op
+        will complete normally on its own).
+
+        @param target The in-flight op to cancel.
+    */
+    void submit_cancel_by_user_data(io_uring_op* target) noexcept;
+
+    /** Submit `IORING_OP_ASYNC_CANCEL` with `IORING_ASYNC_CANCEL_FD`
+        to cancel every in-flight op on the given fd in one SQE.
+
+        Best-effort: if the SQ is full after one flush attempt the
+        function returns without cancelling.
+
+        @param fd The file descriptor whose in-flight ops should be
+            cancelled.
+    */
+    void submit_cancel_by_fd(int fd) noexcept;
+
     /** Queue an already-counted op while the caller holds dispatch_mutex_.
 
         Does NOT increment `outstanding_work_`. Use for synchronous
@@ -496,6 +520,40 @@ io_uring_scheduler::process_completions()
         lock_type lock(dispatch_mutex_);
         completed_ops_.splice(local_ops);
     }
+}
+
+inline void
+io_uring_scheduler::submit_cancel_by_user_data(io_uring_op* target) noexcept
+{
+    lock_type lock(dispatch_mutex_);
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe)
+    {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
+    if (!sqe)
+        return;  // best-effort: op completes on its own if SQ is full
+
+    io_uring_prep_cancel(sqe, target, 0);
+    io_uring_sqe_set_data(sqe, &cancel_sentinel_);
+}
+
+inline void
+io_uring_scheduler::submit_cancel_by_fd(int fd) noexcept
+{
+    lock_type lock(dispatch_mutex_);
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe)
+    {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
+    if (!sqe)
+        return;  // best-effort: ops complete on their own if SQ is full
+
+    io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
+    io_uring_sqe_set_data(sqe, &cancel_sentinel_);
 }
 
 } // namespace boost::corosio::detail

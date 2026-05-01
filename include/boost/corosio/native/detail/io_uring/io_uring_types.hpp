@@ -235,7 +235,8 @@ public:
 
     void cancel() noexcept override
     {
-        // TODO(task14): submit cancel-by-fd via io_uring_prep_cancel_fd
+        if (fd_ >= 0)
+            sched_->submit_cancel_by_fd(fd_);
     }
 
     std::error_code set_option(
@@ -369,11 +370,11 @@ public:
             family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
         if (fd < 0)
             return make_err(errno);
-        // TODO(task14): cancel in-flight ops before re-opening; once cancel()
-        // is wired (Task 14), this path must drain pending ops referencing
-        // the old fd before close() to avoid dangling op pointers.
         if (sock.fd_ >= 0)
+        {
+            sched_->submit_cancel_by_fd(sock.fd_);
             ::close(sock.fd_);
+        }
         sock.fd_ = fd;
         return {};
     }
