@@ -42,6 +42,10 @@
 #include <boost/corosio/native/detail/iocp/win_random_access_file_service.hpp>
 #endif
 
+#if BOOST_COROSIO_HAS_IO_URING
+#include <atomic>
+#endif
+
 namespace boost::corosio {
 
 #if BOOST_COROSIO_HAS_EPOLL
@@ -120,7 +124,45 @@ iocp_t::construct(capy::execution_context& ctx, unsigned concurrency_hint)
 }
 #endif
 
+#if BOOST_COROSIO_HAS_IO_URING
+detail::scheduler&
+io_uring_t::construct(capy::execution_context& ctx, unsigned concurrency_hint)
+{
+    auto& sched = ctx.make_service<detail::io_uring_scheduler>(
+        static_cast<int>(concurrency_hint));
+
+    // Socket / acceptor / file services land in later tasks.
+    return sched;
+}
+#endif
+
 namespace {
+
+#if BOOST_COROSIO_HAS_IO_URING
+// One-time probe of io_uring availability. Runs through liburing rather
+// than the raw syscall so seccomp / sysctl / AppArmor failures surface
+// as init errors rather than mid-op crashes.
+//
+// -1 = unprobed; 0 = unsupported; 1 = supported.
+bool io_uring_supported() noexcept
+{
+    static std::atomic<int> state{-1};
+    int s = state.load(std::memory_order_acquire);
+    if (s != -1)
+        return s == 1;
+
+    struct ::io_uring ring{};
+    int rc = ::io_uring_queue_init(2, &ring, 0);
+    if (rc == 0)
+    {
+        ::io_uring_queue_exit(&ring);
+        state.store(1, std::memory_order_release);
+        return true;
+    }
+    state.store(0, std::memory_order_release);
+    return false;
+}
+#endif
 
 // Pre-create services that must exist before construct() runs.
 void
@@ -178,6 +220,10 @@ construct_default(capy::execution_context& ctx, unsigned concurrency_hint)
 {
 #if BOOST_COROSIO_HAS_IOCP
     return iocp_t::construct(ctx, concurrency_hint);
+#elif BOOST_COROSIO_HAS_IO_URING
+    if (io_uring_supported())
+        return io_uring_t::construct(ctx, concurrency_hint);
+    return epoll_t::construct(ctx, concurrency_hint);
 #elif BOOST_COROSIO_HAS_EPOLL
     return epoll_t::construct(ctx, concurrency_hint);
 #elif BOOST_COROSIO_HAS_KQUEUE
