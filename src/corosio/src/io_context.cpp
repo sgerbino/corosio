@@ -42,10 +42,6 @@
 #include <boost/corosio/native/detail/iocp/win_random_access_file_service.hpp>
 #endif
 
-#if BOOST_COROSIO_HAS_IO_URING
-#include <atomic>
-#endif
-
 namespace boost::corosio {
 
 #if BOOST_COROSIO_HAS_EPOLL
@@ -202,6 +198,15 @@ apply_scheduler_options(
         opts.unassisted_budget);
     if (opts.single_threaded)
         reactor.configure_single_threaded(true);
+#endif
+
+#if BOOST_COROSIO_HAS_IO_URING
+    if (auto* uring_sched =
+            dynamic_cast<detail::io_uring_scheduler*>(&sched))
+    {
+        if (opts.single_threaded)
+            uring_sched->configure_single_threaded(true);
+    }
 #endif
 
 #if BOOST_COROSIO_HAS_IOCP
