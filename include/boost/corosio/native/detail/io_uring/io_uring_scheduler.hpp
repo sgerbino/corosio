@@ -14,6 +14,10 @@
 
 #if BOOST_COROSIO_HAS_IO_URING
 
+// Include before any project headers open a namespace — prevents the
+// boost::corosio::io_uring tag variable from shadowing struct ::io_uring.
+#include <liburing.h>
+
 #include <boost/corosio/detail/conditionally_enabled_mutex.hpp>
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/except.hpp>
@@ -27,7 +31,6 @@
 #include <boost/capy/ex/execution_context.hpp>
 
 #include <atomic>
-#include <chrono>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -36,8 +39,6 @@
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
-
-#include <liburing.h>
 
 namespace boost::corosio::detail {
 
