@@ -28,6 +28,7 @@
 #endif
 
 #if BOOST_COROSIO_HAS_IO_URING
+#include <boost/corosio/native/detail/io_uring/io_uring_buffer.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
 #endif
 
