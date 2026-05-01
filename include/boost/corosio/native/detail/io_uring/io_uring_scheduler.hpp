@@ -35,6 +35,7 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include <errno.h>
 #include <poll.h>
@@ -156,15 +157,12 @@ io_uring_scheduler::io_uring_scheduler(
         detail::throw_system_error(make_err(-submit_rc), "io_uring_submit (wakeup)");
     }
 
-    // Wire timer service. on_earliest_changed writes the wakeup eventfd
-    // so the run loop recomputes its wait timeout.
+    // Wire timer service. on_earliest_changed wakes the run loop so it
+    // recomputes its wait timeout.
     timer_svc_ = &get_timer_service(ctx, *this);
     timer_svc_->set_on_earliest_changed(
         timer_service::callback(this, [](void* p) {
-            auto* self = static_cast<io_uring_scheduler*>(p);
-            std::uint64_t v = 1;
-            [[maybe_unused]] auto r =
-                ::write(self->wakeup_eventfd_, &v, sizeof(v));
+            static_cast<io_uring_scheduler*>(p)->interrupt_reactor();
         }));
 
     get_resolver_service(ctx, *this);
@@ -247,12 +245,18 @@ io_uring_scheduler::post(std::coroutine_handle<> h) const
             : scheduler_op(&do_complete), h_(h) {}
 
         static void do_complete(
-            void* /*owner*/, scheduler_op* base,
+            void* owner, scheduler_op* base,
             std::uint32_t /*bytes*/, std::uint32_t /*error*/) noexcept
         {
             auto* self = static_cast<post_handler*>(base);
             auto saved = self->h_;
             delete self;
+            if (owner == nullptr)
+            {
+                // Shutdown / destroy mode — coroutine never resumes.
+                saved.destroy();
+                return;
+            }
             std::atomic_thread_fence(std::memory_order_acquire);
             saved.resume();
         }
@@ -294,11 +298,22 @@ io_uring_scheduler::run()
         stop();
         return 0;
     }
+
     std::size_t n = 0;
-    while (do_one(-1))
+    for (;;)
     {
-        if (n != static_cast<std::size_t>(-1))
-            ++n;
+        std::size_t r = do_one(-1);
+        if (r)
+        {
+            if (n != (std::numeric_limits<std::size_t>::max)())
+                ++n;
+            continue;
+        }
+        if (outstanding_work_.load(std::memory_order_acquire) == 0 ||
+            stopped_.load(std::memory_order_acquire))
+            break;
+        // do_one returned 0 but work still outstanding (e.g. timer
+        // expiry dispatched async work). Continue.
     }
     return n;
 }
@@ -336,7 +351,7 @@ io_uring_scheduler::poll()
     std::size_t n = 0;
     while (do_one(0))
     {
-        if (n != static_cast<std::size_t>(-1))
+        if (n != (std::numeric_limits<std::size_t>::max)())
             ++n;
     }
     return n;
