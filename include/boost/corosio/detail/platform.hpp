@@ -24,6 +24,7 @@
 #define BOOST_COROSIO_HAS_EPOLL 1
 #define BOOST_COROSIO_HAS_KQUEUE 1
 #define BOOST_COROSIO_HAS_SELECT 1
+#define BOOST_COROSIO_HAS_IO_URING 1
 #define BOOST_COROSIO_POSIX 1
 
 #else // !BOOST_COROSIO_MRDOCS
@@ -55,6 +56,13 @@
 #define BOOST_COROSIO_HAS_SELECT 1
 #else
 #define BOOST_COROSIO_HAS_SELECT 0
+#endif
+
+// io_uring - Linux 6.x+ proactor (requires liburing 2.5+ at build time)
+#if defined(__linux__) && BOOST_COROSIO_HAVE_LIBURING
+#define BOOST_COROSIO_HAS_IO_URING 1
+#else
+#define BOOST_COROSIO_HAS_IO_URING 0
 #endif
 
 // POSIX APIs (signals, resolver, etc.)
