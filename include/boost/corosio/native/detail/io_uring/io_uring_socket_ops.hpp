@@ -207,16 +207,7 @@ struct uring_connect_op : io_uring_op
             return;
         }
 
-        // Connect has no byte count; res < 0 is the error, 0 is success.
-        if (self->ec_out)
-        {
-            if (self->cancelled.load(std::memory_order_acquire))
-                *self->ec_out = capy::error::canceled;
-            else if (self->res < 0)
-                *self->ec_out = make_err(-self->res);
-            else
-                *self->ec_out = {};
-        }
+        uring_set_result(self, false, false);
 
         self->cont_op.cont.h = self->h;
         auto next = dispatch_coro(self->ex, self->cont_op.cont);
@@ -230,7 +221,7 @@ struct uring_connect_op : io_uring_op
     Serialises SQE acquisition under `sched.dispatch_mutex()`. On
     transient SQE-ring exhaustion, flushes pending submissions and
     retries once. If no SQE is available after the flush, surfaces
-    `std::errc::resource_unavailable_try_again` on `*op->ec_out` and
+    `EAGAIN` on `*op->ec_out` and
     posts the op immediately (synchronous failure path — no CQE will
     arrive, but `do_one` still dispatches the handler).
 
@@ -260,8 +251,7 @@ io_uring_submit_op(
     if (!sqe)
     {
         if (op->ec_out)
-            *op->ec_out = std::make_error_code(
-                std::errc::resource_unavailable_try_again);
+            *op->ec_out = make_err(EAGAIN);
         // No CQE will arrive. Push under the lock we already hold without
         // incrementing outstanding_work_ — the caller's work_started()
         // already counted this op, matching the normal CQE dispatch path.
