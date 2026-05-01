@@ -129,7 +129,8 @@ io_uring_t::construct(capy::execution_context& ctx, unsigned concurrency_hint)
     auto& sched = ctx.make_service<detail::io_uring_scheduler>(
         static_cast<int>(concurrency_hint));
 
-    // Socket / acceptor / file services land in later tasks.
+    ctx.make_service<detail::io_uring_tcp_service>();
+
     return sched;
 }
 #endif

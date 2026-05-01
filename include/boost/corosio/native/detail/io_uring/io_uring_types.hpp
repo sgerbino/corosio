@@ -19,9 +19,13 @@
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_socket_ops.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
+#include <boost/corosio/detail/tcp_service.hpp>
 #include <boost/corosio/tcp_socket.hpp>
 
 #include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -271,6 +275,167 @@ public:
     {
         return remote_endpoint_;
     }
+};
+
+/** TCP socket service for io_uring.
+
+    Owns all `io_uring_tcp_socket` implementations for an `io_context`.
+    Satisfies the `tcp_service` interface so the generic `tcp_socket`
+    front-end can call `open_socket` and `bind_socket` transparently.
+
+    Socket impls are reference-counted inside the service map; raw
+    pointers returned from `construct()` remain valid until `destroy()`
+    or `shutdown()` is called.
+
+    @par Thread Safety
+    All public member functions are thread-safe.
+*/
+class BOOST_COROSIO_DECL io_uring_tcp_service final
+    : public tcp_service
+{
+public:
+    /// Identifies this service for `execution_context` lookup.
+    using key_type = tcp_service;
+
+    /** Construct the TCP service.
+
+        @param ctx The owning execution context. The io_uring scheduler
+            must already be registered.
+    */
+    explicit io_uring_tcp_service(capy::execution_context& ctx)
+        : sched_(&ctx.use_service<io_uring_scheduler>())
+    {}
+
+    void shutdown() override
+    {
+        std::vector<std::shared_ptr<io_uring_tcp_socket>> live;
+        {
+            std::lock_guard lk(mutex_);
+            live.reserve(impls_.size());
+            for (auto& [_, p] : impls_)
+                live.push_back(p);
+        }
+        // Cancel without the lock held to avoid inversion if cancel()
+        // ever needs to re-enter the service.
+        for (auto& p : live)
+            p->cancel();
+    }
+
+    io_object::implementation* construct() override
+    {
+        auto p   = std::make_shared<io_uring_tcp_socket>(*this, *sched_);
+        auto* raw = p.get();
+        std::lock_guard lk(mutex_);
+        impls_.emplace(raw, std::move(p));
+        return raw;
+    }
+
+    void destroy(io_object::implementation* p) override
+    {
+        if (!p)
+            return;
+        std::lock_guard lk(mutex_);
+        impls_.erase(static_cast<io_uring_tcp_socket*>(p));
+    }
+
+    // Close the fd eagerly when tcp_socket::close() is called, before
+    // destroy() drops the shared_ptr and the destructor runs.
+    void close(io_object::handle& h) override
+    {
+        auto* sock = static_cast<io_uring_tcp_socket*>(h.get());
+        if (sock && sock->fd_ >= 0)
+        {
+            ::close(sock->fd_);
+            sock->fd_ = -1;
+        }
+    }
+
+    /** Open a socket fd and associate it with an impl.
+
+        Creates a non-blocking, close-on-exec socket via `socket(2)`.
+
+        @param impl   The socket implementation to initialise.
+        @param family Address family (e.g. `AF_INET`, `AF_INET6`).
+        @param type   Socket type (e.g. `SOCK_STREAM`).
+        @param protocol Protocol number (e.g. `IPPROTO_TCP`).
+        @return Error code on failure, empty on success.
+    */
+    std::error_code open_socket(
+        tcp_socket::implementation& impl,
+        int family, int type, int protocol) override
+    {
+        auto& sock = static_cast<io_uring_tcp_socket&>(impl);
+        int fd = ::socket(
+            family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
+        if (fd < 0)
+            return make_err(errno);
+        if (sock.fd_ >= 0)
+            ::close(sock.fd_);
+        sock.fd_ = fd;
+        return {};
+    }
+
+    /** Bind the socket and capture the local endpoint via `getsockname`.
+
+        @param impl The socket implementation to bind.
+        @param ep   The local endpoint to bind to.
+        @return Error code on failure, empty on success.
+    */
+    std::error_code bind_socket(
+        tcp_socket::implementation& impl, endpoint ep) override
+    {
+        auto& sock = static_cast<io_uring_tcp_socket&>(impl);
+        sockaddr_storage addr{};
+        socklen_t len = endpoint_to_sockaddr(ep, addr);
+        if (::bind(
+                sock.fd_,
+                reinterpret_cast<sockaddr*>(&addr), len) < 0)
+            return make_err(errno);
+
+        sockaddr_storage local{};
+        socklen_t local_len = sizeof(local);
+        if (::getsockname(
+                sock.fd_,
+                reinterpret_cast<sockaddr*>(&local), &local_len) == 0)
+            sock.local_endpoint_ = sockaddr_to_endpoint(local);
+        return {};
+    }
+
+    /** Wrap an already-accepted fd as a new socket impl.
+
+        Called by the acceptor service (Task 17) after `accept(2)`
+        returns a connected fd. Captures both endpoints via the provided
+        peer address and a `getsockname` call.
+
+        @param fd   Accepted file descriptor (must be non-blocking).
+        @param peer Peer endpoint from `accept(2)`.
+        @return Raw pointer to the registered impl.
+    */
+    io_uring_tcp_socket* adopt_fd(int fd, endpoint const& peer)
+    {
+        auto p = std::make_shared<io_uring_tcp_socket>(*this, *sched_);
+        p->fd_              = fd;
+        p->remote_endpoint_ = peer;
+
+        sockaddr_storage local{};
+        socklen_t len = sizeof(local);
+        if (::getsockname(fd, reinterpret_cast<sockaddr*>(&local), &len) == 0)
+            p->local_endpoint_ = sockaddr_to_endpoint(local);
+
+        std::lock_guard lk(mutex_);
+        auto* raw = p.get();
+        impls_.emplace(raw, std::move(p));
+        return raw;
+    }
+
+    /// Return the scheduler used by sockets created by this service.
+    io_uring_scheduler& scheduler() noexcept { return *sched_; }
+
+private:
+    io_uring_scheduler*  sched_;
+    std::mutex           mutex_;
+    std::unordered_map<io_uring_tcp_socket*,
+                       std::shared_ptr<io_uring_tcp_socket>> impls_;
 };
 
 } // namespace boost::corosio::detail
