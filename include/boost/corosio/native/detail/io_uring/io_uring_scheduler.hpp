@@ -139,7 +139,13 @@ io_uring_scheduler::io_uring_scheduler(
     }
     io_uring_prep_poll_multishot(sqe, wakeup_eventfd_, POLLIN);
     io_uring_sqe_set_data(sqe, nullptr);
-    io_uring_submit(&ring_);
+    int submit_rc = ::io_uring_submit(&ring_);
+    if (submit_rc < 0)
+    {
+        ::close(wakeup_eventfd_);
+        ::io_uring_queue_exit(&ring_);
+        detail::throw_system_error(make_err(-submit_rc), "io_uring_submit (wakeup)");
+    }
 
     // Wire timer service. on_earliest_changed writes the wakeup eventfd
     // so the run loop recomputes its wait timeout.
