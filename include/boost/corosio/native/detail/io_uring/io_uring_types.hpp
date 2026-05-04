@@ -1015,6 +1015,20 @@ public:
             acc->cancel();           // drain waiters
             ::close(acc->fd_);
             acc->fd_ = -1;
+
+            // Break the multi_op_ → impl_ptr (shared_ptr<this>) ref cycle
+            // start_multishot established. After this, drain pending CQEs
+            // so the kernel-side multishot's final !more (or any cancel
+            // completion) lands BEFORE multi_op_ is freed by ~acceptor's
+            // unique_ptr. Without the drain, process_completions reads
+            // cqe->user_data pointing at freed multi_op_ memory.
+            if (acc->multi_op_)
+            {
+                acc->multi_op_->impl_ptr.reset();
+                // Drain any kernel completions for the multishot so its
+                // CQE does not arrive after multi_op_ is destroyed.
+                while (sched_->poll() > 0) {}
+            }
         }
     }
 
