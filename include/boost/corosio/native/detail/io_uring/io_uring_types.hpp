@@ -19,6 +19,7 @@
 #include <boost/corosio/native/detail/io_uring/io_uring_buffer.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_op.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
+#include <boost/corosio/native/detail/io_uring/io_uring_multishot_acceptor.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_socket_ops.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
 #include <boost/corosio/detail/tcp_acceptor_service.hpp>
@@ -483,470 +484,57 @@ private:
                        std::shared_ptr<io_uring_tcp_socket>> impls_;
 };
 
-/** TCP acceptor implementation for the io_uring backend.
+/** TCP acceptor implementation for io_uring.
 
-    Uses IORING_OP_ACCEPT_MULTI: a single SQE submitted at `listen()`
-    produces a CQE per accepted connection. The kernel re-arms the
-    op automatically. Accepts are surfaced via two queues:
-
-    - `ready_fds_` — CQEs that arrived before any `async_accept`
-      was issued (parked).
-    - `waiters_` — `async_accept` calls that arrived before any
-      multishot CQE.
-
-    A CQE arriving with a waiter present pops the waiter and completes
-    it. A CQE with no waiter parks the fd. An `async_accept` with a
-    parked fd matches inline. Otherwise a waiter is queued.
-
-    On cancel/close, both queues drain: parked fds are closed and
-    waiters are completed with `operation_canceled`.
+    Inherits the multishot machinery (parked-fd queue, waiter queue,
+    CQE drain on destruction) from `io_uring_multishot_acceptor_base`.
+    This class adds only the `accept()` override (matching
+    `tcp_acceptor::implementation`'s exact signature) and the
+    `adopt_thunk` static that wraps an accepted fd via
+    `io_uring_tcp_service::adopt_fd`.
 */
 class BOOST_COROSIO_DECL io_uring_tcp_acceptor final
-    : public tcp_acceptor::implementation
-    , public std::enable_shared_from_this<io_uring_tcp_acceptor>
+    : public io_uring_multishot_acceptor_base<
+          io_uring_tcp_acceptor,
+          tcp_acceptor::implementation,
+          endpoint,
+          io_uring_tcp_service>
 {
     friend io_uring_tcp_acceptor_service;
-    friend io_uring_tcp_service;
 
-    // Parked node: kernel accepted but no waiter was queued yet.
-    struct ready_fd_node : intrusive_list<ready_fd_node>::node
-    {
-        int              fd       = -1;
-        sockaddr_storage peer{};
-        socklen_t        peer_len = 0;
-    };
-
-    // Waiter node: user called async_accept with no ready fd yet.
-    struct waiter_node : intrusive_list<waiter_node>::node
-    {
-        struct canceller
-        {
-            waiter_node* w;
-            void operator()() const noexcept;
-        };
-
-        std::coroutine_handle<>                        h;
-        capy::executor_ref                             ex;
-        std::error_code*                               ec_out            = nullptr;
-        io_object::implementation**                    impl_out          = nullptr;
-        endpoint*                                      peer_endpoint_out = nullptr;
-        io_uring_tcp_acceptor*                         owner             = nullptr;
-        std::optional<std::stop_callback<canceller>>   stop_cb;
-    };
-
-    int                                    fd_           = -1;
-    io_uring_scheduler*                    sched_        = nullptr;
-    io_uring_tcp_acceptor_service*         svc_          = nullptr;
-    io_uring_tcp_service*                  peer_service_ = nullptr;
-
-    endpoint                               local_endpoint_{};
-
-    std::mutex                             mutex_;
-    intrusive_list<ready_fd_node>          ready_fds_;
-    intrusive_list<waiter_node>            waiters_;
-    std::unique_ptr<uring_multi_accept_op> multi_op_;
-    bool                                   closing_ = false;
+    using base_type = io_uring_multishot_acceptor_base<
+        io_uring_tcp_acceptor,
+        tcp_acceptor::implementation,
+        endpoint,
+        io_uring_tcp_service>;
 
 public:
-    /** Construct with service and scheduler references.
-
-        @param svc       The owning acceptor service (Task 18).
-        @param sched     The io_uring scheduler.
-        @param peer_svc  The TCP socket service for wrapping accepted fds.
-    */
     explicit io_uring_tcp_acceptor(
-        io_uring_tcp_acceptor_service& svc,
-        io_uring_scheduler&            sched,
-        io_uring_tcp_service&          peer_svc) noexcept
-        : sched_(&sched)
-        , svc_(&svc)
-        , peer_service_(&peer_svc)
+        io_uring_tcp_acceptor_service&,
+        io_uring_scheduler&   sched,
+        io_uring_tcp_service& peer_svc) noexcept
+        : base_type(sched, peer_svc)
     {}
 
-    ~io_uring_tcp_acceptor() override;
-
-    // ----------------------------------------------------------------
-    // tcp_acceptor::implementation
-    // ----------------------------------------------------------------
-
     std::coroutine_handle<> accept(
-        std::coroutine_handle<>      h,
-        capy::executor_ref           ex,
-        std::stop_token              token,
-        std::error_code*             ec,
-        io_object::implementation**  impl_out) override;
-
-    endpoint local_endpoint() const noexcept override
+        std::coroutine_handle<>     h,
+        capy::executor_ref          ex,
+        std::stop_token             token,
+        std::error_code*            ec,
+        io_object::implementation** impl_out) override
     {
-        return local_endpoint_;
+        base_type::dispatch_or_queue(h, ex, std::move(token), ec, impl_out);
+        return std::noop_coroutine();
     }
 
-    bool is_open() const noexcept override
-    {
-        return fd_ >= 0;
-    }
-
-    void cancel() noexcept override;
-
-    std::error_code set_option(
-        int         level,
-        int         optname,
-        void const* data,
-        std::size_t size) noexcept override
-    {
-        if (::setsockopt(
-                fd_, level, optname,
-                reinterpret_cast<char const*>(data),
-                static_cast<socklen_t>(size)) != 0)
-            return make_err(errno);
-        return {};
-    }
-
-    std::error_code get_option(
-        int          level,
-        int          optname,
-        void*        data,
-        std::size_t* size) const noexcept override
-    {
-        socklen_t len = static_cast<socklen_t>(*size);
-        if (::getsockopt(fd_, level, optname,
-                reinterpret_cast<char*>(data), &len) != 0)
-            return make_err(errno);
-        *size = static_cast<std::size_t>(len);
-        return {};
-    }
-
-    // ----------------------------------------------------------------
-    // Internal — called by the acceptor service (Task 18)
-    // ----------------------------------------------------------------
-
-    /// Submit the multishot accept SQE. Called once after ::listen().
-    void start_multishot();
-
-private:
     static io_object::implementation* adopt_thunk(
-        void*                    peer_service,
-        int                      fd,
-        sockaddr_storage const&  peer,
-        socklen_t                peer_len) noexcept;
-
-    void on_accept_cqe_impl(int new_fd, int err, bool more) noexcept;
-
-    static void on_accept_cqe(
-        void* self_ptr, int new_fd, int err, bool more) noexcept
+        void* peer_service, int fd,
+        sockaddr_storage const& peer, socklen_t /*peer_len*/) noexcept
     {
-        static_cast<io_uring_tcp_acceptor*>(self_ptr)
-            ->on_accept_cqe_impl(new_fd, err, more);
+        auto* svc = static_cast<io_uring_tcp_service*>(peer_service);
+        return svc->adopt_fd(fd, sockaddr_to_endpoint(peer));
     }
-
-    // Cancel a specific waiter (called from its stop_callback).
-    void cancel_waiter(waiter_node* w) noexcept;
 };
-
-// ----------------------------------------------------------------
-// waiter_node::canceller
-// ----------------------------------------------------------------
-
-inline void
-io_uring_tcp_acceptor::waiter_node::canceller::operator()() const noexcept
-{
-    w->owner->cancel_waiter(w);
-}
-
-// ----------------------------------------------------------------
-// io_uring_tcp_acceptor out-of-line definitions
-// ----------------------------------------------------------------
-
-inline
-io_uring_tcp_acceptor::~io_uring_tcp_acceptor()
-{
-    {
-        std::lock_guard lk(mutex_);
-        closing_ = true;
-    }
-    if (fd_ >= 0)
-    {
-        sched_->submit_cancel_by_fd(fd_);
-        // Drain parked fds — no waiter will consume them now.
-        intrusive_list<ready_fd_node> drained;
-        {
-            std::lock_guard lk(mutex_);
-            while (auto* r = ready_fds_.pop_front())
-                drained.push_back(r);
-        }
-        while (auto* r = drained.pop_front())
-        {
-            ::close(r->fd);
-            delete r;
-        }
-        ::close(fd_);
-        fd_ = -1;
-    }
-
-    // Break the multi_op_ → impl_ptr (shared_ptr<this>) ref cycle and
-    // drain the kernel's pending CQEs for it before unique_ptr<>
-    // destructs the op. Without this, the kernel may return a -ECANCELED
-    // CQE referencing freed memory after this destructor runs.
-    if (multi_op_)
-    {
-        multi_op_->impl_ptr.reset();
-        sched_->drain_cqes_for(multi_op_.get());
-    }
-}
-
-inline void
-io_uring_tcp_acceptor::start_multishot()
-{
-    multi_op_ = std::make_unique<uring_multi_accept_op>();
-    multi_op_->listen_fd     = fd_;
-    multi_op_->acceptor_impl = this;
-    multi_op_->on_cqe        = &io_uring_tcp_acceptor::on_accept_cqe;
-    multi_op_->impl_ptr      = shared_from_this();  // keep alive in flight
-
-    auto* op = multi_op_.get();
-    io_uring_submit_op(*sched_, op, [this](::io_uring_sqe* sqe) {
-        ::io_uring_prep_multishot_accept(
-            sqe, fd_,
-            reinterpret_cast<sockaddr*>(&multi_op_->peer_storage),
-            &multi_op_->peer_len,
-            SOCK_NONBLOCK | SOCK_CLOEXEC);
-    });
-    // Deliberately no work_started(): the multishot SQE is a persistent
-    // internal mechanism. User-visible work is tracked per-accept call.
-}
-
-inline std::coroutine_handle<>
-io_uring_tcp_acceptor::accept(
-    std::coroutine_handle<>     h,
-    capy::executor_ref          ex,
-    std::stop_token             token,
-    std::error_code*            ec,
-    io_object::implementation** impl_out)
-{
-    uring_accept_op* ready_op = nullptr;
-    {
-        std::lock_guard lk(mutex_);
-
-        if (auto* r = ready_fds_.pop_front())
-        {
-            // A parked fd is available — build op under lock, post after.
-            ready_op              = new uring_accept_op();
-            ready_op->h           = h;
-            ready_op->ex          = ex;
-            ready_op->ec_out      = ec;
-            ready_op->impl_out    = impl_out;
-            ready_op->peer_service = peer_service_;
-            ready_op->adopt_fn    = &io_uring_tcp_acceptor::adopt_thunk;
-            ready_op->accepted_fd = r->fd;
-            ready_op->peer_storage = r->peer;
-            ready_op->peer_len    = r->peer_len;
-            delete r;
-        }
-        else
-        {
-            // No ready fd — queue a waiter.
-            auto* w          = new waiter_node{};
-            w->h             = h;
-            w->ex            = ex;
-            w->ec_out        = ec;
-            w->impl_out      = impl_out;
-            w->owner         = this;
-            if (token.stop_possible())
-                w->stop_cb.emplace(token, waiter_node::canceller{w});
-            sched_->work_started();
-            waiters_.push_back(w);
-        }
-    }
-
-    if (ready_op)
-        sched_->post(ready_op);
-
-    return std::noop_coroutine();
-}
-
-inline void
-io_uring_tcp_acceptor::cancel() noexcept
-{
-    intrusive_list<waiter_node> drained;
-    {
-        std::lock_guard lk(mutex_);
-        closing_ = true;
-        // Drain locally — the kernel cancel may not produce a !more CQE
-        // before the fd is closed, so we can't rely on on_accept_cqe_impl
-        // to surface operation_aborted to queued waiters.
-        while (auto* w = waiters_.pop_front())
-            drained.push_back(w);
-    }
-
-    if (fd_ >= 0)
-        sched_->submit_cancel_by_fd(fd_);
-
-    // Synthesize cancellation completions for the drained waiters.
-    while (auto* w = drained.pop_front())
-    {
-        auto* op = new uring_accept_op();
-        op->h        = w->h;
-        op->ex       = w->ex;
-        op->ec_out   = w->ec_out;
-        op->impl_out = w->impl_out;
-        op->cancelled.store(true, std::memory_order_release);
-        delete w;
-
-        // post() does outstanding_work_++; the run loop's work_finished
-        // after dispatch decrements. The waiter's own work_started (from
-        // accept()) is balanced here.
-        sched_->post(op);
-        sched_->work_finished();
-    }
-}
-
-inline void
-io_uring_tcp_acceptor::cancel_waiter(waiter_node* w) noexcept
-{
-    {
-        std::lock_guard lk(mutex_);
-        if (closing_)
-            return;  // on_accept_cqe_impl will drain with closing_ set
-        waiters_.remove(w);
-    }
-    auto* op      = new uring_accept_op();
-    op->h         = w->h;
-    op->ex        = w->ex;
-    op->ec_out    = w->ec_out;
-    op->impl_out  = w->impl_out;
-    op->cancelled.store(true, std::memory_order_release);
-    delete w;
-
-    // post() increments outstanding_work_; balances the work_started()
-    // from accept() when the waiter was queued.
-    sched_->post(op);
-    sched_->work_finished();  // balance the work_started() from accept()
-}
-
-inline void
-io_uring_tcp_acceptor::on_accept_cqe_impl(
-    int new_fd, int err, bool more) noexcept
-{
-    bool was_closing = false;
-    waiter_node* matched = nullptr;
-    intrusive_list<waiter_node> closing_waiters;
-
-    {
-        std::lock_guard lk(mutex_);
-        was_closing = closing_;
-        if (was_closing)
-        {
-            if (new_fd >= 0)
-                ::close(new_fd);
-            if (!more)
-            {
-                // Collect waiters to drain after the lock is released.
-                while (auto* w = waiters_.pop_front())
-                    closing_waiters.push_back(w);
-            }
-        }
-        else
-        {
-            if (!waiters_.empty())
-                matched = waiters_.pop_front();
-            else if (new_fd >= 0)
-            {
-                auto* node      = new ready_fd_node{};
-                node->fd        = new_fd;
-                node->peer      = multi_op_->peer_storage;
-                node->peer_len  = multi_op_->peer_len;
-                ready_fds_.push_back(node);
-            }
-        }
-    }
-
-    if (was_closing)
-    {
-        if (!more)
-        {
-            while (auto* w = closing_waiters.pop_front())
-            {
-                w->stop_cb.reset();
-                auto* op      = new uring_accept_op();
-                op->h         = w->h;
-                op->ex        = w->ex;
-                op->ec_out    = w->ec_out;
-                op->impl_out  = w->impl_out;
-                op->cancelled.store(true, std::memory_order_release);
-                delete w;
-                sched_->post(op);
-                sched_->work_finished();  // balance waiter's work_started
-            }
-        }
-        return;
-    }
-
-    if (matched)
-    {
-        matched->stop_cb.reset();
-        auto* op         = new uring_accept_op();
-        op->h            = matched->h;
-        op->ex           = matched->ex;
-        op->ec_out       = matched->ec_out;
-        op->impl_out     = matched->impl_out;
-        op->peer_service = peer_service_;
-        op->adopt_fn     = &io_uring_tcp_acceptor::adopt_thunk;
-        if (err)
-            op->err = err;
-        else
-        {
-            op->accepted_fd  = new_fd;
-            op->peer_storage = multi_op_->peer_storage;
-            op->peer_len     = multi_op_->peer_len;
-        }
-        delete matched;
-        sched_->post(op);
-        sched_->work_finished();  // balance waiter's work_started
-    }
-
-    if (!more)
-    {
-        // Kernel terminated multishot (e.g. -ENOMEM). Re-arm unless closing.
-        struct rearm_op final : scheduler_op
-        {
-            std::shared_ptr<io_uring_tcp_acceptor> self;
-            explicit rearm_op(
-                std::shared_ptr<io_uring_tcp_acceptor> s) noexcept
-                : scheduler_op(&do_fn)
-                , self(std::move(s))
-            {}
-            static void do_fn(
-                void*, scheduler_op* base,
-                std::uint32_t, std::uint32_t) noexcept
-            {
-                auto* r = static_cast<rearm_op*>(base);
-                auto  s = std::move(r->self);
-                delete r;
-                {
-                    std::lock_guard lk(s->mutex_);
-                    if (s->closing_)
-                        return;
-                }
-                s->start_multishot();
-            }
-            void operator()() override { complete(this, 0, 0); }
-            void destroy() override { delete this; }
-        };
-        if (!closing_)
-            sched_->post(new rearm_op(shared_from_this()));
-    }
-}
-
-inline io_object::implementation*
-io_uring_tcp_acceptor::adopt_thunk(
-    void*                    peer_service,
-    int                      fd,
-    sockaddr_storage const&  peer,
-    socklen_t                peer_len) noexcept
-{
-    auto* svc = static_cast<io_uring_tcp_service*>(peer_service);
-    return svc->adopt_fd(fd, sockaddr_to_endpoint(peer));
-}
 
 /** TCP acceptor service for io_uring.
 
