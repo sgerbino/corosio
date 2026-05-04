@@ -682,6 +682,16 @@ io_uring_tcp_acceptor::~io_uring_tcp_acceptor()
         ::close(fd_);
         fd_ = -1;
     }
+
+    // Break the multi_op_ → impl_ptr (shared_ptr<this>) ref cycle and
+    // drain the kernel's pending CQEs for it before unique_ptr<>
+    // destructs the op. Without this, the kernel may return a -ECANCELED
+    // CQE referencing freed memory after this destructor runs.
+    if (multi_op_)
+    {
+        multi_op_->impl_ptr.reset();
+        sched_->drain_cqes_for(multi_op_.get());
+    }
 }
 
 inline void

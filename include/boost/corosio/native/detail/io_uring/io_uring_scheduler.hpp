@@ -26,8 +26,10 @@
 #include <boost/corosio/detail/timer_service.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_op.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
+#include <boost/corosio/native/detail/posix/posix_random_access_file_service.hpp>
 #include <boost/corosio/native/detail/posix/posix_resolver_service.hpp>
 #include <boost/corosio/native/detail/posix/posix_signal_service.hpp>
+#include <boost/corosio/native/detail/posix/posix_stream_file_service.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
 #include <atomic>
@@ -129,6 +131,20 @@ public:
     */
     void cancel_and_flush(int fd) noexcept;
 
+    /** Drain pending CQEs for a specific op's `user_data`.
+
+        Reads the kernel's CQ ring and invokes the op's destroy hook
+        for any CQE matching `target`. Used by member-owned ops
+        (e.g. `uring_multi_accept_op`) that must not be freed while
+        the kernel still has CQEs queued for them.
+
+        @pre Caller is on the io_context's run thread or holds an
+        external guarantee against concurrent run-loop access.
+
+        @param target The op pointer used as user_data on the SQE.
+    */
+    void drain_cqes_for(io_uring_op* target) noexcept;
+
     /** Queue an already-counted op while the caller holds dispatch_mutex_.
 
         Does NOT increment `outstanding_work_`. Use for synchronous
@@ -219,6 +235,8 @@ io_uring_scheduler::io_uring_scheduler(
 
     get_resolver_service(ctx, *this);
     get_signal_service(ctx, *this);
+    get_stream_file_service(ctx, *this);
+    get_random_access_file_service(ctx, *this);
 }
 
 inline
@@ -350,12 +368,26 @@ io_uring_scheduler::post(scheduler_op* op) const
     interrupt_reactor();
 }
 
+// thread_local pointer to the scheduler whose run-loop is on the
+// current thread's stack. nullptr if the thread isn't inside any
+// io_uring scheduler's run/run_one/poll/do_one.
+inline thread_local io_uring_scheduler const* tl_running_scheduler = nullptr;
+
+struct io_uring_run_guard
+{
+    io_uring_scheduler const* prev_;
+    explicit io_uring_run_guard(io_uring_scheduler const* self) noexcept
+        : prev_(tl_running_scheduler)
+    {
+        tl_running_scheduler = self;
+    }
+    ~io_uring_run_guard() noexcept { tl_running_scheduler = prev_; }
+};
+
 inline bool
 io_uring_scheduler::running_in_this_thread() const noexcept
 {
-    // v1: simple stub. A thread_local-based check is plan-4 territory;
-    // returning false is safe — executor falls back to post(), always correct.
-    return false;
+    return tl_running_scheduler == this;
 }
 
 inline std::size_t
@@ -367,6 +399,7 @@ io_uring_scheduler::run()
         return 0;
     }
 
+    io_uring_run_guard guard(this);
     std::size_t n = 0;
     for (;;)
     {
@@ -394,6 +427,7 @@ io_uring_scheduler::run_one()
         stop();
         return 0;
     }
+    io_uring_run_guard guard(this);
     return do_one(-1);
 }
 
@@ -405,6 +439,7 @@ io_uring_scheduler::wait_one(long usec)
         stop();
         return 0;
     }
+    io_uring_run_guard guard(this);
     return do_one(usec);
 }
 
@@ -416,6 +451,7 @@ io_uring_scheduler::poll()
         stop();
         return 0;
     }
+    io_uring_run_guard guard(this);
     std::size_t n = 0;
     while (do_one(0))
     {
@@ -433,6 +469,7 @@ io_uring_scheduler::poll_one()
         stop();
         return 0;
     }
+    io_uring_run_guard guard(this);
     return do_one(0);
 }
 
@@ -620,6 +657,74 @@ io_uring_scheduler::cancel_and_flush(int fd) noexcept
     // Flush while fd is still open so the kernel resolves the file
     // from the fd number before the caller closes and recycles it.
     io_uring_submit(&ring_);
+}
+
+inline void
+io_uring_scheduler::drain_cqes_for(io_uring_op* target) noexcept
+{
+    // Submit a cancel by user_data so the kernel returns CQEs for
+    // the target promptly, then iterate the CQ ring and consume
+    // every CQE that matches `target` (or the kernel's own ETIME
+    // for short-circuited multishot terminations).
+    {
+        lock_type lock(dispatch_mutex_);
+        if (auto* sqe = io_uring_get_sqe(&ring_))
+        {
+            io_uring_prep_cancel(sqe, target, 0);
+            io_uring_sqe_set_data(sqe, &cancel_sentinel_);
+        }
+        io_uring_submit(&ring_);
+    }
+
+    // Loop a few rounds: cancel SQE submission, then drain CQEs.
+    // Bounded loop avoids stalls if the kernel never returns a
+    // cancel completion — best-effort.
+    for (int rounds = 0; rounds < 8; ++rounds)
+    {
+        unsigned        head;
+        ::io_uring_cqe* cqe;
+        unsigned        consumed = 0;
+        bool            saw_target = false;
+
+        io_uring_for_each_cqe(&ring_, head, cqe)
+        {
+            void* ud = io_uring_cqe_get_data(cqe);
+            if (ud == target)
+            {
+                saw_target = true;
+                // Don't dispatch — caller is destructing target;
+                // just consume so the CQE doesn't dangle.
+            }
+            else if (ud != nullptr && ud != &cancel_sentinel_)
+            {
+                // Non-target CQE: dispatch normally so its op
+                // gets cleaned up rather than being lost.
+                auto* op = static_cast<io_uring_op*>(ud);
+                op_queue local;
+                (*op->cqe_func)(op, cqe->res, cqe->flags, local);
+                lock_type lock(dispatch_mutex_);
+                completed_ops_.splice(local);
+            }
+            ++consumed;
+        }
+        if (consumed)
+        {
+            io_uring_cq_advance(&ring_, consumed);
+            if (saw_target)
+                break;
+            continue;
+        }
+
+        // Nothing in the CQ — kick the kernel briefly.
+        __kernel_timespec ts{0, 1'000'000};  // 1ms
+        ::io_uring_cqe* one = nullptr;
+        int rc = ::io_uring_submit_and_wait_timeout(
+            &ring_, &one, 1, &ts, nullptr);
+        if (rc < 0 && rc != -ETIME && rc != -EINTR)
+            break;
+        if (rc == -ETIME)
+            break;
+    }
 }
 
 } // namespace boost::corosio::detail
