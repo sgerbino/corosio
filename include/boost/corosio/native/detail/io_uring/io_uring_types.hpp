@@ -21,6 +21,7 @@
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_socket_ops.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
+#include <boost/corosio/detail/tcp_acceptor_service.hpp>
 #include <boost/corosio/detail/tcp_service.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
@@ -722,12 +723,37 @@ io_uring_tcp_acceptor::accept(
 inline void
 io_uring_tcp_acceptor::cancel() noexcept
 {
+    intrusive_list<waiter_node> drained;
     {
         std::lock_guard lk(mutex_);
         closing_ = true;
+        // Drain locally — the kernel cancel may not produce a !more CQE
+        // before the fd is closed, so we can't rely on on_accept_cqe_impl
+        // to surface operation_aborted to queued waiters.
+        while (auto* w = waiters_.pop_front())
+            drained.push_back(w);
     }
+
     if (fd_ >= 0)
         sched_->submit_cancel_by_fd(fd_);
+
+    // Synthesize cancellation completions for the drained waiters.
+    while (auto* w = drained.pop_front())
+    {
+        auto* op = new uring_accept_op();
+        op->h        = w->h;
+        op->ex       = w->ex;
+        op->ec_out   = w->ec_out;
+        op->impl_out = w->impl_out;
+        op->cancelled.store(true, std::memory_order_release);
+        delete w;
+
+        // post() does outstanding_work_++; the run loop's work_finished
+        // after dispatch decrements. The waiter's own work_started (from
+        // accept()) is balanced here.
+        sched_->post(op);
+        sched_->work_finished();
+    }
 }
 
 inline void
@@ -946,12 +972,17 @@ public:
         impls_.erase(static_cast<io_uring_tcp_acceptor*>(p));
     }
 
-    // Close the fd eagerly when tcp_acceptor::close() is called.
+    // Close the fd eagerly when tcp_acceptor::close() is called, before
+    // destroy() drops the shared_ptr and the destructor runs.
     void close(io_object::handle& h) override
     {
         auto* acc = static_cast<io_uring_tcp_acceptor*>(h.get());
-        if (acc)
-            acc->cancel();
+        if (acc && acc->fd_ >= 0)
+        {
+            acc->cancel();           // cancel multishot + drain queues
+            ::close(acc->fd_);
+            acc->fd_ = -1;
+        }
     }
 
     /** Create a non-blocking, close-on-exec socket for accepting.
