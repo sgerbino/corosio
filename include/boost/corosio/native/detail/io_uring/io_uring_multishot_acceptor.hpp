@@ -219,35 +219,42 @@ public:
         std::error_code*            ec,
         io_object::implementation** impl_out)
     {
-        std::lock_guard lk(mutex_);
-        if (auto* r = ready_fds_.pop_front())
+        uring_accept_op* ready_op = nullptr;
         {
-            auto* op = new uring_accept_op();
-            op->h                   = h;
-            op->ex                  = ex;
-            op->ec_out              = ec;
-            op->impl_out            = impl_out;
-            op->peer_service        = peer_service_;
-            op->adopt_fn            = &Derived::adopt_thunk;
-            op->accepted_fd         = r->fd;
-            op->peer_storage        = r->peer;
-            op->peer_len            = r->peer_len;
-            delete r;
-            sched_->post(op);
-            return true;
+            std::lock_guard lk(mutex_);
+            if (auto* r = ready_fds_.pop_front())
+            {
+                ready_op = new uring_accept_op();
+                ready_op->h            = h;
+                ready_op->ex           = ex;
+                ready_op->ec_out       = ec;
+                ready_op->impl_out     = impl_out;
+                ready_op->peer_service = peer_service_;
+                ready_op->adopt_fn     = &Derived::adopt_thunk;
+                ready_op->accepted_fd  = r->fd;
+                ready_op->peer_storage = r->peer;
+                ready_op->peer_len     = r->peer_len;
+                delete r;
+            }
+            else
+            {
+                auto* w = new waiter_node{};
+                w->h        = h;
+                w->ex       = ex;
+                w->ec_out   = ec;
+                w->impl_out = impl_out;
+                w->owner    = static_cast<Derived*>(this);
+                if (token.stop_possible())
+                    w->stop_cb.emplace(token, waiter_canceller{w});
+                sched_->work_started();
+                waiters_.push_back(w);
+                return false;
+            }
         }
-
-        auto* w = new waiter_node{};
-        w->h        = h;
-        w->ex       = ex;
-        w->ec_out   = ec;
-        w->impl_out = impl_out;
-        w->owner    = static_cast<Derived*>(this);
-        if (token.stop_possible())
-            w->stop_cb.emplace(token, waiter_canceller{w});
-        sched_->work_started();
-        waiters_.push_back(w);
-        return false;
+        // Post outside the lock — acceptor mutex_ must never be held while
+        // dispatch_mutex_ is acquired by sched_->post().
+        sched_->post(ready_op);
+        return true;
     }
 
     void cancel_waiter(waiter_node* w) noexcept
