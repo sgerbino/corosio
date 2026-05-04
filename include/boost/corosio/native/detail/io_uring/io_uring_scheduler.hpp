@@ -237,6 +237,13 @@ io_uring_scheduler::shutdown()
     // Drain posted ops, calling destroy() on each so embedded handles
     // (coroutine frames, error_code outputs) get torn down rather than
     // leaked. Mirrors reactor_scheduler::shutdown_drain.
+    //
+    // Note: in-flight kernel ops are NOT drained here. Each socket /
+    // acceptor service's shutdown() submits cancel-by-fd and runs a
+    // poll() loop to drain its own ring traffic before this scheduler
+    // shutdown runs. ASan still flags some socket-side leaks that
+    // follow the same impl_ptr cycle pattern fixed for the acceptor;
+    // these are tracked as plan-2-blocker debt (review.md, Critical 2).
     lock_type lock(dispatch_mutex_);
     while (auto* op = completed_ops_.pop())
     {

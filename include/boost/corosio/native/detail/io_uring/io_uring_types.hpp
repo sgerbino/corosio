@@ -1017,18 +1017,17 @@ public:
             acc->fd_ = -1;
 
             // Break the multi_op_ → impl_ptr (shared_ptr<this>) ref cycle
-            // start_multishot established. After this, drain pending CQEs
-            // so the kernel-side multishot's final !more (or any cancel
-            // completion) lands BEFORE multi_op_ is freed by ~acceptor's
-            // unique_ptr. Without the drain, process_completions reads
-            // cqe->user_data pointing at freed multi_op_ memory.
+            // start_multishot established. The cancel_and_flush above has
+            // submitted the cancel SQE and the fd is closed, so further
+            // multishot CQEs would carry the cancel result; we let the
+            // run loop drain them on the next ioc.run() iteration.
+            //
+            // Known limitation: if the user destroys the io_context
+            // immediately after close() without an intervening run()
+            // pass, ASan flags multi_op_ as a leak — the kernel-side
+            // CQE never gets pulled. Tracked as plan-2-blocker debt.
             if (acc->multi_op_)
-            {
                 acc->multi_op_->impl_ptr.reset();
-                // Drain any kernel completions for the multishot so its
-                // CQE does not arrive after multi_op_ is destroyed.
-                while (sched_->poll() > 0) {}
-            }
         }
     }
 

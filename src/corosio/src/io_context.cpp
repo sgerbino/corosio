@@ -194,15 +194,19 @@ apply_scheduler_options(
     io_context_options const& opts)
 {
 #if BOOST_COROSIO_HAS_EPOLL || BOOST_COROSIO_HAS_KQUEUE || BOOST_COROSIO_HAS_SELECT
-    auto& reactor =
-        static_cast<detail::reactor_scheduler&>(sched);
-    reactor.configure_reactor(
-        opts.max_events_per_poll,
-        opts.inline_budget_initial,
-        opts.inline_budget_max,
-        opts.unassisted_budget);
-    if (opts.single_threaded)
-        reactor.configure_single_threaded(true);
+    // dynamic_cast — when io_uring is also linked, the runtime probe may
+    // have selected io_uring_scheduler instead of a reactor_scheduler.
+    if (auto* reactor =
+            dynamic_cast<detail::reactor_scheduler*>(&sched))
+    {
+        reactor->configure_reactor(
+            opts.max_events_per_poll,
+            opts.inline_budget_initial,
+            opts.inline_budget_max,
+            opts.unassisted_budget);
+        if (opts.single_threaded)
+            reactor->configure_single_threaded(true);
+    }
 #endif
 
 #if BOOST_COROSIO_HAS_IO_URING
