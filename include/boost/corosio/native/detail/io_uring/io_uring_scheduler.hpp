@@ -695,16 +695,13 @@ io_uring_scheduler::drain_cqes_for(io_uring_op* target) noexcept
                 // Don't dispatch — caller is destructing target;
                 // just consume so the CQE doesn't dangle.
             }
-            else if (ud != nullptr && ud != &cancel_sentinel_)
-            {
-                // Non-target CQE: dispatch normally so its op
-                // gets cleaned up rather than being lost.
-                auto* op = static_cast<io_uring_op*>(ud);
-                op_queue local;
-                (*op->cqe_func)(op, cqe->res, cqe->flags, local);
-                lock_type lock(dispatch_mutex_);
-                completed_ops_.splice(local);
-            }
+            // Other CQEs are intentionally NOT dispatched here. They
+            // may belong to ops freed by sibling teardowns (other
+            // acceptors / sockets), and dispatching would UAF. The
+            // next normal run-loop iteration will handle them; the
+            // io_context's destructor sequence runs services'
+            // shutdowns before ~scheduler so any still-live ops get
+            // a chance to drain through their own paths first.
             ++consumed;
         }
         if (consumed)
