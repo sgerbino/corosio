@@ -30,6 +30,8 @@ default_backend_name()
 {
 #if BOOST_COROSIO_HAS_IOCP
     return "iocp";
+#elif BOOST_COROSIO_HAS_IO_URING
+    return "io_uring";
 #elif BOOST_COROSIO_HAS_EPOLL
     return "epoll";
 #elif BOOST_COROSIO_HAS_KQUEUE
@@ -49,8 +51,11 @@ print_available_backends()
 #if BOOST_COROSIO_HAS_IOCP
     std::cout << "  iocp     - Windows I/O Completion Ports (default)\n";
 #endif
+#if BOOST_COROSIO_HAS_IO_URING
+    std::cout << "  io_uring - Linux io_uring (default on 6.x+)\n";
+#endif
 #if BOOST_COROSIO_HAS_EPOLL
-    std::cout << "  epoll    - Linux epoll (default)\n";
+    std::cout << "  epoll    - Linux epoll\n";
 #endif
 #if BOOST_COROSIO_HAS_KQUEUE
     std::cout << "  kqueue   - BSD/macOS kqueue (default)\n";
@@ -76,6 +81,18 @@ int
 dispatch_backend(const char* backend, Func&& func)
 {
     namespace corosio = boost::corosio;
+
+#if BOOST_COROSIO_HAS_IO_URING
+    if (std::strcmp(backend, "io_uring") == 0)
+    {
+        func(
+            []() -> std::unique_ptr<corosio::io_context> {
+                return std::make_unique<corosio::io_context>(corosio::io_uring);
+            },
+            corosio::io_uring, "io_uring");
+        return 0;
+    }
+#endif
 
 #if BOOST_COROSIO_HAS_EPOLL
     if (std::strcmp(backend, "epoll") == 0)
