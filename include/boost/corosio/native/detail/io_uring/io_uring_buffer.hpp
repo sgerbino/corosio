@@ -14,6 +14,7 @@
 
 #if BOOST_COROSIO_HAS_IO_URING
 
+#include <boost/corosio/local_endpoint.hpp>
 #include <boost/corosio/native/detail/endpoint_convert.hpp>
 
 namespace boost::corosio::detail {
@@ -34,6 +35,13 @@ endpoint_to_sockaddr(endpoint const& ep, sockaddr_storage& out) noexcept
     return to_sockaddr(ep, out);
 }
 
+/// Convert a corosio::local_endpoint to a sockaddr_storage.
+inline socklen_t
+endpoint_to_sockaddr(local_endpoint const& ep, sockaddr_storage& out) noexcept
+{
+    return to_sockaddr(ep, out);
+}
+
 /** Convert a sockaddr_storage to a corosio::endpoint.
 
     Dispatches on `sa.ss_family`; returns a default-constructed
@@ -46,6 +54,14 @@ inline endpoint
 sockaddr_to_endpoint(sockaddr_storage const& sa) noexcept
 {
     return from_sockaddr(sa);
+}
+
+/// Convert a sockaddr_storage to a corosio::local_endpoint.
+inline local_endpoint
+sockaddr_to_local_endpoint(
+    sockaddr_storage const& sa, socklen_t len) noexcept
+{
+    return from_sockaddr_local(sa, len);
 }
 
 } // namespace boost::corosio::detail

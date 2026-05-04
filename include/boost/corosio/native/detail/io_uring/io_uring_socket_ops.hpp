@@ -18,6 +18,7 @@
 
 #include <boost/capy/error.hpp>
 #include <boost/corosio/detail/dispatch_coro.hpp>
+#include <boost/corosio/local_endpoint.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_buffer.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_op.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
@@ -283,6 +284,75 @@ io_uring_submit_op(
     prep(sqe);
     ::io_uring_sqe_set_data(sqe, op);
 }
+
+/** Non-blocking connect for Unix domain sockets via `IORING_OP_CONNECT`.
+
+    Like `uring_connect_op` but stores `local_endpoint` for the target
+    and out-pointers, since `sockaddr_to_local_endpoint` returns
+    `local_endpoint`, not `endpoint`.
+*/
+struct uring_local_connect_op : io_uring_op
+{
+    sockaddr_storage  addr{};
+    socklen_t         addrlen             = 0;
+    int               fd                  = -1;
+    local_endpoint    target_endpoint{};
+    local_endpoint*   remote_endpoint_out = nullptr;
+    local_endpoint*   local_endpoint_out  = nullptr;
+
+    uring_local_connect_op() noexcept
+        : io_uring_op(&do_handler, &do_cqe)
+    {}
+
+    static void do_cqe(
+        io_uring_op* base, int res, unsigned flags,
+        op_queue& local) noexcept
+    {
+        auto* self      = static_cast<uring_local_connect_op*>(base);
+        self->res       = res;
+        self->cqe_flags = flags;
+        local.push(self);
+    }
+
+    static void do_handler(
+        void* owner, scheduler_op* base,
+        std::uint32_t /*bytes*/, std::uint32_t /*error*/) noexcept
+    {
+        auto* self = static_cast<uring_local_connect_op*>(base);
+        self->stop_cb.reset();
+
+        if (owner == nullptr)
+        {
+            auto h = self->h;
+            delete self;
+            if (h) h.destroy();
+            return;
+        }
+
+        uring_set_result(self, false, false);
+
+        // Write endpoints only on success.
+        if (self->res >= 0)
+        {
+            if (self->remote_endpoint_out)
+                *self->remote_endpoint_out = self->target_endpoint;
+            if (self->local_endpoint_out && self->fd >= 0)
+            {
+                sockaddr_storage local{};
+                socklen_t len = sizeof(local);
+                if (::getsockname(self->fd,
+                        reinterpret_cast<sockaddr*>(&local), &len) == 0)
+                    *self->local_endpoint_out =
+                        sockaddr_to_local_endpoint(local, len);
+            }
+        }
+
+        self->cont_op.cont.h = self->h;
+        auto next = dispatch_coro(self->ex, self->cont_op.cont);
+        delete self;
+        next.resume();
+    }
+};
 
 } // namespace boost::corosio::detail
 

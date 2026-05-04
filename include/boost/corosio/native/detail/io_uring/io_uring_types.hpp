@@ -22,8 +22,11 @@
 #include <boost/corosio/native/detail/io_uring/io_uring_multishot_acceptor.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_socket_ops.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
+#include <boost/corosio/detail/local_stream_service.hpp>
 #include <boost/corosio/detail/tcp_acceptor_service.hpp>
 #include <boost/corosio/detail/tcp_service.hpp>
+#include <boost/corosio/local_endpoint.hpp>
+#include <boost/corosio/local_stream_socket.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
 
@@ -36,12 +39,14 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace boost::corosio::detail {
 
 class io_uring_tcp_service;
 class io_uring_tcp_acceptor_service;  // Task 18
+class io_uring_local_stream_service;
 
 /** TCP socket implementation for io_uring.
 
@@ -718,6 +723,258 @@ private:
     std::mutex            mutex_;
     std::unordered_map<io_uring_tcp_acceptor*,
                        std::shared_ptr<io_uring_tcp_acceptor>> impls_;
+};
+
+/** Unix domain stream socket implementation for io_uring.
+
+    Implements `local_stream_socket::implementation` using a proactor
+    model: read, write, and connect operations are submitted to the
+    kernel via `io_uring_submit_op` and complete through the ring's
+    CQE path.
+
+    The object is always owned by a `shared_ptr` managed by the service.
+    In-flight ops hold an additional `shared_ptr` copy (`impl_ptr`) so
+    the kernel's user-data pointer remains valid until the CQE arrives.
+
+    @par Thread Safety
+    Distinct objects: Safe.
+    Shared objects: Unsafe. A socket must not have two operations of
+    the same type in flight simultaneously.
+*/
+class BOOST_COROSIO_DECL io_uring_local_stream_socket final
+    : public local_stream_socket::implementation
+    , public std::enable_shared_from_this<io_uring_local_stream_socket>
+{
+    friend io_uring_local_stream_service;
+
+    int                           fd_    = -1;
+    io_uring_scheduler*           sched_ = nullptr;
+    io_uring_local_stream_service* svc_  = nullptr;
+
+    corosio::local_endpoint local_endpoint_;
+    corosio::local_endpoint remote_endpoint_;
+
+public:
+    /** Construct with service and scheduler references.
+
+        Both refs must outlive this socket.
+
+        @param svc   The owning service.
+        @param sched The io_uring scheduler owned by the context.
+    */
+    explicit io_uring_local_stream_socket(
+        io_uring_local_stream_service& svc,
+        io_uring_scheduler&            sched) noexcept
+        : sched_(&sched)
+        , svc_(&svc)
+    {}
+
+    ~io_uring_local_stream_socket() override
+    {
+        if (fd_ >= 0)
+            ::close(fd_);
+    }
+
+    // ----------------------------------------------------------------
+    // io_stream::implementation
+    // ----------------------------------------------------------------
+
+    std::coroutine_handle<> read_some(
+        std::coroutine_handle<> h,
+        capy::executor_ref      ex,
+        buffer_param            buffers,
+        std::stop_token         token,
+        std::error_code*        ec,
+        std::size_t*            bytes) override
+    {
+        auto op_guard = std::make_unique<uring_read_op>();
+        auto* op = op_guard.get();
+        op->h         = h;
+        op->ex        = ex;
+        op->ec_out    = ec;
+        op->bytes_out = bytes;
+        op->fd        = fd_;
+        op->sched_    = sched_;
+        op->impl_ptr  = shared_from_this();
+
+        op->iovec_count = static_cast<int>(
+            buffers.copy_to(
+                reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
+                io_uring_max_iov));
+        op->empty_buffer = (op->iovec_count == 0);
+
+        op->start(token);
+        sched_->work_started();
+
+        if (op->empty_buffer ||
+            op->cancelled.load(std::memory_order_acquire))
+        {
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
+
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_readv(sqe, op->fd, op->iovecs, op->iovec_count, 0);
+        });
+        return std::noop_coroutine();
+    }
+
+    std::coroutine_handle<> write_some(
+        std::coroutine_handle<> h,
+        capy::executor_ref      ex,
+        buffer_param            buffers,
+        std::stop_token         token,
+        std::error_code*        ec,
+        std::size_t*            bytes) override
+    {
+        auto op_guard = std::make_unique<uring_write_op>();
+        auto* op = op_guard.get();
+        op->h         = h;
+        op->ex        = ex;
+        op->ec_out    = ec;
+        op->bytes_out = bytes;
+        op->fd        = fd_;
+        op->sched_    = sched_;
+        op->impl_ptr  = shared_from_this();
+
+        op->iovec_count = static_cast<int>(
+            buffers.copy_to(
+                reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
+                io_uring_max_iov));
+        op->empty_buffer = (op->iovec_count == 0);
+
+        if (!op->empty_buffer)
+        {
+            op->msg.msg_iov    = op->iovecs;
+            op->msg.msg_iovlen = static_cast<decltype(op->msg.msg_iovlen)>(
+                op->iovec_count);
+        }
+
+        op->start(token);
+        sched_->work_started();
+
+        if (op->empty_buffer ||
+            op->cancelled.load(std::memory_order_acquire))
+        {
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
+
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_sendmsg(sqe, op->fd, &op->msg, MSG_NOSIGNAL);
+        });
+        return std::noop_coroutine();
+    }
+
+    // ----------------------------------------------------------------
+    // local_stream_socket::implementation
+    // ----------------------------------------------------------------
+
+    std::coroutine_handle<> connect(
+        std::coroutine_handle<>  h,
+        capy::executor_ref       ex,
+        corosio::local_endpoint  ep,
+        std::stop_token          token,
+        std::error_code*         ec) override
+    {
+        auto op_guard = std::make_unique<uring_local_connect_op>();
+        auto* op = op_guard.get();
+        op->h                   = h;
+        op->ex                  = ex;
+        op->ec_out              = ec;
+        op->fd                  = fd_;
+        op->sched_              = sched_;
+        op->impl_ptr            = shared_from_this();
+        op->addrlen             = to_sockaddr(ep, op->addr);
+        op->target_endpoint     = ep;
+        op->remote_endpoint_out = &remote_endpoint_;
+        op->local_endpoint_out  = &local_endpoint_;
+
+        op->start(token);
+        sched_->work_started();
+
+        if (op->cancelled.load(std::memory_order_acquire))
+        {
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
+
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_connect(
+                sqe, op->fd,
+                reinterpret_cast<sockaddr const*>(&op->addr),
+                op->addrlen);
+        });
+        return std::noop_coroutine();
+    }
+
+    std::error_code shutdown(local_stream_socket::shutdown_type what) noexcept override
+    {
+        if (::shutdown(fd_, static_cast<int>(what)) != 0)
+            return make_err(errno);
+        return {};
+    }
+
+    native_handle_type native_handle() const noexcept override
+    {
+        return fd_;
+    }
+
+    native_handle_type release_socket() noexcept override
+    {
+        int fd = fd_;
+        fd_ = -1;
+        local_endpoint_  = corosio::local_endpoint{};
+        remote_endpoint_ = corosio::local_endpoint{};
+        return fd;
+    }
+
+    void cancel() noexcept override
+    {
+        if (fd_ >= 0)
+            sched_->submit_cancel_by_fd(fd_);
+    }
+
+    std::error_code set_option(
+        int         level,
+        int         optname,
+        void const* data,
+        std::size_t size) noexcept override
+    {
+        if (::setsockopt(
+                fd_, level, optname,
+                reinterpret_cast<char const*>(data),
+                static_cast<socklen_t>(size)) != 0)
+            return make_err(errno);
+        return {};
+    }
+
+    std::error_code get_option(
+        int         level,
+        int         optname,
+        void*       data,
+        std::size_t* size) const noexcept override
+    {
+        socklen_t len = static_cast<socklen_t>(*size);
+        if (::getsockopt(fd_, level, optname,
+                reinterpret_cast<char*>(data), &len) != 0)
+            return make_err(errno);
+        *size = static_cast<std::size_t>(len);
+        return {};
+    }
+
+    corosio::local_endpoint local_endpoint() const noexcept override
+    {
+        return local_endpoint_;
+    }
+
+    corosio::local_endpoint remote_endpoint() const noexcept override
+    {
+        return remote_endpoint_;
+    }
 };
 
 } // namespace boost::corosio::detail
