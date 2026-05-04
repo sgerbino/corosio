@@ -114,6 +114,21 @@ public:
     */
     void submit_cancel_by_fd(int fd) noexcept;
 
+    /** Submit `IORING_OP_ASYNC_CANCEL` for `fd` and immediately flush
+        the submission ring to the kernel.
+
+        Must be called while `fd` is still open so the kernel can
+        resolve the file from the fd number before it is closed and
+        potentially recycled.
+
+        Best-effort: if the SQ is full the function still flushes any
+        earlier pending SQEs to the kernel.
+
+        @param fd The file descriptor whose in-flight ops should be
+            cancelled.
+    */
+    void cancel_and_flush(int fd) noexcept;
+
     /** Queue an already-counted op while the caller holds dispatch_mutex_.
 
         Does NOT increment `outstanding_work_`. Use for synchronous
@@ -568,6 +583,36 @@ io_uring_scheduler::submit_cancel_by_fd(int fd) noexcept
 
     io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
     io_uring_sqe_set_data(sqe, &cancel_sentinel_);
+}
+
+inline void
+io_uring_op::request_cancel() noexcept
+{
+    cancelled.store(true, std::memory_order_release);
+    // Submit an async cancel SQE so the kernel wakes the ring even if
+    // no data ever arrives (stop_token cancellation for in-flight ops).
+    if (sched_)
+        sched_->submit_cancel_by_user_data(this);
+}
+
+inline void
+io_uring_scheduler::cancel_and_flush(int fd) noexcept
+{
+    lock_type lock(dispatch_mutex_);
+    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe)
+    {
+        io_uring_submit(&ring_);
+        sqe = io_uring_get_sqe(&ring_);
+    }
+    if (sqe)
+    {
+        io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
+        io_uring_sqe_set_data(sqe, &cancel_sentinel_);
+    }
+    // Flush while fd is still open so the kernel resolves the file
+    // from the fd number before the caller closes and recycles it.
+    io_uring_submit(&ring_);
 }
 
 } // namespace boost::corosio::detail

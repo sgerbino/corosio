@@ -182,6 +182,7 @@ struct uring_connect_op : io_uring_op
     int              fd                 = -1;
     endpoint         target_endpoint{};
     endpoint*        remote_endpoint_out = nullptr;
+    endpoint*        local_endpoint_out  = nullptr;
 
     uring_connect_op() noexcept
         : io_uring_op(&do_handler, &do_cqe)
@@ -214,9 +215,20 @@ struct uring_connect_op : io_uring_op
 
         uring_set_result(self, false, false);
 
-        // Write remote endpoint only on success.
-        if (self->res >= 0 && self->remote_endpoint_out)
-            *self->remote_endpoint_out = self->target_endpoint;
+        // Write endpoints only on success.
+        if (self->res >= 0)
+        {
+            if (self->remote_endpoint_out)
+                *self->remote_endpoint_out = self->target_endpoint;
+            if (self->local_endpoint_out && self->fd >= 0)
+            {
+                sockaddr_storage local{};
+                socklen_t len = sizeof(local);
+                if (::getsockname(self->fd,
+                        reinterpret_cast<sockaddr*>(&local), &len) == 0)
+                    *self->local_endpoint_out = sockaddr_to_endpoint(local);
+            }
+        }
 
         self->cont_op.cont.h = self->h;
         auto next = dispatch_coro(self->ex, self->cont_op.cont);

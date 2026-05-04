@@ -18,6 +18,9 @@
 #include <boost/corosio/detail/scheduler_op.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 
+// Forward declare to avoid circular include with io_uring_scheduler.hpp.
+namespace boost::corosio::detail { class io_uring_scheduler; }
+
 #include <atomic>
 #include <coroutine>
 #include <cstddef>
@@ -80,15 +83,18 @@ struct io_uring_op : scheduler_op
     /// owns user buffers until completion).
     std::shared_ptr<void>                        impl_ptr;
 
-    void request_cancel() noexcept
-    {
-        cancelled.store(true, std::memory_order_release);
-    }
+    /// Scheduler reference for submitting cancel SQEs on stop_token.
+    io_uring_scheduler*                          sched_ = nullptr;
+
+    void request_cancel() noexcept;
+
 
     /// Bridge virtual dispatch to func-pointer dispatch. Lets the run
     /// loop dispatch any scheduler_op via `(*op)()` — both reactor-style
     /// services posted into the queue and proactor-style io_uring ops.
-    void operator()() override { complete(nullptr, 0, 0); }
+    /// Pass `this` (non-null) so handlers take the normal completion path,
+    /// not the destroy path (which is signalled by owner == nullptr).
+    void operator()() override { complete(this, 0, 0); }
 
     /// Arm the stop-token callback. Must be called before the SQE submits.
     void start(std::stop_token const& token)

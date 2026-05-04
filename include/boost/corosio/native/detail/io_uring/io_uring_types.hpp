@@ -113,6 +113,7 @@ public:
         op->ec_out    = ec;
         op->bytes_out = bytes;
         op->fd        = fd_;
+        op->sched_    = sched_;
         op->impl_ptr  = shared_from_this();
 
         // Unroll buffer sequence into op's iovec array (is_read already
@@ -128,10 +129,12 @@ public:
         op->start(token);
         sched_->work_started();
 
-        if (op->empty_buffer)
+        // If stop was already requested before start(), the canceller fired
+        // inline inside start(). No SQE was in flight to cancel, so bypass
+        // the kernel and complete immediately as cancelled.
+        if (op->empty_buffer ||
+            op->cancelled.load(std::memory_order_acquire))
         {
-            // Zero-length read: complete immediately with res=0.
-            // push_completed_locked requires the dispatch lock.
             io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
             sched_->push_completed_locked(op_guard.release());
             return std::noop_coroutine();
@@ -158,6 +161,7 @@ public:
         op->ec_out    = ec;
         op->bytes_out = bytes;
         op->fd        = fd_;
+        op->sched_    = sched_;
         op->impl_ptr  = shared_from_this();
 
         op->iovec_count = static_cast<int>(
@@ -178,7 +182,10 @@ public:
         op->start(token);
         sched_->work_started();
 
-        if (op->empty_buffer)
+        // Pre-cancelled (stop was requested before start()): bypass the
+        // kernel and complete immediately as cancelled.
+        if (op->empty_buffer ||
+            op->cancelled.load(std::memory_order_acquire))
         {
             io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
             sched_->push_completed_locked(op_guard.release());
@@ -208,15 +215,28 @@ public:
         op->ex                  = ex;
         op->ec_out              = ec;
         op->fd                  = fd_;
+        op->sched_              = sched_;
         op->impl_ptr            = shared_from_this();
-        op->addrlen             = endpoint_to_sockaddr(ep, op->addr);
+        // Use the family-aware overload so IPv4 endpoints are mapped to
+        // ::ffff:x.x.x.x when the socket is AF_INET6 (dual-stack connect).
+        op->addrlen             = to_sockaddr(ep, socket_family(fd_), op->addr);
         op->target_endpoint     = ep;
         op->remote_endpoint_out = &remote_endpoint_;
+        op->local_endpoint_out  = &local_endpoint_;
 
         // start() may throw (stop_callback ctor allocates); unique_ptr
         // cleans up if it does.
         op->start(token);
         sched_->work_started();
+
+        // Pre-cancelled (stop was requested before start()): bypass the
+        // kernel and complete immediately as cancelled.
+        if (op->cancelled.load(std::memory_order_acquire))
+        {
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
 
         io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
             ::io_uring_prep_connect(
@@ -352,8 +372,15 @@ public:
         auto* sock = static_cast<io_uring_tcp_socket*>(h.get());
         if (sock && sock->fd_ >= 0)
         {
+            // Cancel pending SQEs before closing. The cancel SQE must
+            // be submitted to the kernel while the fd is still open;
+            // otherwise IORING_ASYNC_CANCEL_FD resolves to the wrong
+            // file if the fd number is immediately recycled.
+            sched_->cancel_and_flush(sock->fd_);
             ::close(sock->fd_);
-            sock->fd_ = -1;
+            sock->fd_              = -1;
+            sock->local_endpoint_  = endpoint{};
+            sock->remote_endpoint_ = endpoint{};
         }
     }
 
@@ -382,6 +409,14 @@ public:
             ::close(sock.fd_);
         }
         sock.fd_ = fd;
+        // Mirror epoll/select: IPv6 sockets default to v6-only so they
+        // behave consistently across platforms regardless of the kernel
+        // default for /proc/sys/net/ipv6/bindv6only.
+        if (family == AF_INET6)
+        {
+            int one = 1;
+            ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
+        }
         return {};
     }
 
@@ -666,9 +701,8 @@ io_uring_tcp_acceptor::start_multishot()
             &multi_op_->peer_len,
             SOCK_NONBLOCK | SOCK_CLOEXEC);
     });
-
-    // One persistent outstanding op for the lifetime of the multishot.
-    sched_->work_started();
+    // Deliberately no work_started(): the multishot SQE is a persistent
+    // internal mechanism. User-visible work is tracked per-accept call.
 }
 
 inline std::coroutine_handle<>
@@ -833,8 +867,6 @@ io_uring_tcp_acceptor::on_accept_cqe_impl(
                 sched_->post(op);
                 sched_->work_finished();  // balance waiter's work_started
             }
-            // Multishot terminated; balance its work_started.
-            sched_->work_finished();
         }
         return;
     }
@@ -887,11 +919,9 @@ io_uring_tcp_acceptor::on_accept_cqe_impl(
                 }
                 s->start_multishot();
             }
-            void operator()() override { complete(nullptr, 0, 0); }
+            void operator()() override { complete(this, 0, 0); }
             void destroy() override { delete this; }
         };
-        // Balance the work_started() from the original start_multishot() call.
-        sched_->work_finished();
         if (!closing_)
             sched_->post(new rearm_op(shared_from_this()));
     }
@@ -979,7 +1009,10 @@ public:
         auto* acc = static_cast<io_uring_tcp_acceptor*>(h.get());
         if (acc && acc->fd_ >= 0)
         {
-            acc->cancel();           // cancel multishot + drain queues
+            // Flush the cancel SQE before closing the fd so the kernel
+            // resolves the file from the fd number while it is still valid.
+            sched_->cancel_and_flush(acc->fd_);
+            acc->cancel();           // drain waiters
             ::close(acc->fd_);
             acc->fd_ = -1;
         }
@@ -1010,6 +1043,13 @@ public:
             ::close(acc.fd_);
         }
         acc.fd_ = fd;
+        // Match epoll/select: IPv6 acceptors default to dual-stack
+        // (v6-only=false) so they accept both IPv4 and IPv6 connections.
+        if (family == AF_INET6)
+        {
+            int zero = 0;
+            ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
+        }
         return {};
     }
 
