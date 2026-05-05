@@ -26,6 +26,7 @@
 #include <boost/corosio/detail/tcp_acceptor_service.hpp>
 #include <boost/corosio/detail/tcp_service.hpp>
 #include <boost/corosio/local_endpoint.hpp>
+#include <boost/corosio/local_stream_acceptor.hpp>
 #include <boost/corosio/local_stream_socket.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
@@ -47,6 +48,7 @@ namespace boost::corosio::detail {
 class io_uring_tcp_service;
 class io_uring_tcp_acceptor_service;  // Task 18
 class io_uring_local_stream_service;
+class io_uring_local_stream_acceptor_service;
 
 /** TCP socket implementation for io_uring.
 
@@ -1158,6 +1160,68 @@ private:
     std::mutex           mutex_;
     std::unordered_map<io_uring_local_stream_socket*,
                        std::shared_ptr<io_uring_local_stream_socket>> impls_;
+};
+
+/** Local-stream (Unix domain) acceptor for io_uring.
+
+    Inherits all multishot machinery (parked-fd queue, waiter queue,
+    CQE drain on destruction) from `io_uring_multishot_acceptor_base`.
+    Adds only the `accept()` override, the `adopt_thunk` static that
+    wraps an accepted fd via `io_uring_local_stream_service::adopt_fd`,
+    and `release_socket()` (a pure virtual in
+    `local_stream_acceptor::implementation` absent from the base).
+*/
+class BOOST_COROSIO_DECL io_uring_local_stream_acceptor final
+    : public io_uring_multishot_acceptor_base<
+          io_uring_local_stream_acceptor,
+          local_stream_acceptor::implementation,
+          corosio::local_endpoint,
+          io_uring_local_stream_service>
+{
+    friend io_uring_local_stream_acceptor_service;
+
+    using base_type = io_uring_multishot_acceptor_base<
+        io_uring_local_stream_acceptor,
+        local_stream_acceptor::implementation,
+        corosio::local_endpoint,
+        io_uring_local_stream_service>;
+
+public:
+    explicit io_uring_local_stream_acceptor(
+        io_uring_local_stream_acceptor_service&,
+        io_uring_scheduler&            sched,
+        io_uring_local_stream_service& peer_svc) noexcept
+        : base_type(sched, peer_svc)
+    {}
+
+    std::coroutine_handle<> accept(
+        std::coroutine_handle<>     h,
+        capy::executor_ref          ex,
+        std::stop_token             token,
+        std::error_code*            ec,
+        io_object::implementation** impl_out) override
+    {
+        base_type::dispatch_or_queue(h, ex, std::move(token), ec, impl_out);
+        return std::noop_coroutine();
+    }
+
+    // release_socket() is pure virtual in local_stream_acceptor::implementation
+    // but not in tcp_acceptor::implementation, so the base does not cover it.
+    native_handle_type release_socket() noexcept override
+    {
+        int fd = fd_;
+        fd_ = -1;
+        local_endpoint_ = corosio::local_endpoint{};
+        return fd;
+    }
+
+    static io_object::implementation* adopt_thunk(
+        void* peer_service, int fd,
+        sockaddr_storage const& peer, socklen_t peer_len) noexcept
+    {
+        auto* svc = static_cast<io_uring_local_stream_service*>(peer_service);
+        return svc->adopt_fd(fd, sockaddr_to_local_endpoint(peer, peer_len));
+    }
 };
 
 } // namespace boost::corosio::detail
