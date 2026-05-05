@@ -240,12 +240,12 @@ struct uring_connect_op : io_uring_op
 
 /** Acquire an SQE, fill it via `prep`, and link `op` as user_data.
 
-    Serialises SQE acquisition under `sched.dispatch_mutex()`. On
-    transient SQE-ring exhaustion, flushes pending submissions and
-    retries once. If no SQE is available after the flush, surfaces
-    `EAGAIN` on `*op->ec_out` and
-    posts the op immediately (synchronous failure path — no CQE will
-    arrive, but `do_one` still dispatches the handler).
+    Serialises SQE acquisition under `sched.ring_mutex()`. On transient
+    SQE-ring exhaustion, flushes pending submissions and retries once.
+    If no SQE is available after the flush, surfaces `EAGAIN` on
+    `*op->ec_out` and posts the op immediately (synchronous failure
+    path — no CQE will arrive, but `do_one` still dispatches the
+    handler).
 
     @par Exception Safety
     Nothrow.
@@ -260,29 +260,34 @@ void
 io_uring_submit_op(
     io_uring_scheduler& sched, io_uring_op* op, PrepFn prep) noexcept
 {
+    {
+        typename io_uring_scheduler::lock_type ring_lock(
+            sched.ring_mutex());
+
+        io_uring_sqe* sqe = ::io_uring_get_sqe(sched.ring());
+        if (!sqe)
+        {
+            // SQ ring full — flush to kernel and retry once.
+            ::io_uring_submit(sched.ring());
+            sqe = ::io_uring_get_sqe(sched.ring());
+        }
+
+        if (sqe)
+        {
+            prep(sqe);
+            ::io_uring_sqe_set_data(sqe, op);
+            return;
+        }
+    }
+
+    // SQ stayed full after one flush — synchronous failure path. No
+    // CQE will arrive; queue the op as if a completion delivered
+    // EAGAIN, so do_one dispatches the handler. The caller's
+    // work_started() already counted this op.
+    if (op->ec_out)
+        *op->ec_out = make_err(EAGAIN);
     typename io_uring_scheduler::lock_type lock(sched.dispatch_mutex());
-
-    io_uring_sqe* sqe = ::io_uring_get_sqe(sched.ring());
-    if (!sqe)
-    {
-        // SQ ring full — flush to kernel and retry once.
-        ::io_uring_submit(sched.ring());
-        sqe = ::io_uring_get_sqe(sched.ring());
-    }
-
-    if (!sqe)
-    {
-        if (op->ec_out)
-            *op->ec_out = make_err(EAGAIN);
-        // No CQE will arrive. Push under the lock we already hold without
-        // incrementing outstanding_work_ — the caller's work_started()
-        // already counted this op, matching the normal CQE dispatch path.
-        sched.push_completed_locked(op);
-        return;
-    }
-
-    prep(sqe);
-    ::io_uring_sqe_set_data(sqe, op);
+    sched.push_completed_locked(op);
 }
 
 /** Non-blocking connect for Unix domain sockets via `IORING_OP_CONNECT`.

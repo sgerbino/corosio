@@ -88,11 +88,23 @@ public:
     void work_started() noexcept override;
     void work_finished() noexcept override;
 
-    /// Return the underlying liburing ring (used by socket services).
-    struct ::io_uring* ring() noexcept { return &ring_; }
+    /** Return the underlying liburing ring.
 
-    /// Return the dispatch mutex for SQE acquisition.
+        Triggers lazy ring initialisation on first call. Used by
+        socket op submission helpers (e.g. `io_uring_submit_op`) and
+        any other code path that needs a live ring pointer.
+    */
+    struct ::io_uring* ring() noexcept
+    {
+        lazy_init_ring();
+        return &ring_;
+    }
+
+    /// Return the dispatch mutex (protects completed_ops_ / cond_).
     mutex_type& dispatch_mutex() const noexcept { return dispatch_mutex_; }
+
+    /// Return the ring mutex (serialises userspace SQ/CQ access).
+    mutex_type& ring_mutex() const noexcept { return ring_mutex_; }
 
     /** Submit `IORING_OP_ASYNC_CANCEL` targeting an in-flight op by its
         user_data pointer.
@@ -173,8 +185,10 @@ public:
     bool is_single_threaded() const noexcept { return single_threaded_; }
 
 private:
-    struct ::io_uring                  ring_{};
-    int                               wakeup_eventfd_ = -1;
+    // ring_ + wakeup_eventfd_ are mutable so lazy_init_ring() (called
+    // from const contexts like post()) can populate them on first use.
+    mutable struct ::io_uring          ring_{};
+    mutable int                       wakeup_eventfd_ = -1;
     timer_service*                    timer_svc_      = nullptr;
 
     // dispatch_mutex_ protects completed_ops_, cond_, task_running_.
@@ -203,49 +217,24 @@ private:
     static constexpr int              drain_cqes_max_rounds = 8;
     static constexpr unsigned long    drain_cqes_kick_ns    = 1'000'000;
 
+    // ring_inited_ goes true once on first run/poll/submit. The init is
+    // deferred from the constructor so configure_single_threaded(true)
+    // can take effect before io_uring_queue_init_params chooses flags.
+    mutable std::once_flag            ring_init_once_;
+    mutable bool                      ring_inited_ = false;
+
     std::size_t do_one(long timeout_us);
     void        process_completions();
     void        interrupt_reactor() const noexcept;
     void        drain_wakeup_eventfd() const noexcept;
+    void        lazy_init_ring() const;
+    void        lazy_init_ring_unlocked() const;
 };
 
 inline
 io_uring_scheduler::io_uring_scheduler(
     capy::execution_context& ctx, int /*concurrency_hint*/)
 {
-    io_uring_params params{};
-    int rc = io_uring_queue_init_params(256, &ring_, &params);
-    if (rc < 0)
-        detail::throw_system_error(make_err(-rc), "io_uring_queue_init_params");
-
-    wakeup_eventfd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (wakeup_eventfd_ < 0)
-    {
-        int errn = errno;
-        ::io_uring_queue_exit(&ring_);
-        detail::throw_system_error(make_err(errn), "eventfd");
-    }
-
-    // Register multishot poll on the wakeup eventfd. user_data nullptr
-    // is the wakeup-eventfd sentinel recognized by the run loop.
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-    if (!sqe)
-    {
-        ::close(wakeup_eventfd_);
-        ::io_uring_queue_exit(&ring_);
-        detail::throw_system_error(
-            make_err(ENOSPC), "io_uring_get_sqe (wakeup)");
-    }
-    io_uring_prep_poll_multishot(sqe, wakeup_eventfd_, POLLIN);
-    io_uring_sqe_set_data(sqe, nullptr);
-    int submit_rc = ::io_uring_submit(&ring_);
-    if (submit_rc < 0)
-    {
-        ::close(wakeup_eventfd_);
-        ::io_uring_queue_exit(&ring_);
-        detail::throw_system_error(make_err(-submit_rc), "io_uring_submit (wakeup)");
-    }
-
     // Wire timer service. on_earliest_changed wakes the run loop so it
     // recomputes its wait timeout.
     timer_svc_ = &get_timer_service(ctx, *this);
@@ -258,14 +247,82 @@ io_uring_scheduler::io_uring_scheduler(
     get_signal_service(ctx, *this);
     get_stream_file_service(ctx, *this);
     get_random_access_file_service(ctx, *this);
+
+    // Ring init is deferred to lazy_init_ring() so configure_single_-
+    // threaded(true), which the io_context applies after construction,
+    // can take effect before io_uring_queue_init_params chooses flags.
 }
 
 inline
 io_uring_scheduler::~io_uring_scheduler()
 {
-    if (wakeup_eventfd_ >= 0)
+    if (ring_inited_)
+    {
+        if (wakeup_eventfd_ >= 0)
+            ::close(wakeup_eventfd_);
+        ::io_uring_queue_exit(&ring_);
+    }
+}
+
+inline void
+io_uring_scheduler::lazy_init_ring() const
+{
+    std::call_once(ring_init_once_, [this] {
+        lazy_init_ring_unlocked();
+    });
+}
+
+inline void
+io_uring_scheduler::lazy_init_ring_unlocked() const
+{
+    io_uring_params params{};
+    if (single_threaded_)
+    {
+        // SINGLE_ISSUER tells the kernel one thread will own
+        // submissions; the kernel can skip internal locking on the
+        // SQ path. DEFER_TASKRUN is intentionally NOT enabled: it
+        // requires every io_uring_enter to pass GETEVENTS, but our
+        // poll() peek path uses submit_and_wait_timeout with ts=0
+        // and may not satisfy that contract under all kernels. Plan
+        // 4 will revisit if/when SQPOLL is added.
+        params.flags = IORING_SETUP_SINGLE_ISSUER;
+    }
+
+    int rc = ::io_uring_queue_init_params(256, &ring_, &params);
+    if (rc < 0)
+        detail::throw_system_error(
+            make_err(-rc), "io_uring_queue_init_params");
+
+    wakeup_eventfd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (wakeup_eventfd_ < 0)
+    {
+        int errn = errno;
+        ::io_uring_queue_exit(&ring_);
+        detail::throw_system_error(make_err(errn), "eventfd");
+    }
+
+    // Register multishot poll on the wakeup eventfd. user_data nullptr
+    // is the wakeup-eventfd sentinel recognized by the run loop.
+    ::io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_);
+    if (!sqe)
+    {
         ::close(wakeup_eventfd_);
-    ::io_uring_queue_exit(&ring_);
+        ::io_uring_queue_exit(&ring_);
+        detail::throw_system_error(
+            make_err(ENOSPC), "io_uring_get_sqe (wakeup)");
+    }
+    ::io_uring_prep_poll_multishot(sqe, wakeup_eventfd_, POLLIN);
+    ::io_uring_sqe_set_data(sqe, nullptr);
+    int submit_rc = ::io_uring_submit(&ring_);
+    if (submit_rc < 0)
+    {
+        ::close(wakeup_eventfd_);
+        ::io_uring_queue_exit(&ring_);
+        detail::throw_system_error(
+            make_err(-submit_rc), "io_uring_submit (wakeup)");
+    }
+
+    ring_inited_ = true;
 }
 
 inline void
@@ -333,6 +390,11 @@ io_uring_scheduler::work_finished() noexcept
 inline void
 io_uring_scheduler::interrupt_reactor() const noexcept
 {
+    // Skip if the ring hasn't been initialised yet — there's no leader
+    // to wake and no eventfd to write.
+    if (!ring_inited_)
+        return;
+
     bool expected = false;
     if (wakeup_armed_.compare_exchange_strong(
             expected, true, std::memory_order_release,
@@ -377,6 +439,7 @@ io_uring_scheduler::post(std::coroutine_handle<> h) const
     };
 
     auto* op = new post_handler(h);
+    lazy_init_ring();
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
     bool wake_leader;
     {
@@ -393,6 +456,7 @@ io_uring_scheduler::post(std::coroutine_handle<> h) const
 inline void
 io_uring_scheduler::post(scheduler_op* op) const
 {
+    lazy_init_ring();
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
     bool wake_leader;
     {
@@ -431,6 +495,7 @@ io_uring_scheduler::running_in_this_thread() const noexcept
 inline std::size_t
 io_uring_scheduler::run()
 {
+    lazy_init_ring();
     if (outstanding_work_.load(std::memory_order_acquire) == 0)
     {
         stop();
@@ -460,6 +525,7 @@ io_uring_scheduler::run()
 inline std::size_t
 io_uring_scheduler::run_one()
 {
+    lazy_init_ring();
     if (outstanding_work_.load(std::memory_order_acquire) == 0)
     {
         stop();
@@ -472,6 +538,7 @@ io_uring_scheduler::run_one()
 inline std::size_t
 io_uring_scheduler::wait_one(long usec)
 {
+    lazy_init_ring();
     if (outstanding_work_.load(std::memory_order_acquire) == 0)
     {
         stop();
@@ -484,6 +551,7 @@ io_uring_scheduler::wait_one(long usec)
 inline std::size_t
 io_uring_scheduler::poll()
 {
+    lazy_init_ring();
     if (outstanding_work_.load(std::memory_order_acquire) == 0)
     {
         stop();
@@ -502,6 +570,7 @@ io_uring_scheduler::poll()
 inline std::size_t
 io_uring_scheduler::poll_one()
 {
+    lazy_init_ring();
     if (outstanding_work_.load(std::memory_order_acquire) == 0)
     {
         stop();
@@ -691,6 +760,7 @@ io_uring_scheduler::process_completions()
 inline void
 io_uring_scheduler::submit_cancel_by_user_data(io_uring_op* target) noexcept
 {
+    lazy_init_ring();
     // Wake the leader (if any) so its submit_and_wait_timeout returns
     // and releases ring_mutex_; otherwise we'd block here until the
     // next CQE arrives organically. Cancellation is best-effort if
@@ -714,6 +784,7 @@ io_uring_scheduler::submit_cancel_by_user_data(io_uring_op* target) noexcept
 inline void
 io_uring_scheduler::submit_cancel_by_fd(int fd) noexcept
 {
+    lazy_init_ring();
     interrupt_reactor();
     lock_type lock(ring_mutex_);
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -742,6 +813,7 @@ io_uring_op::request_cancel() noexcept
 inline void
 io_uring_scheduler::cancel_and_flush(int fd) noexcept
 {
+    lazy_init_ring();
     interrupt_reactor();
     lock_type lock(ring_mutex_);
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -763,6 +835,7 @@ io_uring_scheduler::cancel_and_flush(int fd) noexcept
 inline void
 io_uring_scheduler::drain_cqes_for(io_uring_op* target) noexcept
 {
+    lazy_init_ring();
     // Submit a cancel by user_data so the kernel returns CQEs for
     // the target promptly, then iterate the CQ ring and consume
     // every CQE that matches `target`. ring_mutex_ serializes against
