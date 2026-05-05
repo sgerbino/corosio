@@ -977,6 +977,189 @@ public:
     }
 };
 
+/** Unix domain stream socket service for io_uring.
+
+    Owns all `io_uring_local_stream_socket` implementations for an
+    `io_context`. Satisfies the `local_stream_service` interface so the
+    generic `local_stream_socket` front-end can call `open_socket` and
+    `assign_socket` transparently.
+
+    Socket impls are reference-counted inside the service map; raw
+    pointers returned from `construct()` remain valid until `destroy()`
+    or `shutdown()` is called.
+
+    @par Thread Safety
+    All public member functions are thread-safe.
+*/
+class BOOST_COROSIO_DECL io_uring_local_stream_service final
+    : public local_stream_service
+{
+public:
+    /// Identifies this service for `execution_context` lookup.
+    using key_type = local_stream_service;
+
+    /** Construct the local stream service.
+
+        @param ctx The owning execution context. The io_uring scheduler
+            must already be registered.
+    */
+    explicit io_uring_local_stream_service(capy::execution_context& ctx)
+        : sched_(&ctx.use_service<io_uring_scheduler>())
+    {}
+
+    void shutdown() override
+    {
+        std::vector<std::shared_ptr<io_uring_local_stream_socket>> live;
+        {
+            std::lock_guard lk(mutex_);
+            live.reserve(impls_.size());
+            for (auto& [_, p] : impls_)
+                live.push_back(p);
+        }
+        // Cancel without the lock held to avoid inversion if cancel()
+        // ever needs to re-enter the service.
+        for (auto& p : live)
+            p->cancel();
+    }
+
+    io_object::implementation* construct() override
+    {
+        auto p   = std::make_shared<io_uring_local_stream_socket>(*this, *sched_);
+        auto* raw = p.get();
+        std::lock_guard lk(mutex_);
+        impls_.emplace(raw, std::move(p));
+        return raw;
+    }
+
+    void destroy(io_object::implementation* p) override
+    {
+        if (!p)
+            return;
+        std::lock_guard lk(mutex_);
+        impls_.erase(static_cast<io_uring_local_stream_socket*>(p));
+    }
+
+    // Close the fd eagerly when local_stream_socket::close() is called,
+    // before destroy() drops the shared_ptr and the destructor runs.
+    void close(io_object::handle& h) override
+    {
+        auto* sock = static_cast<io_uring_local_stream_socket*>(h.get());
+        if (sock && sock->fd_ >= 0)
+        {
+            // Cancel pending SQEs before closing. The cancel SQE must
+            // be submitted to the kernel while the fd is still open;
+            // otherwise IORING_ASYNC_CANCEL_FD resolves to the wrong
+            // file if the fd number is immediately recycled.
+            sched_->cancel_and_flush(sock->fd_);
+            ::close(sock->fd_);
+            sock->fd_              = -1;
+            sock->local_endpoint_  = corosio::local_endpoint{};
+            sock->remote_endpoint_ = corosio::local_endpoint{};
+        }
+    }
+
+    /** Open an AF_UNIX stream socket and associate it with an impl.
+
+        Creates a non-blocking, close-on-exec socket via `socket(2)`.
+        `family` is always `AF_UNIX` for local stream sockets.
+
+        @param impl     The socket implementation to initialise.
+        @param family   Address family (`AF_UNIX`).
+        @param type     Socket type (`SOCK_STREAM`).
+        @param protocol Protocol number (typically 0).
+        @return Error code on failure, empty on success.
+    */
+    std::error_code open_socket(
+        local_stream_socket::implementation& impl,
+        int family, int type, int protocol) override
+    {
+        auto& sock = static_cast<io_uring_local_stream_socket&>(impl);
+        int fd = ::socket(family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
+        if (fd < 0)
+            return make_err(errno);
+        if (sock.fd_ >= 0)
+        {
+            sched_->submit_cancel_by_fd(sock.fd_);
+            ::close(sock.fd_);
+        }
+        sock.fd_ = fd;
+        return {};
+    }
+
+    /** Adopt a pre-created fd into an impl (e.g. from `socketpair`).
+
+        Takes ownership of `fd` on success; the caller retains ownership
+        on failure.
+
+        @param impl The socket implementation to assign to.
+        @param fd   A valid, open, non-blocking AF_UNIX stream fd.
+        @return Error code on failure, empty on success.
+    */
+    std::error_code assign_socket(
+        local_stream_socket::implementation& impl,
+        native_handle_type fd) override
+    {
+        auto& sock = static_cast<io_uring_local_stream_socket&>(impl);
+        if (sock.fd_ >= 0)
+        {
+            sched_->cancel_and_flush(sock.fd_);
+            ::close(sock.fd_);
+        }
+        sock.fd_ = static_cast<int>(fd);
+
+        sockaddr_storage local{};
+        socklen_t local_len = sizeof(local);
+        if (::getsockname(sock.fd_,
+                reinterpret_cast<sockaddr*>(&local), &local_len) == 0)
+            sock.local_endpoint_ = sockaddr_to_local_endpoint(local, local_len);
+
+        sockaddr_storage remote{};
+        socklen_t remote_len = sizeof(remote);
+        if (::getpeername(sock.fd_,
+                reinterpret_cast<sockaddr*>(&remote), &remote_len) == 0)
+            sock.remote_endpoint_ = sockaddr_to_local_endpoint(remote, remote_len);
+
+        return {};
+    }
+
+    /** Wrap an already-accepted fd as a new socket impl.
+
+        Called by the acceptor service after `accept(2)` returns a
+        connected fd. Captures both endpoints via the provided peer
+        address and a `getsockname` call.
+
+        @param fd   Accepted file descriptor (must be non-blocking).
+        @param peer Peer endpoint from `accept(2)`.
+        @return Raw pointer to the registered impl.
+    */
+    io_uring_local_stream_socket* adopt_fd(
+        int fd, corosio::local_endpoint const& peer)
+    {
+        auto p = std::make_shared<io_uring_local_stream_socket>(*this, *sched_);
+        p->fd_              = fd;
+        p->remote_endpoint_ = peer;
+
+        sockaddr_storage local{};
+        socklen_t len = sizeof(local);
+        if (::getsockname(fd, reinterpret_cast<sockaddr*>(&local), &len) == 0)
+            p->local_endpoint_ = sockaddr_to_local_endpoint(local, len);
+
+        std::lock_guard lk(mutex_);
+        auto* raw = p.get();
+        impls_.emplace(raw, std::move(p));
+        return raw;
+    }
+
+    /// Return the scheduler used by sockets created by this service.
+    io_uring_scheduler& scheduler() noexcept { return *sched_; }
+
+private:
+    io_uring_scheduler*  sched_;
+    std::mutex           mutex_;
+    std::unordered_map<io_uring_local_stream_socket*,
+                       std::shared_ptr<io_uring_local_stream_socket>> impls_;
+};
+
 } // namespace boost::corosio::detail
 
 #endif // BOOST_COROSIO_HAS_IO_URING
