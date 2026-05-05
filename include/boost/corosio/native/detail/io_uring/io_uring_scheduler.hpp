@@ -250,7 +250,6 @@ io_uring_scheduler::io_uring_scheduler(
 
     get_resolver_service(ctx, *this);
     get_signal_service(ctx, *this);
-    get_random_access_file_service(ctx, *this);
 
     // Ring init is deferred to lazy_init_ring() so configure_single_-
     // threaded(true), which the io_context applies after construction,
