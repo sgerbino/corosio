@@ -79,11 +79,11 @@ class BOOST_COROSIO_DECL io_uring_tcp_socket final
 {
     friend io_uring_tcp_service;
 
-    int                   fd_   = -1;
-    io_uring_scheduler*   sched_ = nullptr;  // set by service at construction
-    io_uring_tcp_service* svc_   = nullptr;
+    int                   fd_     = -1;
+    int                   family_ = AF_UNSPEC;  // cached at open_socket
+    io_uring_scheduler*   sched_  = nullptr;
+    io_uring_tcp_service* svc_    = nullptr;
 
-    // TODO: populate after async_connect completes (post-Task 14 cancel-aware).
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
 
@@ -234,8 +234,10 @@ public:
         op->sched_              = sched_;
         op->impl_ptr            = shared_from_this();
         // Use the family-aware overload so IPv4 endpoints are mapped to
-        // ::ffff:x.x.x.x when the socket is AF_INET6 (dual-stack connect).
-        op->addrlen             = to_sockaddr(ep, socket_family(fd_), op->addr);
+        // ::ffff:x.x.x.x when the socket is AF_INET6 (dual-stack
+        // connect). family_ was cached at open_socket time, avoiding
+        // a per-connect getsockname syscall.
+        op->addrlen             = to_sockaddr(ep, family_, op->addr);
         op->target_endpoint     = ep;
         op->remote_endpoint_out = &remote_endpoint_;
         op->local_endpoint_out  = &local_endpoint_;
@@ -424,7 +426,8 @@ public:
             sched_->submit_cancel_by_fd(sock.fd_);
             ::close(sock.fd_);
         }
-        sock.fd_ = fd;
+        sock.fd_     = fd;
+        sock.family_ = family;
         // Mirror epoll/select: IPv6 sockets default to v6-only so they
         // behave consistently across platforms regardless of the kernel
         // default for /proc/sys/net/ipv6/bindv6only.
@@ -623,22 +626,19 @@ public:
         if (acc && acc->fd_ >= 0)
         {
             // Flush the cancel SQE before closing the fd so the kernel
-            // resolves the file from the fd number while it is still valid.
+            // resolves the file from the fd number while it is still
+            // valid. drain_waiters_only avoids submitting cancel-by-fd
+            // a second time (cancel_and_flush already did it).
             sched_->cancel_and_flush(acc->fd_);
-            acc->cancel();           // drain waiters
+            acc->drain_waiters_only();
             ::close(acc->fd_);
             acc->fd_ = -1;
 
-            // Break the multi_op_ → impl_ptr (shared_ptr<this>) ref cycle
-            // start_multishot established. The cancel_and_flush above has
-            // submitted the cancel SQE and the fd is closed, so further
-            // multishot CQEs would carry the cancel result; we let the
-            // run loop drain them on the next ioc.run() iteration.
-            //
-            // Known limitation: if the user destroys the io_context
-            // immediately after close() without an intervening run()
-            // pass, ASan flags multi_op_ as a leak — the kernel-side
-            // CQE never gets pulled. Tracked as plan-2-blocker debt.
+            // Break the multi_op_ -> impl_ptr (shared_ptr<this>) cycle
+            // start_multishot established. The acceptor destructor's
+            // drain_cqes_for(multi_op_.get()) is the safety net; here
+            // we just drop the cycle so the impl can be released when
+            // the user's last shared_ptr does.
             if (acc->multi_op_)
                 acc->multi_op_->impl_ptr.reset();
         }
@@ -1304,16 +1304,16 @@ public:
         auto* acc = static_cast<io_uring_local_stream_acceptor*>(h.get());
         if (acc && acc->fd_ >= 0)
         {
-            // Flush the cancel SQE before closing the fd so the kernel
-            // resolves the file from the fd number while it is still valid.
+            // cancel_and_flush submits cancel-by-fd; drain_waiters_only
+            // drains queued waiters without re-submitting it.
             sched_->cancel_and_flush(acc->fd_);
-            acc->cancel();           // drain waiters
+            acc->drain_waiters_only();
             ::close(acc->fd_);
             acc->fd_ = -1;
 
-            // Break the multi_op_ → impl_ptr (shared_ptr<this>) ref cycle
-            // start_multishot established. See io_uring_tcp_acceptor_service
-            // for the known ASan limitation on immediate context destruction.
+            // Break the multi_op_ -> impl_ptr (shared_ptr<this>) cycle
+            // start_multishot established. See the symmetric comment
+            // in io_uring_tcp_acceptor_service::close.
             if (acc->multi_op_)
                 acc->multi_op_->impl_ptr.reset();
         }
@@ -1424,9 +1424,10 @@ class BOOST_COROSIO_DECL io_uring_udp_socket final
 {
     friend io_uring_udp_service;
 
-    int                    fd_    = -1;
-    io_uring_scheduler*    sched_ = nullptr;
-    io_uring_udp_service*  svc_   = nullptr;
+    int                    fd_     = -1;
+    int                    family_ = AF_UNSPEC;  // cached at open_socket
+    io_uring_scheduler*    sched_  = nullptr;
+    io_uring_udp_service*  svc_    = nullptr;
 
     corosio::endpoint local_endpoint_;
     corosio::endpoint remote_endpoint_;
@@ -1528,7 +1529,9 @@ public:
         op->fd                  = fd_;
         op->sched_              = sched_;
         op->impl_ptr            = shared_from_this();
-        op->addrlen             = to_sockaddr(ep, socket_family(fd_), op->addr);
+        // family_ cached at open_socket time (avoids per-connect
+        // getsockname).
+        op->addrlen             = to_sockaddr(ep, family_, op->addr);
         op->target_endpoint     = ep;
         op->remote_endpoint_out = &remote_endpoint_;
         op->local_endpoint_out  = &local_endpoint_;
@@ -1845,7 +1848,8 @@ public:
             sched_->submit_cancel_by_fd(sock.fd_);
             ::close(sock.fd_);
         }
-        sock.fd_ = fd;
+        sock.fd_     = fd;
+        sock.family_ = family;
         if (family == AF_INET6)
         {
             int one = 1;

@@ -134,21 +134,28 @@ public:
 
     void cancel() noexcept override
     {
+        drain_waiters_only();
+        if (fd_ >= 0)
+            sched_->submit_cancel_by_fd(fd_);
+    }
+
+    /// Drain queued waiters with operation_aborted but do NOT submit
+    /// any kernel cancel for the fd. Used by service close() paths
+    /// that have already submitted (or are about to submit) the
+    /// cancel-by-fd themselves via `cancel_and_flush`.
+    void drain_waiters_only() noexcept
+    {
         intrusive_list<waiter_node> drained;
         {
             std::lock_guard lk(mutex_);
             closing_ = true;
-            // Drain locally — the kernel cancel may not produce a !more CQE
-            // before the fd is closed, so we can't rely on on_accept_cqe_impl
-            // to surface operation_aborted to queued waiters.
+            // Drain under the lock — the kernel cancel may not produce
+            // a !more CQE before the fd is closed, so we can't rely on
+            // on_accept_cqe_impl to surface operation_aborted.
             while (auto* w = waiters_.pop_front())
                 drained.push_back(w);
         }
 
-        if (fd_ >= 0)
-            sched_->submit_cancel_by_fd(fd_);
-
-        // Synthesize cancellation completions for the drained waiters.
         while (auto* w = drained.pop_front())
         {
             w->stop_cb.reset();
@@ -191,11 +198,22 @@ public:
 
     void start_multishot()
     {
-        multi_op_ = std::make_unique<uring_multi_accept_op>();
-        multi_op_->listen_fd     = fd_;
-        multi_op_->acceptor_impl = this;
-        multi_op_->on_cqe        = &io_uring_multishot_acceptor_base::on_accept_cqe;
-        multi_op_->impl_ptr      = this->shared_from_this();
+        if (!multi_op_)
+        {
+            multi_op_ = std::make_unique<uring_multi_accept_op>();
+            multi_op_->listen_fd     = fd_;
+            multi_op_->acceptor_impl = this;
+            multi_op_->on_cqe        =
+                &io_uring_multishot_acceptor_base::on_accept_cqe;
+            multi_op_->impl_ptr      = this->shared_from_this();
+        }
+        else
+        {
+            // Reuse the existing op (re-arm path). Reset peer scratch
+            // so the kernel writes into a clean slot.
+            multi_op_->peer_storage = sockaddr_storage{};
+            multi_op_->peer_len     = sizeof(sockaddr_storage);
+        }
 
         auto* op = multi_op_.get();
         io_uring_submit_op(*sched_, op, [this, op](::io_uring_sqe* sqe) {
@@ -210,9 +228,9 @@ public:
     }
 
     /// Pull a parked fd or queue a waiter — used by Derived::accept().
-    /// Returns true if a synthesized completion was posted; false if a
-    /// waiter was queued and the caller returns std::noop_coroutine.
-    bool dispatch_or_queue(
+    /// Either case ends with the calling coroutine suspending; the
+    /// caller returns `std::noop_coroutine()` unconditionally.
+    void dispatch_or_queue(
         std::coroutine_handle<>     h,
         capy::executor_ref          ex,
         std::stop_token             token,
@@ -248,13 +266,12 @@ public:
                     w->stop_cb.emplace(token, waiter_canceller{w});
                 sched_->work_started();
                 waiters_.push_back(w);
-                return false;
+                return;
             }
         }
-        // Post outside the lock — acceptor mutex_ must never be held while
-        // dispatch_mutex_ is acquired by sched_->post().
+        // Post outside the lock — acceptor mutex_ must never be held
+        // while dispatch_mutex_ is acquired by sched_->post().
         sched_->post(ready_op);
-        return true;
     }
 
     void cancel_waiter(waiter_node* w) noexcept

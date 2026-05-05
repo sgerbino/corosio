@@ -76,6 +76,9 @@ struct io_uring_op : scheduler_op
     bool                                         empty_buffer = false;
 
     std::atomic<bool>                            cancelled{false};
+    /// True after `io_uring_sqe_set_data` has linked an SQE to this op.
+    /// Until then, request_cancel() has nothing for the kernel to find.
+    std::atomic<bool>                            sqe_set{false};
     std::optional<std::stop_callback<canceller>> stop_cb;
     cqe_func_type                                cqe_func;
 
@@ -92,14 +95,15 @@ struct io_uring_op : scheduler_op
     /// Bridge virtual dispatch to func-pointer dispatch. Lets the run
     /// loop dispatch any scheduler_op via `(*op)()` — both reactor-style
     /// services posted into the queue and proactor-style io_uring ops.
-    /// Pass `this` (non-null) so handlers take the normal completion path,
-    /// not the destroy path (which is signalled by owner == nullptr).
+    /// `owner` is non-null per scheduler_op's completion-vs-destroy
+    /// convention (see scheduler_op.hpp).
     void operator()() override { complete(this, 0, 0); }
 
     /// Arm the stop-token callback. Must be called before the SQE submits.
     void start(std::stop_token const& token)
     {
         cancelled.store(false, std::memory_order_relaxed);
+        sqe_set.store(false, std::memory_order_relaxed);
         stop_cb.reset();
         if (token.stop_possible())
             stop_cb.emplace(token, canceller{this});

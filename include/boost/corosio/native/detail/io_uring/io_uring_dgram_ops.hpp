@@ -87,7 +87,7 @@ struct uring_dgram_send_op : io_uring_op
                 *self->ec_out = {};
         }
         if (self->bytes_out)
-            *self->bytes_out = (self->res > 0)
+            *self->bytes_out = (self->res >= 0)
                 ? static_cast<std::size_t>(self->res) : 0;
 
         self->cont_op.cont.h = self->h;

@@ -32,7 +32,14 @@
 
 namespace boost::corosio::detail {
 
-/// Maximum scatter/gather segments per read op.
+/// Maximum scatter/gather segments per read/write/dgram op.
+///
+/// Bounded well below `IOV_MAX` (1024 on Linux) so each op's
+/// `iovec[io_uring_max_iov]` lives inside the io_uring_op object on
+/// the same allocation as the rest of its state. Plan 4's registered-
+/// buffer work will revisit; until then 16 covers typical scatter use
+/// cases (fragmented buffers from buffer_sequence) without bloating
+/// per-op memory.
 inline constexpr std::size_t io_uring_max_iov = 16;
 
 /** Resolve ec_out/bytes_out from a CQE result for a completed I/O op.
@@ -276,6 +283,10 @@ io_uring_submit_op(
         {
             prep(sqe);
             ::io_uring_sqe_set_data(sqe, op);
+            // Mark the op known to the kernel so request_cancel can
+            // submit a cancel SQE; release pairs with the acquire in
+            // io_uring_op::request_cancel.
+            op->sqe_set.store(true, std::memory_order_release);
             return;
         }
     }

@@ -147,13 +147,18 @@ public:
 
     /** Drain pending CQEs for a specific op's `user_data`.
 
-        Reads the kernel's CQ ring and invokes the op's destroy hook
-        for any CQE matching `target`. Used by member-owned ops
-        (e.g. `uring_multi_accept_op`) that must not be freed while
-        the kernel still has CQEs queued for them.
+        Submits an ASYNC_CANCEL by user_data to short-circuit any
+        in-flight op holding `target`, then iterates the CQ ring and
+        consumes every CQE matching `target` so its memory can be
+        freed safely. Used by member-owned ops (e.g.
+        `uring_multi_accept_op`) whose destructor cannot tolerate
+        outstanding CQEs.
 
-        @pre Caller is on the io_context's run thread or holds an
-        external guarantee against concurrent run-loop access.
+        @par Thread Safety
+        Safe to call from any thread. Internally takes `ring_mutex_`
+        to serialise against the run-loop leader; calls
+        `interrupt_reactor()` first so the leader returns from its
+        kernel wait promptly.
 
         @param target The op pointer used as user_data on the SQE.
     */
@@ -331,15 +336,18 @@ io_uring_scheduler::shutdown()
     stopped_.store(true, std::memory_order_release);
 
     // Drain posted ops, calling destroy() on each so embedded handles
-    // (coroutine frames, error_code outputs) get torn down rather than
-    // leaked. Mirrors reactor_scheduler::shutdown_drain.
+    // (coroutine frames, error_code outputs) get torn down rather
+    // than leaked. Mirrors reactor_scheduler::shutdown_drain.
     //
-    // Note: in-flight kernel ops are NOT drained here. Each socket /
-    // acceptor service's shutdown() submits cancel-by-fd and runs a
-    // poll() loop to drain its own ring traffic before this scheduler
-    // shutdown runs. ASan still flags some socket-side leaks that
-    // follow the same impl_ptr cycle pattern fixed for the acceptor;
-    // these are tracked as plan-2-blocker debt (review.md, Critical 2).
+    // Service shutdown order (driven by capy::execution_context):
+    // each socket/acceptor service::shutdown() submits a cancel SQE
+    // for every live impl. The CQEs that result either land in
+    // completed_ops_ (drained here as op->destroy()) or stay in the
+    // kernel ring; ~scheduler's io_uring_queue_exit cleans the
+    // latter up at process teardown. Self-referential impl_ptr
+    // cycles (e.g. multishot acceptor's multi_op_->impl_ptr) are
+    // broken explicitly inside each service before the scheduler
+    // shutdown runs.
     lock_type lock(dispatch_mutex_);
     while (auto* op = completed_ops_.pop())
     {
@@ -410,7 +418,10 @@ io_uring_scheduler::drain_wakeup_eventfd() const noexcept
 {
     std::uint64_t v;
     [[maybe_unused]] auto r = ::read(wakeup_eventfd_, &v, sizeof(v));
-    wakeup_armed_.store(false, std::memory_order_relaxed);
+    // Release pairs with the acquire side of interrupt_reactor's CAS:
+    // a posting thread that observes wakeup_armed_ == false from this
+    // store will see the eventfd already drained by the leader.
+    wakeup_armed_.store(false, std::memory_order_release);
 }
 
 inline void
@@ -470,11 +481,17 @@ io_uring_scheduler::post(scheduler_op* op) const
         interrupt_reactor();
 }
 
-// thread_local pointer to the scheduler whose run-loop is on the
-// current thread's stack. nullptr if the thread isn't inside any
-// io_uring scheduler's run/run_one/poll/do_one.
+// thread_local pointer to the scheduler whose run-loop is on top of
+// the current thread's stack. nullptr if the thread isn't inside any
+// io_uring scheduler's run/run_one/poll/do_one. Nesting (e.g. one
+// io_context's handler invoking another's poll) stacks the previous
+// pointer in the guard's prev_ slot, so running_in_this_thread()
+// reports correctly for whichever context is innermost on the stack.
 inline thread_local io_uring_scheduler const* tl_running_scheduler = nullptr;
 
+/// RAII guard: pushes `self` onto the thread's running-scheduler
+/// stack on construction, restores the previous on destruction. Used
+/// by run/run_one/wait_one/poll/poll_one to mark the running thread.
 struct io_uring_run_guard
 {
     io_uring_scheduler const* prev_;
@@ -804,9 +821,10 @@ inline void
 io_uring_op::request_cancel() noexcept
 {
     cancelled.store(true, std::memory_order_release);
-    // Submit an async cancel SQE so the kernel wakes the ring even if
-    // no data ever arrives (stop_token cancellation for in-flight ops).
-    if (sched_)
+    // Skip the cancel SQE if we never linked an SQE to this op — the
+    // bypass path in the caller will see cancelled=true and complete
+    // synchronously without a kernel round-trip.
+    if (sched_ && sqe_set.load(std::memory_order_acquire))
         sched_->submit_cancel_by_user_data(this);
 }
 
