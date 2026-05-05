@@ -136,6 +136,7 @@ io_uring_t::construct(capy::execution_context& ctx, unsigned concurrency_hint)
     ctx.make_service<detail::io_uring_tcp_acceptor_service>();
     ctx.make_service<detail::io_uring_local_stream_service>();
     ctx.make_service<detail::io_uring_local_stream_acceptor_service>();
+    ctx.make_service<detail::io_uring_udp_service>();
 
     return sched;
 }

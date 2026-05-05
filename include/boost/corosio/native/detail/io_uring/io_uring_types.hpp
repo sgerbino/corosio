@@ -1686,6 +1686,18 @@ private:
                 reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
                 io_uring_max_iov));
 
+        // Zero-iovec recvmsg would block forever waiting for a datagram.
+        // Complete immediately with 0 bytes, matching the reactor's behaviour.
+        if (op->iovec_count == 0)
+        {
+            op->res = 0;
+            op->start(token);
+            sched_->work_started();
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
+
         op->msg.msg_iov    = op->iovecs;
         op->msg.msg_iovlen = static_cast<decltype(op->msg.msg_iovlen)>(
             op->iovec_count);
