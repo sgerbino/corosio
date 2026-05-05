@@ -33,6 +33,7 @@
 #include <boost/corosio/native/detail/io_uring/io_uring_dgram_ops.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_multishot_acceptor.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
+#include <boost/corosio/native/detail/io_uring/io_uring_stream_file.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_types.hpp>
 #endif
 
@@ -138,6 +139,7 @@ io_uring_t::construct(capy::execution_context& ctx, unsigned concurrency_hint)
     ctx.make_service<detail::io_uring_local_stream_acceptor_service>();
     ctx.make_service<detail::io_uring_udp_service>();
     ctx.make_service<detail::io_uring_local_datagram_service>();
+    ctx.make_service<detail::io_uring_stream_file_service>(sched);
 
     return sched;
 }
