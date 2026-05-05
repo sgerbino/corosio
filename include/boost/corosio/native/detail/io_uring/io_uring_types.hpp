@@ -17,6 +17,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_acceptor_ops.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_buffer.hpp>
+#include <boost/corosio/native/detail/io_uring/io_uring_dgram_ops.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_op.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_multishot_acceptor.hpp>
@@ -26,11 +27,13 @@
 #include <boost/corosio/detail/local_stream_service.hpp>
 #include <boost/corosio/detail/tcp_acceptor_service.hpp>
 #include <boost/corosio/detail/tcp_service.hpp>
+#include <boost/corosio/detail/udp_service.hpp>
 #include <boost/corosio/local_endpoint.hpp>
 #include <boost/corosio/local_stream_acceptor.hpp>
 #include <boost/corosio/local_stream_socket.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
+#include <boost/corosio/udp_socket.hpp>
 
 #include <memory>
 #include <mutex>
@@ -50,6 +53,7 @@ class io_uring_tcp_service;
 class io_uring_tcp_acceptor_service;  // Task 18
 class io_uring_local_stream_service;
 class io_uring_local_stream_acceptor_service;
+class io_uring_udp_service;
 
 /** TCP socket implementation for io_uring.
 
@@ -1393,6 +1397,482 @@ private:
     std::mutex                      mutex_;
     std::unordered_map<io_uring_local_stream_acceptor*,
         std::shared_ptr<io_uring_local_stream_acceptor>> impls_;
+};
+
+/** UDP socket implementation for io_uring.
+
+    Implements `udp_socket::implementation` using a proactor model:
+    send_to, recv_from, send, recv, and connect operations are submitted
+    to the kernel via `io_uring_submit_op` and complete through the ring's
+    CQE path.
+
+    The object is always owned by a `shared_ptr` managed by the service.
+    In-flight ops hold an additional `shared_ptr` copy (`impl_ptr`) so
+    the kernel's user-data pointer remains valid until the CQE arrives.
+
+    @par Thread Safety
+    Distinct objects: Safe.
+    Shared objects: Unsafe. One send and one recv may be in flight
+    simultaneously, but two sends or two recvs must not overlap.
+*/
+class BOOST_COROSIO_DECL io_uring_udp_socket final
+    : public udp_socket::implementation
+    , public std::enable_shared_from_this<io_uring_udp_socket>
+{
+    friend io_uring_udp_service;
+
+    int                    fd_    = -1;
+    io_uring_scheduler*    sched_ = nullptr;
+    io_uring_udp_service*  svc_   = nullptr;
+
+    corosio::endpoint local_endpoint_;
+    corosio::endpoint remote_endpoint_;
+
+public:
+    /** Construct with service and scheduler references.
+
+        Both refs must outlive this socket.
+
+        @param svc   The owning service.
+        @param sched The io_uring scheduler owned by the context.
+    */
+    explicit io_uring_udp_socket(
+        io_uring_udp_service& svc,
+        io_uring_scheduler&   sched) noexcept
+        : sched_(&sched)
+        , svc_(&svc)
+    {}
+
+    ~io_uring_udp_socket() override
+    {
+        if (fd_ >= 0)
+            ::close(fd_);
+    }
+
+    // ----------------------------------------------------------------
+    // udp_socket::implementation
+    // ----------------------------------------------------------------
+
+    std::coroutine_handle<> send_to(
+        std::coroutine_handle<> h,
+        capy::executor_ref      ex,
+        buffer_param            buf,
+        endpoint                dest,
+        int                     flags,
+        std::stop_token         token,
+        std::error_code*        ec,
+        std::size_t*            bytes_out) override
+    {
+        sockaddr_storage addr{};
+        socklen_t len = endpoint_to_sockaddr(dest, addr);
+        return submit_send(h, ex, buf, len, addr, flags,
+            std::move(token), ec, bytes_out);
+    }
+
+    std::coroutine_handle<> recv_from(
+        std::coroutine_handle<> h,
+        capy::executor_ref      ex,
+        buffer_param            buf,
+        endpoint*               source,
+        int                     flags,
+        std::stop_token         token,
+        std::error_code*        ec,
+        std::size_t*            bytes_out) override
+    {
+        return submit_recv(h, ex, buf, source != nullptr, source, flags,
+            std::move(token), ec, bytes_out);
+    }
+
+    std::coroutine_handle<> send(
+        std::coroutine_handle<> h,
+        capy::executor_ref      ex,
+        buffer_param            buf,
+        int                     flags,
+        std::stop_token         token,
+        std::error_code*        ec,
+        std::size_t*            bytes_out) override
+    {
+        sockaddr_storage empty{};
+        return submit_send(h, ex, buf, 0, empty, flags,
+            std::move(token), ec, bytes_out);
+    }
+
+    std::coroutine_handle<> recv(
+        std::coroutine_handle<> h,
+        capy::executor_ref      ex,
+        buffer_param            buf,
+        int                     flags,
+        std::stop_token         token,
+        std::error_code*        ec,
+        std::size_t*            bytes_out) override
+    {
+        return submit_recv(h, ex, buf, false, nullptr, flags,
+            std::move(token), ec, bytes_out);
+    }
+
+    std::coroutine_handle<> connect(
+        std::coroutine_handle<> h,
+        capy::executor_ref      ex,
+        endpoint                ep,
+        std::stop_token         token,
+        std::error_code*        ec) override
+    {
+        auto op_guard = std::make_unique<uring_connect_op>();
+        auto* op = op_guard.get();
+        op->h                   = h;
+        op->ex                  = ex;
+        op->ec_out              = ec;
+        op->fd                  = fd_;
+        op->sched_              = sched_;
+        op->impl_ptr            = shared_from_this();
+        op->addrlen             = to_sockaddr(ep, socket_family(fd_), op->addr);
+        op->target_endpoint     = ep;
+        op->remote_endpoint_out = &remote_endpoint_;
+        op->local_endpoint_out  = &local_endpoint_;
+
+        op->start(token);
+        sched_->work_started();
+
+        if (op->cancelled.load(std::memory_order_acquire))
+        {
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
+
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_connect(
+                sqe, op->fd,
+                reinterpret_cast<sockaddr const*>(&op->addr),
+                op->addrlen);
+        });
+        return std::noop_coroutine();
+    }
+
+    native_handle_type native_handle() const noexcept override
+    {
+        return fd_;
+    }
+
+    void cancel() noexcept override
+    {
+        if (fd_ >= 0)
+            sched_->submit_cancel_by_fd(fd_);
+    }
+
+    std::error_code set_option(
+        int         level,
+        int         optname,
+        void const* data,
+        std::size_t size) noexcept override
+    {
+        if (::setsockopt(
+                fd_, level, optname,
+                reinterpret_cast<char const*>(data),
+                static_cast<socklen_t>(size)) != 0)
+            return make_err(errno);
+        return {};
+    }
+
+    std::error_code get_option(
+        int          level,
+        int          optname,
+        void*        data,
+        std::size_t* size) const noexcept override
+    {
+        socklen_t len = static_cast<socklen_t>(*size);
+        if (::getsockopt(fd_, level, optname,
+                reinterpret_cast<char*>(data), &len) != 0)
+            return make_err(errno);
+        *size = static_cast<std::size_t>(len);
+        return {};
+    }
+
+    endpoint local_endpoint() const noexcept override
+    {
+        return local_endpoint_;
+    }
+
+    endpoint remote_endpoint() const noexcept override
+    {
+        return remote_endpoint_;
+    }
+
+private:
+    std::coroutine_handle<> submit_send(
+        std::coroutine_handle<>        h,
+        capy::executor_ref             ex,
+        buffer_param                   buffers,
+        socklen_t                      dest_len,
+        sockaddr_storage const&        dest_storage,
+        int                            flags,
+        std::stop_token                token,
+        std::error_code*               ec,
+        std::size_t*                   bytes)
+    {
+        auto op_guard = std::make_unique<uring_dgram_send_op>();
+        auto* op = op_guard.get();
+        op->h         = h;
+        op->ex        = ex;
+        op->ec_out    = ec;
+        op->bytes_out = bytes;
+        op->fd        = fd_;
+        op->sched_    = sched_;
+        op->impl_ptr  = shared_from_this();
+        op->msg_flags = flags;
+
+        op->iovec_count = static_cast<int>(
+            buffers.copy_to(
+                reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
+                io_uring_max_iov));
+
+        op->msg.msg_iov    = op->iovecs;
+        op->msg.msg_iovlen = static_cast<decltype(op->msg.msg_iovlen)>(
+            op->iovec_count);
+        if (dest_len > 0)
+        {
+            op->dest_storage = dest_storage;
+            op->dest_len     = dest_len;
+            op->msg.msg_name    = &op->dest_storage;
+            op->msg.msg_namelen = dest_len;
+        }
+        else
+        {
+            op->msg.msg_name    = nullptr;
+            op->msg.msg_namelen = 0;
+        }
+
+        op->start(token);
+        sched_->work_started();
+
+        if (op->cancelled.load(std::memory_order_acquire))
+        {
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
+
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_sendmsg(sqe, op->fd, &op->msg,
+                op->msg_flags | MSG_NOSIGNAL);
+        });
+        return std::noop_coroutine();
+    }
+
+    std::coroutine_handle<> submit_recv(
+        std::coroutine_handle<>  h,
+        capy::executor_ref       ex,
+        buffer_param             buffers,
+        bool                     want_source,
+        corosio::endpoint*       source_out,
+        int                      flags,
+        std::stop_token          token,
+        std::error_code*         ec,
+        std::size_t*             bytes)
+    {
+        auto op_guard = std::make_unique<uring_dgram_recv_op>();
+        auto* op = op_guard.get();
+        op->h         = h;
+        op->ex        = ex;
+        op->ec_out    = ec;
+        op->bytes_out = bytes;
+        op->fd        = fd_;
+        op->sched_    = sched_;
+        op->impl_ptr  = shared_from_this();
+        op->msg_flags = flags;
+
+        op->iovec_count = static_cast<int>(
+            buffers.copy_to(
+                reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
+                io_uring_max_iov));
+
+        op->msg.msg_iov    = op->iovecs;
+        op->msg.msg_iovlen = static_cast<decltype(op->msg.msg_iovlen)>(
+            op->iovec_count);
+        if (want_source)
+        {
+            op->msg.msg_name    = &op->source_storage;
+            op->msg.msg_namelen = sizeof(op->source_storage);
+        }
+        else
+        {
+            op->msg.msg_name    = nullptr;
+            op->msg.msg_namelen = 0;
+        }
+
+        op->source_writer_ctx = source_out;
+        op->source_writer     = want_source ? &write_ip_source : nullptr;
+
+        op->start(token);
+        sched_->work_started();
+
+        if (op->cancelled.load(std::memory_order_acquire))
+        {
+            io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(op_guard.release());
+            return std::noop_coroutine();
+        }
+
+        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_recvmsg(sqe, op->fd, &op->msg, op->msg_flags);
+        });
+        return std::noop_coroutine();
+    }
+
+    static void write_ip_source(
+        void* ctx, sockaddr_storage const& s, socklen_t /*len*/) noexcept
+    {
+        if (auto* out = static_cast<corosio::endpoint*>(ctx))
+            *out = sockaddr_to_endpoint(s);
+    }
+};
+
+/** UDP socket service for io_uring.
+
+    Owns all `io_uring_udp_socket` implementations for an `io_context`.
+    Satisfies the `udp_service` interface so the generic `udp_socket`
+    front-end can call `open_datagram_socket` and `bind_datagram`
+    transparently.
+
+    Socket impls are reference-counted inside the service map; raw
+    pointers returned from `construct()` remain valid until `destroy()`
+    or `shutdown()` is called.
+
+    @par Thread Safety
+    All public member functions are thread-safe.
+*/
+class BOOST_COROSIO_DECL io_uring_udp_service final
+    : public udp_service
+{
+public:
+    /// Identifies this service for `execution_context` lookup.
+    using key_type = udp_service;
+
+    /** Construct the UDP service.
+
+        @param ctx The owning execution context. The io_uring scheduler
+            must already be registered.
+    */
+    explicit io_uring_udp_service(capy::execution_context& ctx)
+        : sched_(&ctx.use_service<io_uring_scheduler>())
+    {}
+
+    void shutdown() override
+    {
+        std::vector<std::shared_ptr<io_uring_udp_socket>> live;
+        {
+            std::lock_guard lk(mutex_);
+            live.reserve(impls_.size());
+            for (auto& [_, p] : impls_)
+                live.push_back(p);
+        }
+        // Cancel without the lock held to avoid inversion if cancel()
+        // ever needs to re-enter the service.
+        for (auto& p : live)
+            p->cancel();
+    }
+
+    io_object::implementation* construct() override
+    {
+        auto p   = std::make_shared<io_uring_udp_socket>(*this, *sched_);
+        auto* raw = p.get();
+        std::lock_guard lk(mutex_);
+        impls_.emplace(raw, std::move(p));
+        return raw;
+    }
+
+    void destroy(io_object::implementation* p) override
+    {
+        if (!p)
+            return;
+        std::lock_guard lk(mutex_);
+        impls_.erase(static_cast<io_uring_udp_socket*>(p));
+    }
+
+    // Close the fd eagerly when udp_socket::close() is called, before
+    // destroy() drops the shared_ptr and the destructor runs.
+    void close(io_object::handle& h) override
+    {
+        auto* sock = static_cast<io_uring_udp_socket*>(h.get());
+        if (sock && sock->fd_ >= 0)
+        {
+            // Cancel pending SQEs before closing so the kernel resolves
+            // the fd number while it is still valid.
+            sched_->cancel_and_flush(sock->fd_);
+            ::close(sock->fd_);
+            sock->fd_              = -1;
+            sock->local_endpoint_  = endpoint{};
+            sock->remote_endpoint_ = endpoint{};
+        }
+    }
+
+    /** Open a datagram socket and associate it with an impl.
+
+        Creates a non-blocking, close-on-exec socket via `socket(2)`.
+
+        @param impl     The socket implementation to initialise.
+        @param family   Address family (e.g. `AF_INET`, `AF_INET6`).
+        @param type     Socket type (`SOCK_DGRAM`).
+        @param protocol Protocol number (`IPPROTO_UDP`).
+        @return Error code on failure, empty on success.
+    */
+    std::error_code open_datagram_socket(
+        udp_socket::implementation& impl,
+        int family, int type, int protocol) override
+    {
+        auto& sock = static_cast<io_uring_udp_socket&>(impl);
+        int fd = ::socket(
+            family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
+        if (fd < 0)
+            return make_err(errno);
+        if (sock.fd_ >= 0)
+        {
+            sched_->submit_cancel_by_fd(sock.fd_);
+            ::close(sock.fd_);
+        }
+        sock.fd_ = fd;
+        if (family == AF_INET6)
+        {
+            int one = 1;
+            ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
+        }
+        return {};
+    }
+
+    /** Bind the socket and capture the local endpoint via `getsockname`.
+
+        @param impl The socket implementation to bind.
+        @param ep   The local endpoint to bind to.
+        @return Error code on failure, empty on success.
+    */
+    std::error_code bind_datagram(
+        udp_socket::implementation& impl, endpoint ep) override
+    {
+        auto& sock = static_cast<io_uring_udp_socket&>(impl);
+        sockaddr_storage addr{};
+        socklen_t len = endpoint_to_sockaddr(ep, addr);
+        if (::bind(
+                sock.fd_,
+                reinterpret_cast<sockaddr*>(&addr), len) < 0)
+            return make_err(errno);
+
+        sockaddr_storage local{};
+        socklen_t local_len = sizeof(local);
+        if (::getsockname(
+                sock.fd_,
+                reinterpret_cast<sockaddr*>(&local), &local_len) == 0)
+            sock.local_endpoint_ = sockaddr_to_endpoint(local);
+        return {};
+    }
+
+    /// Return the scheduler used by sockets created by this service.
+    io_uring_scheduler& scheduler() noexcept { return *sched_; }
+
+private:
+    io_uring_scheduler*  sched_;
+    std::mutex           mutex_;
+    std::unordered_map<io_uring_udp_socket*,
+                       std::shared_ptr<io_uring_udp_socket>> impls_;
 };
 
 } // namespace boost::corosio::detail
