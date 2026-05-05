@@ -44,6 +44,12 @@ class io_uring_random_access_file_service;
     / `IORING_OP_WRITEV` with the caller-supplied offset. Metadata
     operations (open, size, resize, sync, close) are synchronous
     syscalls.
+
+    @par Thread Safety
+    Concurrent `read_some_at` / `write_some_at` calls on the same
+    file at distinct offsets are safe; ordering between two
+    submissions at the same offset is unspecified at the kernel
+    level (matches POSIX `pread(2)` / `pwrite(2)` semantics).
 */
 class BOOST_COROSIO_DECL io_uring_random_access_file final
     : public random_access_file::implementation
@@ -65,7 +71,7 @@ public:
         close_file();
     }
 
-    // -- random_access_file::implementation (defined in Task 7) --
+    // -- random_access_file::implementation --
 
     std::coroutine_handle<> read_some_at(
         std::uint64_t,
@@ -149,6 +155,7 @@ public:
 
     // -- Internal --
 
+    /// Open the file. Synchronous; sets `fd_`. Caller is the service.
     std::error_code open_file(
         std::filesystem::path const& path, file_base::flags mode)
     {
@@ -179,9 +186,17 @@ public:
             return make_err(errno);
 
         fd_ = fd;
+
+#ifdef POSIX_FADV_RANDOM
+        // Hint the page cache that access will be random; matches
+        // the POSIX backend.
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_RANDOM);
+#endif
+
         return {};
     }
 
+    /// Cancel any in-flight ops and close the fd. Idempotent.
     void close_file() noexcept
     {
         if (fd_ >= 0)
@@ -325,8 +340,10 @@ public:
 
     void destroy(io_object::implementation* p) override
     {
+        // close_file() already does cancel_and_flush(fd_) before
+        // ::close — calling cancel() too would queue a redundant
+        // cancel-by-fd SQE that finds nothing.
         auto& impl = static_cast<io_uring_random_access_file&>(*p);
-        impl.cancel();
         impl.close_file();
         destroy_impl(impl);
     }
@@ -334,12 +351,8 @@ public:
     void close(io_object::handle& h) override
     {
         if (h.get())
-        {
-            auto& impl =
-                static_cast<io_uring_random_access_file&>(*h.get());
-            impl.cancel();
-            impl.close_file();
-        }
+            static_cast<io_uring_random_access_file&>(
+                *h.get()).close_file();
     }
 
     std::error_code open_file(
@@ -357,7 +370,6 @@ public:
         for (auto* impl = file_list_.pop_front(); impl != nullptr;
              impl       = file_list_.pop_front())
         {
-            impl->cancel();
             impl->close_file();
         }
         file_ptrs_.clear();

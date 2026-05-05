@@ -27,10 +27,8 @@
 #include <boost/corosio/detail/timer_service.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_op.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
-#include <boost/corosio/native/detail/posix/posix_random_access_file_service.hpp>
 #include <boost/corosio/native/detail/posix/posix_resolver_service.hpp>
 #include <boost/corosio/native/detail/posix/posix_signal_service.hpp>
-#include <boost/corosio/native/detail/posix/posix_stream_file_service.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
 #include <atomic>

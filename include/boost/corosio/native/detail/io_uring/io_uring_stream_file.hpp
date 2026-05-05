@@ -49,6 +49,15 @@ class io_uring_stream_file_service;
     Concurrent `read_some` / `write_some` calls on the same file
     interleave at the kernel level (matches POSIX `read(2)` /
     `write(2)` semantics on a shared positional fd).
+
+    @note On `O_APPEND` open this backend relies on the kernel's
+    `f_pos` rather than tracking the offset in user space. Writes
+    still go to EOF atomically per `O_APPEND` semantics, but
+    `seek(0, seek_cur)` immediately after an append-mode open
+    returns `0` (the current f_pos), not the file size — observably
+    different from the POSIX backend, which seeds an internal offset
+    to size-at-open. Both behaviours are valid; documented for
+    cross-backend symmetry.
 */
 class BOOST_COROSIO_DECL io_uring_stream_file final
     : public stream_file::implementation
@@ -70,7 +79,7 @@ public:
         close_file();
     }
 
-    // -- io_stream::implementation (defined in Task 3) --
+    // -- io_stream::implementation --
 
     std::coroutine_handle<> read_some(
         std::coroutine_handle<>,
@@ -197,6 +206,13 @@ public:
             return make_err(errno);
 
         fd_ = fd;
+
+#ifdef POSIX_FADV_SEQUENTIAL
+        // Hint the page cache about the access pattern; matches the
+        // POSIX backend.
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+
         return {};
     }
 
@@ -340,8 +356,10 @@ public:
 
     void destroy(io_object::implementation* p) override
     {
+        // close_file() already does cancel_and_flush(fd_) before
+        // ::close — calling cancel() too would queue a redundant
+        // cancel-by-fd SQE that finds nothing.
         auto& impl = static_cast<io_uring_stream_file&>(*p);
-        impl.cancel();
         impl.close_file();
         destroy_impl(impl);
     }
@@ -349,11 +367,7 @@ public:
     void close(io_object::handle& h) override
     {
         if (h.get())
-        {
-            auto& impl = static_cast<io_uring_stream_file&>(*h.get());
-            impl.cancel();
-            impl.close_file();
-        }
+            static_cast<io_uring_stream_file&>(*h.get()).close_file();
     }
 
     std::error_code open_file(
@@ -371,7 +385,6 @@ public:
         for (auto* impl = file_list_.pop_front(); impl != nullptr;
              impl       = file_list_.pop_front())
         {
-            impl->cancel();
             impl->close_file();
         }
         file_ptrs_.clear();
