@@ -18,6 +18,7 @@
 // boost::corosio::io_uring tag variable from shadowing struct ::io_uring.
 #include <liburing.h>
 
+#include <boost/corosio/detail/conditionally_enabled_event.hpp>
 #include <boost/corosio/detail/conditionally_enabled_mutex.hpp>
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/except.hpp>
@@ -63,6 +64,7 @@ public:
     using key_type   = scheduler;
     using mutex_type = conditionally_enabled_mutex;
     using lock_type  = mutex_type::scoped_lock;
+    using event_type = conditionally_enabled_event;
 
     io_uring_scheduler(capy::execution_context& ctx, int concurrency_hint = -1);
     ~io_uring_scheduler() override;
@@ -163,6 +165,7 @@ public:
     {
         single_threaded_ = v;
         dispatch_mutex_.set_enabled(!v);
+        cond_.set_enabled(!v);
     }
 
     /// Return true if single-threaded (lockless) mode is active.
@@ -174,9 +177,13 @@ private:
     timer_service*                    timer_svc_      = nullptr;
 
     mutable mutex_type                dispatch_mutex_{true};
+    mutable event_type                cond_{true};
     mutable op_queue                  completed_ops_;
     mutable std::atomic<std::int64_t> outstanding_work_{0};
     std::atomic<bool>                 stopped_{false};
+    // Leader-follower flag: true while a thread is blocked in
+    // io_uring_submit_and_wait_timeout. Protected by dispatch_mutex_.
+    mutable bool                      task_running_   = false;
     bool                              single_threaded_ = false;
 
     int                               cancel_sentinel_ = 0;
@@ -269,12 +276,19 @@ io_uring_scheduler::shutdown()
         op->destroy();
         lock.lock();
     }
+    cond_.notify_all();
 }
 
 inline void
 io_uring_scheduler::stop()
 {
     stopped_.store(true, std::memory_order_release);
+    {
+        lock_type lock(dispatch_mutex_);
+        cond_.notify_all();
+    }
+    // Wake the leader if one is blocked in the kernel.
+    interrupt_reactor();
 }
 
 inline bool
@@ -350,22 +364,32 @@ io_uring_scheduler::post(std::coroutine_handle<> h) const
 
     auto* op = new post_handler(h);
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
+    bool wake_leader;
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
+        wake_leader = task_running_;
+        if (!wake_leader)
+            cond_.notify_one();
     }
-    interrupt_reactor();
+    if (wake_leader)
+        interrupt_reactor();
 }
 
 inline void
 io_uring_scheduler::post(scheduler_op* op) const
 {
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
+    bool wake_leader;
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
+        wake_leader = task_running_;
+        if (!wake_leader)
+            cond_.notify_one();
     }
-    interrupt_reactor();
+    if (wake_leader)
+        interrupt_reactor();
 }
 
 // thread_local pointer to the scheduler whose run-loop is on the
@@ -476,24 +500,64 @@ io_uring_scheduler::poll_one()
 inline std::size_t
 io_uring_scheduler::do_one(long timeout_us)
 {
+    // Leader-follower: only one thread at a time may call
+    // io_uring_submit_and_wait_timeout on a shared ring (liburing's
+    // userspace head/tail bookkeeping is not thread-safe). Other
+    // threads either dispatch ready ops from completed_ops_ or wait
+    // on cond_ until the leader returns from the kernel.
     if (stopped_.load(std::memory_order_acquire))
         return 0;
 
-    // Drain any cross-thread-posted ops first.
-    scheduler_op* op = nullptr;
+    lock_type lock(dispatch_mutex_);
+    for (;;)
     {
-        lock_type lock(dispatch_mutex_);
-        op = completed_ops_.pop();
-    }
+        if (stopped_.load(std::memory_order_acquire))
+            return 0;
 
-    if (!op)
-    {
-        // Compute kernel timeout: caller-driven OR timer-driven.
-        __kernel_timespec ts{};
-        __kernel_timespec* ts_ptr = nullptr;
+        if (auto* op = completed_ops_.pop())
+        {
+            // Hand off any remaining queued work to a follower so we
+            // dispatch in parallel.
+            if (!completed_ops_.empty())
+                cond_.notify_one();
+            lock.unlock();
+            (*op)();
+            work_finished();
+            return 1;
+        }
 
-        auto next_expiry = timer_svc_->nearest_expiry();
-        auto now         = std::chrono::steady_clock::now();
+        if (outstanding_work_.load(std::memory_order_acquire) == 0)
+            return 0;
+
+        if (task_running_)
+        {
+            // Another thread holds leadership; either return (poll)
+            // or wait for it to deliver work / release leadership.
+            if (timeout_us == 0)
+                return 0;
+            if (timeout_us < 0)
+                cond_.wait(lock);
+            else
+            {
+                cond_.wait_for(
+                    lock, std::chrono::microseconds(timeout_us));
+                // wait_one honoured its timeout; if nothing arrived,
+                // return rather than re-arm.
+                if (completed_ops_.empty() &&
+                    !stopped_.load(std::memory_order_acquire))
+                    return 0;
+            }
+            continue;
+        }
+
+        // Become the leader: run the kernel poll. We drop the lock
+        // for the blocking wait, then take it back to release
+        // leadership and wake any follower that should pick up new
+        // work.
+        __kernel_timespec  ts{};
+        __kernel_timespec* ts_ptr      = nullptr;
+        auto               next_expiry = timer_svc_->nearest_expiry();
+        auto               now = std::chrono::steady_clock::now();
 
         if (timeout_us == 0)
         {
@@ -519,35 +583,38 @@ io_uring_scheduler::do_one(long timeout_us)
             ts_ptr     = &ts;
         }
 
-        // Submit pending SQEs and wait for at least one CQE.
+        task_running_ = true;
+        lock.unlock();
+
         ::io_uring_cqe* cqe = nullptr;
-        int rc = ::io_uring_submit_and_wait_timeout(
+        int             rc  = ::io_uring_submit_and_wait_timeout(
             &ring_, &cqe, 1, ts_ptr, nullptr);
+
         if (rc < 0 && rc != -ETIME && rc != -EINTR)
+        {
+            // Restore state before propagating so followers don't
+            // deadlock waiting for a leader that never returns.
+            lock.lock();
+            task_running_ = false;
+            cond_.notify_all();
             detail::throw_system_error(
                 make_err(-rc), "io_uring_submit_and_wait_timeout");
+        }
 
-        // Drain all available completions.
         process_completions();
-
-        // Process any timer expirations.
         timer_svc_->process_expired();
 
-        // Re-check for posted ops after the wait.
-        lock_type lock(dispatch_mutex_);
-        op = completed_ops_.pop();
-        if (!op)
+        lock.lock();
+        task_running_ = false;
+        cond_.notify_all();
+
+        // For poll() / wait_one() we honour the timeout: one kernel
+        // pass is the contract. If still nothing dispatchable, exit.
+        // For run() (timeout < 0) keep looping until work arrives or
+        // someone calls stop().
+        if (timeout_us >= 0 && completed_ops_.empty())
             return 0;
     }
-
-    // Virtual dispatch — bridges both reactor-style services posted into
-    // our queue (e.g. posix_signal_op overrides operator()()) and
-    // proactor-style io_uring ops (io_uring_op overrides operator()()
-    // to forward to its func-pointer).
-    // work_finished balances the work_started from post(), matching IOCP.
-    (*op)();
-    work_finished();
-    return 1;
 }
 
 inline void
