@@ -193,6 +193,100 @@ public:
     }
 };
 
+inline std::coroutine_handle<>
+io_uring_random_access_file::read_some_at(
+    std::uint64_t           user_offset,
+    std::coroutine_handle<> h,
+    capy::executor_ref      ex,
+    buffer_param            buffers,
+    std::stop_token         token,
+    std::error_code*        ec,
+    std::size_t*            bytes)
+{
+    auto op_guard = std::make_unique<uring_file_read_op>();
+    auto* op = op_guard.get();
+    op->h         = h;
+    op->ex        = ex;
+    op->ec_out    = ec;
+    op->bytes_out = bytes;
+    op->fd        = fd_;
+    op->offset    = static_cast<std::int64_t>(user_offset);
+    op->sched_    = sched_;
+    op->impl_ptr  = shared_from_this();
+
+    op->iovec_count = static_cast<int>(
+        buffers.copy_to(
+            reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
+            io_uring_max_iov));
+    op->empty_buffer = (op->iovec_count == 0);
+
+    op->start(token);
+    sched_->work_started();
+
+    if (op->empty_buffer ||
+        op->cancelled.load(std::memory_order_acquire))
+    {
+        io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+        sched_->push_completed_locked(op_guard.release());
+        return std::noop_coroutine();
+    }
+
+    io_uring_submit_op(*sched_, op_guard.release(),
+        [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_readv(
+                sqe, op->fd, op->iovecs, op->iovec_count,
+                static_cast<__u64>(op->offset));
+        });
+    return std::noop_coroutine();
+}
+
+inline std::coroutine_handle<>
+io_uring_random_access_file::write_some_at(
+    std::uint64_t           user_offset,
+    std::coroutine_handle<> h,
+    capy::executor_ref      ex,
+    buffer_param            buffers,
+    std::stop_token         token,
+    std::error_code*        ec,
+    std::size_t*            bytes)
+{
+    auto op_guard = std::make_unique<uring_file_write_op>();
+    auto* op = op_guard.get();
+    op->h         = h;
+    op->ex        = ex;
+    op->ec_out    = ec;
+    op->bytes_out = bytes;
+    op->fd        = fd_;
+    op->offset    = static_cast<std::int64_t>(user_offset);
+    op->sched_    = sched_;
+    op->impl_ptr  = shared_from_this();
+
+    op->iovec_count = static_cast<int>(
+        buffers.copy_to(
+            reinterpret_cast<capy::mutable_buffer*>(op->iovecs),
+            io_uring_max_iov));
+    op->empty_buffer = (op->iovec_count == 0);
+
+    op->start(token);
+    sched_->work_started();
+
+    if (op->empty_buffer ||
+        op->cancelled.load(std::memory_order_acquire))
+    {
+        io_uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+        sched_->push_completed_locked(op_guard.release());
+        return std::noop_coroutine();
+    }
+
+    io_uring_submit_op(*sched_, op_guard.release(),
+        [op](::io_uring_sqe* sqe) {
+            ::io_uring_prep_writev(
+                sqe, op->fd, op->iovecs, op->iovec_count,
+                static_cast<__u64>(op->offset));
+        });
+    return std::noop_coroutine();
+}
+
 } // namespace boost::corosio::detail
 
 #endif // BOOST_COROSIO_HAS_IO_URING
