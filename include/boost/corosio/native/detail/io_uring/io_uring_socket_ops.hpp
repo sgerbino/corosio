@@ -296,9 +296,9 @@ struct uring_local_connect_op : io_uring_op
     sockaddr_storage  addr{};
     socklen_t         addrlen             = 0;
     int               fd                  = -1;
-    local_endpoint    target_endpoint{};
-    local_endpoint*   remote_endpoint_out = nullptr;
-    local_endpoint*   local_endpoint_out  = nullptr;
+    corosio::local_endpoint    target_endpoint{};
+    corosio::local_endpoint*   remote_endpoint_out = nullptr;
+    corosio::local_endpoint*   local_endpoint_out  = nullptr;
 
     uring_local_connect_op() noexcept
         : io_uring_op(&do_handler, &do_cqe)

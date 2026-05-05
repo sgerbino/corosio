@@ -37,7 +37,7 @@ endpoint_to_sockaddr(endpoint const& ep, sockaddr_storage& out) noexcept
 
 /// Convert a corosio::local_endpoint to a sockaddr_storage.
 inline socklen_t
-endpoint_to_sockaddr(local_endpoint const& ep, sockaddr_storage& out) noexcept
+endpoint_to_sockaddr(corosio::local_endpoint const& ep, sockaddr_storage& out) noexcept
 {
     return to_sockaddr(ep, out);
 }
@@ -57,7 +57,7 @@ sockaddr_to_endpoint(sockaddr_storage const& sa) noexcept
 }
 
 /// Convert a sockaddr_storage to a corosio::local_endpoint.
-inline local_endpoint
+inline corosio::local_endpoint
 sockaddr_to_local_endpoint(
     sockaddr_storage const& sa, socklen_t len) noexcept
 {
