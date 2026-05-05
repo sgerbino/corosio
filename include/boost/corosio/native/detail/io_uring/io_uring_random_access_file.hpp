@@ -287,6 +287,98 @@ io_uring_random_access_file::write_some_at(
     return std::noop_coroutine();
 }
 
+/** Native io_uring random-access-file service.
+
+    Owns all `io_uring_random_access_file` impls. Replaces
+    `posix_random_access_file_service` for the io_uring backend;
+    registered under the abstract `random_access_file_service` key
+    by `io_uring_t::construct`.
+*/
+class BOOST_COROSIO_DECL io_uring_random_access_file_service final
+    : public random_access_file_service
+{
+public:
+    explicit io_uring_random_access_file_service(
+        capy::execution_context& /*ctx*/, io_uring_scheduler& sched)
+        : sched_(&sched)
+    {}
+
+    ~io_uring_random_access_file_service() override = default;
+
+    io_uring_random_access_file_service(
+        io_uring_random_access_file_service const&)            = delete;
+    io_uring_random_access_file_service& operator=(
+        io_uring_random_access_file_service const&)            = delete;
+
+    io_object::implementation* construct() override
+    {
+        auto ptr   = std::make_shared<io_uring_random_access_file>(
+            *sched_);
+        auto* impl = ptr.get();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            file_list_.push_back(impl);
+            file_ptrs_[impl] = std::move(ptr);
+        }
+        return impl;
+    }
+
+    void destroy(io_object::implementation* p) override
+    {
+        auto& impl = static_cast<io_uring_random_access_file&>(*p);
+        impl.cancel();
+        impl.close_file();
+        destroy_impl(impl);
+    }
+
+    void close(io_object::handle& h) override
+    {
+        if (h.get())
+        {
+            auto& impl =
+                static_cast<io_uring_random_access_file&>(*h.get());
+            impl.cancel();
+            impl.close_file();
+        }
+    }
+
+    std::error_code open_file(
+        random_access_file::implementation& impl,
+        std::filesystem::path const& path,
+        file_base::flags mode) override
+    {
+        return static_cast<io_uring_random_access_file&>(impl).open_file(
+            path, mode);
+    }
+
+    void shutdown() override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto* impl = file_list_.pop_front(); impl != nullptr;
+             impl       = file_list_.pop_front())
+        {
+            impl->cancel();
+            impl->close_file();
+        }
+        file_ptrs_.clear();
+    }
+
+private:
+    void destroy_impl(io_uring_random_access_file& impl)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        file_list_.remove(&impl);
+        file_ptrs_.erase(&impl);
+    }
+
+    io_uring_scheduler*                              sched_;
+    std::mutex                                       mutex_;
+    intrusive_list<io_uring_random_access_file>      file_list_;
+    std::unordered_map<
+        io_uring_random_access_file*,
+        std::shared_ptr<io_uring_random_access_file>> file_ptrs_;
+};
+
 } // namespace boost::corosio::detail
 
 #endif // BOOST_COROSIO_HAS_IO_URING
