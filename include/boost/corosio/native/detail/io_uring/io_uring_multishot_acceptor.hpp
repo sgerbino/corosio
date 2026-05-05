@@ -307,7 +307,26 @@ protected:
             }
             else if (!waiters_.empty())
             {
-                matched = waiters_.pop_front();
+                // Claim the head waiter atomically. If the canceller
+                // already won the race (cancelled was already true),
+                // leave the waiter in the list for cancel_waiter to
+                // remove and dispatch with operation_aborted; park the
+                // new_fd so the next waiter consumes it.
+                auto* head_w = waiters_.front();
+                if (!head_w->cancelled.exchange(
+                        true, std::memory_order_acq_rel))
+                {
+                    waiters_.pop_front();
+                    matched = head_w;
+                }
+                else if (new_fd >= 0)
+                {
+                    auto* node     = new ready_fd_node{};
+                    node->fd       = new_fd;
+                    node->peer     = multi_op_->peer_storage;
+                    node->peer_len = multi_op_->peer_len;
+                    ready_fds_.push_back(node);
+                }
             }
             else if (new_fd >= 0)
             {
