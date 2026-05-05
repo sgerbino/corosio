@@ -30,6 +30,7 @@
 #if BOOST_COROSIO_HAS_IO_URING
 #include <boost/corosio/native/detail/io_uring/io_uring_acceptor_ops.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_buffer.hpp>
+#include <boost/corosio/native/detail/io_uring/io_uring_dgram_ops.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_multishot_acceptor.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_scheduler.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_types.hpp>
