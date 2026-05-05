@@ -165,6 +165,7 @@ public:
     {
         single_threaded_ = v;
         dispatch_mutex_.set_enabled(!v);
+        ring_mutex_.set_enabled(!v);
         cond_.set_enabled(!v);
     }
 
@@ -176,7 +177,14 @@ private:
     int                               wakeup_eventfd_ = -1;
     timer_service*                    timer_svc_      = nullptr;
 
+    // dispatch_mutex_ protects completed_ops_, cond_, task_running_.
+    // ring_mutex_ protects every userspace touch of ring_ (SQ tail, CQ
+    // head): get_sqe / submit / submit_and_wait_timeout / for_each_cqe
+    // / cq_advance. Lock order when both are taken: ring_mutex_ first,
+    // then dispatch_mutex_ (held briefly inside process_completions
+    // for the splice into completed_ops_).
     mutable mutex_type                dispatch_mutex_{true};
+    mutable mutex_type                ring_mutex_{true};
     mutable event_type                cond_{true};
     mutable op_queue                  completed_ops_;
     mutable std::atomic<std::int64_t> outstanding_work_{0};
@@ -188,6 +196,12 @@ private:
 
     int                               cancel_sentinel_ = 0;
     mutable std::atomic<bool>         wakeup_armed_{false};
+
+    // drain_cqes_for tuning. The bound exists to avoid stalling a
+    // destructor if the kernel never returns a cancel completion (best-
+    // effort drain); 8 rounds * 1ms == 8ms worst case.
+    static constexpr int              drain_cqes_max_rounds = 8;
+    static constexpr unsigned long    drain_cqes_kick_ns    = 1'000'000;
 
     std::size_t do_one(long timeout_us);
     void        process_completions();
@@ -586,9 +600,20 @@ io_uring_scheduler::do_one(long timeout_us)
         task_running_ = true;
         lock.unlock();
 
-        ::io_uring_cqe* cqe = nullptr;
-        int             rc  = ::io_uring_submit_and_wait_timeout(
-            &ring_, &cqe, 1, ts_ptr, nullptr);
+        // Take ring_mutex_ for SQ submit + CQ drain. Cross-thread
+        // cancel paths (cancel_and_flush, drain_cqes_for, etc.) take
+        // the same mutex; they call interrupt_reactor() first so this
+        // submit_and_wait_timeout returns promptly.
+        int rc = 0;
+        {
+            lock_type ring_lock(ring_mutex_);
+            ::io_uring_cqe* cqe = nullptr;
+            rc = ::io_uring_submit_and_wait_timeout(
+                &ring_, &cqe, 1, ts_ptr, nullptr);
+
+            if (rc >= 0 || rc == -ETIME || rc == -EINTR)
+                process_completions();
+        }
 
         if (rc < 0 && rc != -ETIME && rc != -EINTR)
         {
@@ -601,7 +626,6 @@ io_uring_scheduler::do_one(long timeout_us)
                 make_err(-rc), "io_uring_submit_and_wait_timeout");
         }
 
-        process_completions();
         timer_svc_->process_expired();
 
         lock.lock();
@@ -652,20 +676,28 @@ io_uring_scheduler::process_completions()
     if (consumed)
         io_uring_cq_advance(&ring_, consumed);
 
-    // do_one holds dispatch_mutex_ only for the pop(), not during the
-    // wait. process_completions runs inside do_one after the wait, so
-    // the lock is not held here — take it briefly for the splice.
+    // Caller holds ring_mutex_. Take dispatch_mutex_ briefly to
+    // splice locally-collected ops onto the global queue (lock order
+    // ring_mutex_ -> dispatch_mutex_).
     if (!local_ops.empty())
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.splice(local_ops);
+        // Wake any follower waiting on cond_; it'll pop and dispatch.
+        cond_.notify_one();
     }
 }
 
 inline void
 io_uring_scheduler::submit_cancel_by_user_data(io_uring_op* target) noexcept
 {
-    lock_type lock(dispatch_mutex_);
+    // Wake the leader (if any) so its submit_and_wait_timeout returns
+    // and releases ring_mutex_; otherwise we'd block here until the
+    // next CQE arrives organically. Cancellation is best-effort if
+    // the SQ stays full after one flush — the op completes on its
+    // own and reports cancelled via the in-flight `cancelled` flag.
+    interrupt_reactor();
+    lock_type lock(ring_mutex_);
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe)
     {
@@ -673,7 +705,7 @@ io_uring_scheduler::submit_cancel_by_user_data(io_uring_op* target) noexcept
         sqe = io_uring_get_sqe(&ring_);
     }
     if (!sqe)
-        return;  // best-effort: op completes on its own if SQ is full
+        return;
 
     io_uring_prep_cancel(sqe, target, 0);
     io_uring_sqe_set_data(sqe, &cancel_sentinel_);
@@ -682,7 +714,8 @@ io_uring_scheduler::submit_cancel_by_user_data(io_uring_op* target) noexcept
 inline void
 io_uring_scheduler::submit_cancel_by_fd(int fd) noexcept
 {
-    lock_type lock(dispatch_mutex_);
+    interrupt_reactor();
+    lock_type lock(ring_mutex_);
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe)
     {
@@ -690,7 +723,7 @@ io_uring_scheduler::submit_cancel_by_fd(int fd) noexcept
         sqe = io_uring_get_sqe(&ring_);
     }
     if (!sqe)
-        return;  // best-effort: ops complete on their own if SQ is full
+        return;
 
     io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
     io_uring_sqe_set_data(sqe, &cancel_sentinel_);
@@ -709,7 +742,8 @@ io_uring_op::request_cancel() noexcept
 inline void
 io_uring_scheduler::cancel_and_flush(int fd) noexcept
 {
-    lock_type lock(dispatch_mutex_);
+    interrupt_reactor();
+    lock_type lock(ring_mutex_);
     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe)
     {
@@ -731,10 +765,13 @@ io_uring_scheduler::drain_cqes_for(io_uring_op* target) noexcept
 {
     // Submit a cancel by user_data so the kernel returns CQEs for
     // the target promptly, then iterate the CQ ring and consume
-    // every CQE that matches `target` (or the kernel's own ETIME
-    // for short-circuited multishot terminations).
+    // every CQE that matches `target`. ring_mutex_ serializes against
+    // the leader's kernel wait and any concurrent cancel path; the
+    // interrupt_reactor() ensures the leader returns promptly so we
+    // can take the mutex.
+    interrupt_reactor();
     {
-        lock_type lock(dispatch_mutex_);
+        lock_type lock(ring_mutex_);
         if (auto* sqe = io_uring_get_sqe(&ring_))
         {
             io_uring_prep_cancel(sqe, target, 0);
@@ -746,8 +783,10 @@ io_uring_scheduler::drain_cqes_for(io_uring_op* target) noexcept
     // Loop a few rounds: cancel SQE submission, then drain CQEs.
     // Bounded loop avoids stalls if the kernel never returns a
     // cancel completion — best-effort.
-    for (int rounds = 0; rounds < 8; ++rounds)
+    for (int rounds = 0; rounds < drain_cqes_max_rounds; ++rounds)
     {
+        lock_type lock(ring_mutex_);
+
         unsigned        head;
         ::io_uring_cqe* cqe;
         unsigned        consumed = 0;
@@ -779,8 +818,11 @@ io_uring_scheduler::drain_cqes_for(io_uring_op* target) noexcept
             continue;
         }
 
-        // Nothing in the CQ — kick the kernel briefly.
-        __kernel_timespec ts{0, 1'000'000};  // 1ms
+        // Nothing in the CQ — kick the kernel briefly. Hold
+        // ring_mutex_ across the wait so we don't race with the
+        // run-loop leader.
+        __kernel_timespec ts{
+            0, static_cast<long long>(drain_cqes_kick_ns)};
         ::io_uring_cqe* one = nullptr;
         int rc = ::io_uring_submit_and_wait_timeout(
             &ring_, &one, 1, &ts, nullptr);
