@@ -1622,7 +1622,7 @@ private:
         op->fd        = fd_;
         op->sched_    = sched_;
         op->impl_ptr  = shared_from_this();
-        op->msg_flags = flags;
+        op->msg_flags = to_native_msg_flags(flags);
 
         op->iovec_count = static_cast<int>(
             buffers.copy_to(
@@ -1682,7 +1682,7 @@ private:
         op->fd        = fd_;
         op->sched_    = sched_;
         op->impl_ptr  = shared_from_this();
-        op->msg_flags = flags;
+        op->msg_flags = to_native_msg_flags(flags);
 
         op->iovec_count = static_cast<int>(
             buffers.copy_to(
@@ -2143,7 +2143,7 @@ private:
         op->fd        = fd_;
         op->sched_    = sched_;
         op->impl_ptr  = shared_from_this();
-        op->msg_flags = flags;
+        op->msg_flags = to_native_msg_flags(flags);
 
         op->iovec_count = static_cast<int>(
             buffers.copy_to(
@@ -2203,7 +2203,7 @@ private:
         op->fd        = fd_;
         op->sched_    = sched_;
         op->impl_ptr  = shared_from_this();
-        op->msg_flags = flags;
+        op->msg_flags = to_native_msg_flags(flags);
 
         op->iovec_count = static_cast<int>(
             buffers.copy_to(

@@ -24,17 +24,6 @@
 
 namespace boost::corosio::detail {
 
-/* Map portable message_flags values to native MSG_* constants. */
-inline int
-to_native_msg_flags(int flags) noexcept
-{
-    int native = 0;
-    if (flags & 1) native |= MSG_PEEK;
-    if (flags & 2) native |= MSG_OOB;
-    if (flags & 4) native |= MSG_DONTROUTE;
-    return native;
-}
-
 /** CRTP base for reactor-backed datagram socket implementations.
 
     Inherits shared data members and cancel/close/register logic

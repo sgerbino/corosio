@@ -41,6 +41,17 @@
 
 namespace boost::corosio::detail {
 
+/* Map portable message_flags int values to native MSG_* constants. */
+inline int
+to_native_msg_flags(int flags) noexcept
+{
+    int native = 0;
+    if (flags & 1) native |= MSG_PEEK;
+    if (flags & 2) native |= MSG_OOB;
+    if (flags & 4) native |= MSG_DONTROUTE;
+    return native;
+}
+
 /** Convert IPv4 endpoint to sockaddr_in.
 
     @param ep The endpoint to convert. Must be IPv4 (is_v4() == true).
