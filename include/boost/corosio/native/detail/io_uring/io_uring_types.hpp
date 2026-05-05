@@ -22,6 +22,7 @@
 #include <boost/corosio/native/detail/io_uring/io_uring_multishot_acceptor.hpp>
 #include <boost/corosio/native/detail/io_uring/io_uring_socket_ops.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
+#include <boost/corosio/detail/local_stream_acceptor_service.hpp>
 #include <boost/corosio/detail/local_stream_service.hpp>
 #include <boost/corosio/detail/tcp_acceptor_service.hpp>
 #include <boost/corosio/detail/tcp_service.hpp>
@@ -1222,6 +1223,176 @@ public:
         auto* svc = static_cast<io_uring_local_stream_service*>(peer_service);
         return svc->adopt_fd(fd, sockaddr_to_local_endpoint(peer, peer_len));
     }
+};
+
+/** Unix domain stream acceptor service for io_uring.
+
+    Owns all `io_uring_local_stream_acceptor` implementations for an
+    `io_context`. Satisfies the `local_stream_acceptor_service` interface
+    so the generic `local_stream_acceptor` front-end can call
+    `open_acceptor_socket`, `bind_acceptor`, and `listen_acceptor`
+    transparently.
+
+    Acceptor impls are reference-counted inside the service map; raw
+    pointers returned from `construct()` remain valid until `destroy()`
+    or `shutdown()` is called.
+
+    @par Thread Safety
+    All public member functions are thread-safe.
+*/
+class BOOST_COROSIO_DECL io_uring_local_stream_acceptor_service final
+    : public local_stream_acceptor_service
+{
+public:
+    /// Identifies this service for `execution_context` lookup.
+    using key_type = local_stream_acceptor_service;
+
+    /** Construct the local stream acceptor service.
+
+        @param ctx The owning execution context. Both the io_uring scheduler
+            and the local stream socket service must already be registered.
+    */
+    explicit io_uring_local_stream_acceptor_service(capy::execution_context& ctx)
+        : sched_(&ctx.use_service<io_uring_scheduler>())
+        , peer_svc_(&ctx.use_service<io_uring_local_stream_service>())
+    {}
+
+    void shutdown() override
+    {
+        std::vector<std::shared_ptr<io_uring_local_stream_acceptor>> live;
+        {
+            std::lock_guard lk(mutex_);
+            live.reserve(impls_.size());
+            for (auto& [_, p] : impls_)
+                live.push_back(p);
+        }
+        // Cancel without the lock held to avoid inversion if cancel()
+        // re-enters the service.
+        for (auto& p : live)
+            p->cancel();
+    }
+
+    io_object::implementation* construct() override
+    {
+        auto p   = std::make_shared<io_uring_local_stream_acceptor>(
+            *this, *sched_, *peer_svc_);
+        auto* raw = p.get();
+        std::lock_guard lk(mutex_);
+        impls_.emplace(raw, std::move(p));
+        return raw;
+    }
+
+    void destroy(io_object::implementation* p) override
+    {
+        if (!p)
+            return;
+        std::lock_guard lk(mutex_);
+        impls_.erase(static_cast<io_uring_local_stream_acceptor*>(p));
+    }
+
+    // Close the fd eagerly when local_stream_acceptor::close() is called,
+    // before destroy() drops the shared_ptr and the destructor runs.
+    void close(io_object::handle& h) override
+    {
+        auto* acc = static_cast<io_uring_local_stream_acceptor*>(h.get());
+        if (acc && acc->fd_ >= 0)
+        {
+            // Flush the cancel SQE before closing the fd so the kernel
+            // resolves the file from the fd number while it is still valid.
+            sched_->cancel_and_flush(acc->fd_);
+            acc->cancel();           // drain waiters
+            ::close(acc->fd_);
+            acc->fd_ = -1;
+
+            // Break the multi_op_ → impl_ptr (shared_ptr<this>) ref cycle
+            // start_multishot established. See io_uring_tcp_acceptor_service
+            // for the known ASan limitation on immediate context destruction.
+            if (acc->multi_op_)
+                acc->multi_op_->impl_ptr.reset();
+        }
+    }
+
+    /** Create a non-blocking, close-on-exec AF_UNIX socket for accepting.
+
+        @param impl     The acceptor implementation to initialise.
+        @param family   Address family (`AF_UNIX`).
+        @param type     Socket type (`SOCK_STREAM`).
+        @param protocol Protocol number (typically 0).
+        @return Error code on failure, empty on success.
+    */
+    std::error_code open_acceptor_socket(
+        local_stream_acceptor::implementation& impl,
+        int family,
+        int type,
+        int protocol) override
+    {
+        auto& acc = static_cast<io_uring_local_stream_acceptor&>(impl);
+        int fd = ::socket(family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
+        if (fd < 0)
+            return make_err(errno);
+        if (acc.fd_ >= 0)
+        {
+            sched_->submit_cancel_by_fd(acc.fd_);
+            ::close(acc.fd_);
+        }
+        acc.fd_ = fd;
+        return {};
+    }
+
+    /** Bind an open acceptor and capture the local endpoint.
+
+        @param impl The acceptor implementation to bind.
+        @param ep   The local endpoint (path) to bind to.
+        @return Error code on failure, empty on success.
+    */
+    std::error_code bind_acceptor(
+        local_stream_acceptor::implementation& impl,
+        corosio::local_endpoint ep) override
+    {
+        auto& acc = static_cast<io_uring_local_stream_acceptor&>(impl);
+        sockaddr_storage addr{};
+        socklen_t len = endpoint_to_sockaddr(ep, addr);
+        if (::bind(acc.fd_, reinterpret_cast<sockaddr*>(&addr), len) < 0)
+            return make_err(errno);
+
+        sockaddr_storage local{};
+        socklen_t local_len = sizeof(local);
+        if (::getsockname(
+                acc.fd_,
+                reinterpret_cast<sockaddr*>(&local), &local_len) == 0)
+            acc.local_endpoint_ = sockaddr_to_local_endpoint(local, local_len);
+        return {};
+    }
+
+    /** Start listening and submit the multishot accept SQE.
+
+        Calls `::listen(2)` then arms the io_uring multishot accept
+        operation that delivers one CQE per accepted connection.
+
+        @param impl    The acceptor implementation to listen on.
+        @param backlog Maximum pending-connection queue length.
+        @return Error code on failure, empty on success.
+    */
+    std::error_code listen_acceptor(
+        local_stream_acceptor::implementation& impl,
+        int backlog) override
+    {
+        auto& acc = static_cast<io_uring_local_stream_acceptor&>(impl);
+        if (::listen(acc.fd_, backlog) < 0)
+            return make_err(errno);
+        acc.start_multishot();
+        return {};
+    }
+
+    /// Return the scheduler used by acceptors created by this service.
+    io_uring_scheduler& scheduler() noexcept { return *sched_; }
+
+private:
+    io_uring_scheduler*             sched_;
+    io_uring_local_stream_service*  peer_svc_;
+    std::mutex                      mutex_;
+    std::unordered_map<io_uring_local_stream_acceptor*,
+        std::shared_ptr<io_uring_local_stream_acceptor>> impls_;
 };
 
 } // namespace boost::corosio::detail
