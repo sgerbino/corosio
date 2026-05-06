@@ -52,6 +52,13 @@ struct io_uring_op : scheduler_op
     using cqe_func_type =
         void (*)(io_uring_op*, int res, unsigned flags, op_queue& local) noexcept;
 
+    /// SQE-preparation dispatcher type. Called by the leader during
+    /// its drain step to fill an SQE for this op. Concrete op types
+    /// set this at construction so the new submit path is purely
+    /// data-driven (no template instantiation, no allocation).
+    using prep_func_type =
+        void (*)(io_uring_op*, ::io_uring_sqe*) noexcept;
+
     /// Stop-callback handler: requests cancellation of this op.
     struct canceller
     {
@@ -59,9 +66,13 @@ struct io_uring_op : scheduler_op
         void operator()() const noexcept { op->request_cancel(); }
     };
 
-    explicit io_uring_op(func_type post_func, cqe_func_type cqe_fn) noexcept
+    explicit io_uring_op(
+        func_type      post_func,
+        cqe_func_type  cqe_fn,
+        prep_func_type prep_fn = nullptr) noexcept
         : scheduler_op(post_func)
         , cqe_func(cqe_fn)
+        , prep_func(prep_fn)
     {}
 
     std::coroutine_handle<>                      h;
@@ -81,6 +92,11 @@ struct io_uring_op : scheduler_op
     std::atomic<bool>                            sqe_set{false};
     std::optional<std::stop_callback<canceller>> stop_cb;
     cqe_func_type                                cqe_func;
+    /// SQE-preparation dispatcher. nullptr for ops still using the
+    /// old `io_uring_submit_op<PrepFn>(prep)` template path
+    /// (UDP/local/file/dgram during plan 5a). Set non-null by ops
+    /// migrated to the queue-based submit path.
+    prep_func_type                               prep_func;
 
     /// Keeps the owning impl alive while the op is in flight (kernel
     /// owns user buffers until completion).
