@@ -225,6 +225,9 @@ apply_scheduler_options(
     {
         if (opts.single_threaded)
             uring_sched->configure_single_threaded(true);
+        if (opts.enable_sqpoll)
+            uring_sched->configure_sqpoll(
+                true, opts.sq_thread_idle_ms, opts.sq_thread_cpu);
     }
 #endif
 
