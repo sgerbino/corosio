@@ -383,8 +383,17 @@ struct uring_local_connect_op : io_uring_op
     corosio::local_endpoint*   local_endpoint_out  = nullptr;
 
     uring_local_connect_op() noexcept
-        : io_uring_op(&do_handler, &do_cqe)
+        : io_uring_op(&do_handler, &do_cqe, &do_prep)
     {}
+
+    static void do_prep(io_uring_op* base, ::io_uring_sqe* sqe) noexcept
+    {
+        auto* self = static_cast<uring_local_connect_op*>(base);
+        ::io_uring_prep_connect(
+            sqe, self->fd,
+            reinterpret_cast<sockaddr const*>(&self->addr),
+            self->addrlen);
+    }
 
     static void do_cqe(
         io_uring_op* base, int res, unsigned flags,
