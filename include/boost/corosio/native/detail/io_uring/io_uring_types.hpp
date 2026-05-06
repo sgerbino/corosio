@@ -156,9 +156,7 @@ public:
             return std::noop_coroutine();
         }
 
-        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
-            ::io_uring_prep_readv(sqe, op->fd, op->iovecs, op->iovec_count, 0);
-        });
+        io_uring_submit_op(*sched_, op_guard.release());
         return std::noop_coroutine();
     }
 

@@ -80,9 +80,16 @@ struct uring_read_op : io_uring_op
     int   fd          = -1;
 
     uring_read_op() noexcept
-        : io_uring_op(&do_handler, &do_cqe)
+        : io_uring_op(&do_handler, &do_cqe, &do_prep)
     {
         is_read = true;
+    }
+
+    static void do_prep(io_uring_op* base, ::io_uring_sqe* sqe) noexcept
+    {
+        auto* self = static_cast<uring_read_op*>(base);
+        ::io_uring_prep_readv(
+            sqe, self->fd, self->iovecs, self->iovec_count, 0);
     }
 
     static void do_cqe(
