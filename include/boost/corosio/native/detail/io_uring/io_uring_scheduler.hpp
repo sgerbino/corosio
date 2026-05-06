@@ -279,14 +279,27 @@ io_uring_scheduler::lazy_init_ring_unlocked() const
     io_uring_params params{};
     if (single_threaded_)
     {
-        // SINGLE_ISSUER tells the kernel one thread will own
-        // submissions; the kernel can skip internal locking on the
-        // SQ path. DEFER_TASKRUN is intentionally NOT enabled: it
-        // requires every io_uring_enter to pass GETEVENTS, but our
-        // poll() peek path uses submit_and_wait_timeout with ts=0
-        // and may not satisfy that contract under all kernels. Plan
-        // 4 will revisit if/when SQPOLL is added.
-        params.flags = IORING_SETUP_SINGLE_ISSUER;
+        // SINGLE_ISSUER promises the kernel one submitter thread,
+        // letting it skip internal SQ locking. DEFER_TASKRUN tells
+        // it to batch task_work delivery at io_uring_enter(GETEVENTS)
+        // boundaries instead of interrupting the run thread via
+        // TWA_SIGNAL — eliminates cache pollution from mid-flight
+        // task_work and gives a meaningful single-threaded
+        // throughput uplift.
+        //
+        // Plan 3 disabled DEFER_TASKRUN defensively over a misread
+        // of the GETEVENTS contract. Plan 4a re-enabled it: liburing's
+        // io_uring_submit_and_wait_timeout always sets
+        // IORING_ENTER_GETEVENTS when wait_nr > 0, regardless of
+        // ts. Our run loop's only kernel-wait call passes wait_nr=1.
+        // Submit-only paths (cancel_and_flush, etc.) leave their
+        // CQEs queued until the leader's next GETEVENTS-bearing
+        // wait — benign.
+        //
+        // Multi-thread mode never sets these flags: SINGLE_ISSUER
+        // would be unsafe with multiple submitter threads.
+        params.flags = IORING_SETUP_SINGLE_ISSUER
+                     | IORING_SETUP_DEFER_TASKRUN;
     }
 
     int rc = ::io_uring_queue_init_params(256, &ring_, &params);
