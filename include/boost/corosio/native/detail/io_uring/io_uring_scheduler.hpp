@@ -74,6 +74,19 @@ public:
     // scheduler virtuals — definitions in Task 6
     void post(std::coroutine_handle<>) const override;
     void post(scheduler_op*) const override;
+
+    /** Slow-path submit for cross-thread io_uring op submission.
+
+        Pushes `op` onto `pending_submits_`. The leader drains the
+        queue at the top of its do_one() cycle, prepping each op's
+        SQE via op->prep_func(). If the leader is currently in
+        kernel wait, also writes the wake eventfd to interrupt it.
+
+        @pre `op->prep_func != nullptr` (op was constructed for the
+              new queue-based path).
+    */
+    void post_submit(io_uring_op* op) const noexcept;
+
     bool running_in_this_thread() const noexcept override;
     void stop() override;
     bool stopped() const noexcept override;
@@ -229,6 +242,11 @@ private:
     mutable mutex_type                ring_mutex_{true};
     mutable event_type                cond_{true};
     mutable op_queue                  completed_ops_;
+    // Queue of ops with prep_func != nullptr that are waiting for the
+    // leader to prep their SQE. Pushed by cross-thread submitters via
+    // post_submit(); drained by the leader at the top of do_one()
+    // before each kernel wait. Protected by dispatch_mutex_.
+    mutable op_queue                  pending_submits_;
     mutable std::atomic<std::int64_t> outstanding_work_{0};
     std::atomic<bool>                 stopped_{false};
     // Leader-follower flag: true while a thread is blocked in
@@ -537,6 +555,22 @@ io_uring_scheduler::post(scheduler_op* op) const
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
+        wake_leader = task_running_;
+        if (!wake_leader)
+            cond_.notify_one();
+    }
+    if (wake_leader)
+        interrupt_reactor();
+}
+
+inline void
+io_uring_scheduler::post_submit(io_uring_op* op) const noexcept
+{
+    lazy_init_ring();
+    bool wake_leader;
+    {
+        lock_type lock(dispatch_mutex_);
+        pending_submits_.push(op);
         wake_leader = task_running_;
         if (!wake_leader)
             cond_.notify_one();
