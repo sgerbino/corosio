@@ -134,7 +134,14 @@ struct uring_dgram_recv_op : io_uring_op
         void*, sockaddr_storage const&, socklen_t) noexcept = nullptr;
 
     uring_dgram_recv_op() noexcept
-        : io_uring_op(&do_handler, &do_cqe) {}
+        : io_uring_op(&do_handler, &do_cqe, &do_prep) {}
+
+    static void do_prep(io_uring_op* base, ::io_uring_sqe* sqe) noexcept
+    {
+        auto* self = static_cast<uring_dgram_recv_op*>(base);
+        ::io_uring_prep_recvmsg(
+            sqe, self->fd, &self->msg, self->msg_flags);
+    }
 
     static void do_cqe(
         io_uring_op* base, int res, unsigned flags, op_queue& local) noexcept
