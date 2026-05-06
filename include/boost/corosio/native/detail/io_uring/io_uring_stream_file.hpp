@@ -265,12 +265,7 @@ io_uring_stream_file::read_some(
         return std::noop_coroutine();
     }
 
-    io_uring_submit_op(*sched_, op_guard.release(),
-        [op](::io_uring_sqe* sqe) {
-            ::io_uring_prep_readv(
-                sqe, op->fd, op->iovecs, op->iovec_count,
-                static_cast<__u64>(op->offset));
-        });
+    io_uring_submit_op(*sched_, op_guard.release());
     return std::noop_coroutine();
 }
 

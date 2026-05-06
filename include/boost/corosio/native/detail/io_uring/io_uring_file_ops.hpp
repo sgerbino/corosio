@@ -42,9 +42,17 @@ struct uring_file_read_op : io_uring_op
     std::int64_t offset      = -1;  // -1 means kernel f_pos
 
     uring_file_read_op() noexcept
-        : io_uring_op(&do_handler, &do_cqe)
+        : io_uring_op(&do_handler, &do_cqe, &do_prep)
     {
         is_read = true;
+    }
+
+    static void do_prep(io_uring_op* base, ::io_uring_sqe* sqe) noexcept
+    {
+        auto* self = static_cast<uring_file_read_op*>(base);
+        ::io_uring_prep_readv(
+            sqe, self->fd, self->iovecs, self->iovec_count,
+            static_cast<__u64>(self->offset));
     }
 
     static void do_cqe(
