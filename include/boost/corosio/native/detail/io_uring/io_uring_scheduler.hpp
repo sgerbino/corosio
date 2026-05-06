@@ -184,6 +184,27 @@ public:
         cond_.set_enabled(!v);
     }
 
+    /** Configure SQPOLL parameters.
+
+        Must be called before the first run/poll/post — the values
+        are cached and read by `lazy_init_ring_unlocked` when the
+        ring is first constructed. No-op if `enable` is false (the
+        default).
+
+        @param enable    Set IORING_SETUP_SQPOLL on ring init.
+        @param idle_ms   sq_thread_idle in milliseconds; 0 = kernel
+                         default (1ms).
+        @param cpu       Pin the polling thread to this CPU; -1 to
+                         not pin.
+    */
+    void configure_sqpoll(
+        bool enable, unsigned idle_ms, int cpu) noexcept
+    {
+        enable_sqpoll_     = enable;
+        sq_thread_idle_ms_ = idle_ms;
+        sq_thread_cpu_     = cpu;
+    }
+
     /// Return true if single-threaded (lockless) mode is active.
     bool is_single_threaded() const noexcept { return single_threaded_; }
 
@@ -210,6 +231,9 @@ private:
     // io_uring_submit_and_wait_timeout. Protected by dispatch_mutex_.
     mutable bool                      task_running_   = false;
     bool                              single_threaded_ = false;
+    bool                              enable_sqpoll_     = false;
+    unsigned                          sq_thread_idle_ms_ = 0;
+    int                               sq_thread_cpu_     = -1;
 
     int                               cancel_sentinel_ = 0;
     mutable std::atomic<bool>         wakeup_armed_{false};
@@ -300,6 +324,23 @@ io_uring_scheduler::lazy_init_ring_unlocked() const
         // would be unsafe with multiple submitter threads.
         params.flags = IORING_SETUP_SINGLE_ISSUER
                      | IORING_SETUP_DEFER_TASKRUN;
+    }
+
+    if (enable_sqpoll_)
+    {
+        // SQPOLL forks a kernel thread that busy-polls the SQ ring;
+        // submission becomes a userspace-only memory store. Independent
+        // of SINGLE_ISSUER — the four combinations are all valid. Idle
+        // timeout 0 means kernel default (1ms); we only forward when
+        // explicitly set so the kernel default is preserved.
+        params.flags |= IORING_SETUP_SQPOLL;
+        if (sq_thread_idle_ms_ != 0)
+            params.sq_thread_idle = sq_thread_idle_ms_;
+        if (sq_thread_cpu_ >= 0)
+        {
+            params.flags |= IORING_SETUP_SQ_AFF;
+            params.sq_thread_cpu = static_cast<__u32>(sq_thread_cpu_);
+        }
     }
 
     int rc = ::io_uring_queue_init_params(256, &ring_, &params);
