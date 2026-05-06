@@ -216,13 +216,7 @@ public:
         }
 
         auto* op = multi_op_.get();
-        io_uring_submit_op(*sched_, op, [this, op](::io_uring_sqe* sqe) {
-            ::io_uring_prep_multishot_accept(
-                sqe, fd_,
-                reinterpret_cast<sockaddr*>(&op->peer_storage),
-                &op->peer_len,
-                SOCK_NONBLOCK | SOCK_CLOEXEC);
-        });
+        io_uring_submit_op(*sched_, op);
         // Deliberately no work_started(): the multishot SQE is a persistent
         // internal mechanism. User-visible work is tracked per-accept call.
     }

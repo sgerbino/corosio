@@ -63,8 +63,18 @@ struct uring_multi_accept_op : io_uring_op
                    bool more) noexcept = nullptr;
 
     uring_multi_accept_op() noexcept
-        : io_uring_op(&do_handler, &do_cqe)
+        : io_uring_op(&do_handler, &do_cqe, &do_prep)
     {}
+
+    static void do_prep(io_uring_op* base, ::io_uring_sqe* sqe) noexcept
+    {
+        auto* self = static_cast<uring_multi_accept_op*>(base);
+        ::io_uring_prep_multishot_accept(
+            sqe, self->listen_fd,
+            reinterpret_cast<sockaddr*>(&self->peer_storage),
+            &self->peer_len,
+            SOCK_NONBLOCK | SOCK_CLOEXEC);
+    }
 
     static void do_cqe(io_uring_op* base, int res, unsigned flags,
                        op_queue& /*local*/) noexcept
