@@ -245,6 +245,43 @@ struct uring_connect_op : io_uring_op
     }
 };
 
+/** Submit an `io_uring_op` whose `prep_func` is set.
+
+    Fast path (same-thread): if the calling thread is currently
+    inside this scheduler's run loop (`running_in_this_thread()`
+    is true), prepares the SQE directly without taking any mutex.
+    The leader's next `submit_and_wait_timeout` will batch-submit
+    the SQE.
+
+    Slow path (cross-thread): pushes the op onto the scheduler's
+    `pending_submits_` queue and wakes the leader via the wake
+    eventfd. The leader drains the queue and preps the SQE on its
+    next cycle.
+
+    @pre `op->prep_func != nullptr`.
+
+    @par Exception Safety
+    Nothrow.
+*/
+inline void
+io_uring_submit_op(io_uring_scheduler& sched, io_uring_op* op) noexcept
+{
+    if (sched.running_in_this_thread())
+    {
+        ::io_uring_sqe* sqe = sched.get_sqe_for_leader();
+        if (sqe)
+        {
+            op->prep_func(op, sqe);
+            ::io_uring_sqe_set_data(sqe, op);
+            op->sqe_set.store(true, std::memory_order_release);
+            return;
+        }
+        // SQ-full on fast path: fall through to slow path so the
+        // leader's next submit drains the SQ before we retry.
+    }
+    sched.post_submit(op);
+}
+
 /** Acquire an SQE, fill it via `prep`, and link `op` as user_data.
 
     Serialises SQE acquisition under `sched.ring_mutex()`. On transient

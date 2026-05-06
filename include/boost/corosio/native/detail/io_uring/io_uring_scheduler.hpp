@@ -111,6 +111,23 @@ public:
         return &ring_;
     }
 
+    /** Get an SQE without taking ring_mutex_.
+
+        Only safe to call from the leader's stack between iterations
+        (i.e. when `running_in_this_thread()` is true). Used by the
+        same-thread submit fast path in `io_uring_submit_op(sched, op)`.
+
+        @pre `running_in_this_thread() == true`. Caller is responsible
+             for ensuring the precondition; debug builds may assert.
+        @return A pointer to the freshly-allocated SQE, or `nullptr`
+                if the SQ ring is full.
+    */
+    ::io_uring_sqe* get_sqe_for_leader() noexcept
+    {
+        lazy_init_ring();
+        return ::io_uring_get_sqe(&ring_);
+    }
+
     /// Return the dispatch mutex (protects completed_ops_ / cond_).
     mutex_type& dispatch_mutex() const noexcept { return dispatch_mutex_; }
 
