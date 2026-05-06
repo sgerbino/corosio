@@ -191,6 +191,10 @@ public:
         ring is first constructed. No-op if `enable` is false (the
         default).
 
+        @note  When combined with single-threaded mode,
+        IORING_SETUP_DEFER_TASKRUN is suppressed — the kernel
+        rejects that combination. SINGLE_ISSUER still applies.
+
         @param enable    Set IORING_SETUP_SQPOLL on ring init.
         @param idle_ms   sq_thread_idle in milliseconds; 0 = kernel
                          default (1ms).
@@ -322,17 +326,27 @@ io_uring_scheduler::lazy_init_ring_unlocked() const
         //
         // Multi-thread mode never sets these flags: SINGLE_ISSUER
         // would be unsafe with multiple submitter threads.
-        params.flags = IORING_SETUP_SINGLE_ISSUER
-                     | IORING_SETUP_DEFER_TASKRUN;
+        //
+        // DEFER_TASKRUN is suppressed when SQPOLL is also enabled
+        // — the kernel rejects that combination with -EINVAL. The
+        // SQPOLL polling thread already delivers completions
+        // without TWA_SIGNAL interruption, so DEFER_TASKRUN's
+        // benefit is moot in that mode.
+        params.flags = IORING_SETUP_SINGLE_ISSUER;
+        if (!enable_sqpoll_)
+            params.flags |= IORING_SETUP_DEFER_TASKRUN;
     }
 
     if (enable_sqpoll_)
     {
         // SQPOLL forks a kernel thread that busy-polls the SQ ring;
-        // submission becomes a userspace-only memory store. Independent
-        // of SINGLE_ISSUER — the four combinations are all valid. Idle
-        // timeout 0 means kernel default (1ms); we only forward when
-        // explicitly set so the kernel default is preserved.
+        // submission becomes a userspace-only memory store. Combines
+        // with SINGLE_ISSUER (the kernel accepts that pair) but NOT
+        // with DEFER_TASKRUN (kernel returns -EINVAL); the
+        // single_threaded_ branch above suppresses DEFER_TASKRUN
+        // when SQPOLL is also set. Idle timeout 0 means kernel
+        // default (1ms); we only forward when explicitly set so
+        // the kernel default is preserved.
         params.flags |= IORING_SETUP_SQPOLL;
         if (sq_thread_idle_ms_ != 0)
             params.sq_thread_idle = sq_thread_idle_ms_;
