@@ -405,8 +405,16 @@ io_uring_scheduler::lazy_init_ring_unlocked() const
         detail::throw_system_error(make_err(errn), "eventfd");
     }
 
-    // Register multishot poll on the wakeup eventfd. user_data nullptr
-    // is the wakeup-eventfd sentinel recognized by the run loop.
+    // Register a one-shot poll on the wake eventfd. user_data nullptr
+    // is the sentinel recognized by process_completions, which calls
+    // drain_wakeup_eventfd() to consume the eventfd byte AND re-arm
+    // the poll. Plan 5a switched away from IORING_POLL_MULTISHOT
+    // because multishot ops can silently terminate (e.g. under CQ
+    // pressure), and we don't observe the termination — leaving the
+    // wake mechanism dead and the leader stuck in kernel wait. One-
+    // shot rearm-on-fire is fail-fast: every wake event is paired
+    // with an explicit rearm, so a missed rearm would manifest
+    // immediately as the next wake being lost (test-visible).
     ::io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_);
     if (!sqe)
     {
@@ -415,7 +423,7 @@ io_uring_scheduler::lazy_init_ring_unlocked() const
         detail::throw_system_error(
             make_err(ENOSPC), "io_uring_get_sqe (wakeup)");
     }
-    ::io_uring_prep_poll_multishot(sqe, wakeup_eventfd_, POLLIN);
+    ::io_uring_prep_poll_add(sqe, wakeup_eventfd_, POLLIN);
     ::io_uring_sqe_set_data(sqe, nullptr);
     int submit_rc = ::io_uring_submit(&ring_);
     if (submit_rc < 0)
@@ -517,6 +525,23 @@ io_uring_scheduler::drain_wakeup_eventfd() const noexcept
 {
     std::uint64_t v;
     [[maybe_unused]] auto r = ::read(wakeup_eventfd_, &v, sizeof(v));
+
+    // Re-arm the one-shot poll for the next wake event. The fresh
+    // SQE is queued in the user-side SQ now; the leader's next
+    // submit_and_wait_timeout submits it. Caller is process_-
+    // completions, which runs while the leader holds ring_mutex_,
+    // so direct ring access is safe. If get_sqe returns nullptr the
+    // SQ is full; the leader's next submit will drain it and the
+    // next wake event will arrive unpolled briefly, but
+    // interrupt_reactor()'s eventfd write remains pending so the
+    // wake isn't lost — it just defers until the leader's next
+    // CQE-bearing iteration.
+    if (::io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_))
+    {
+        ::io_uring_prep_poll_add(sqe, wakeup_eventfd_, POLLIN);
+        ::io_uring_sqe_set_data(sqe, nullptr);
+    }
+
     // Release pairs with the acquire side of interrupt_reactor's CAS:
     // a posting thread that observes wakeup_armed_ == false from this
     // store will see the eventfd already drained by the leader.
@@ -728,6 +753,44 @@ io_uring_scheduler::do_one(long timeout_us)
     {
         if (stopped_.load(std::memory_order_acquire))
             return 0;
+
+        // Drain pending_submits_ first. Each op gets its prep_func
+        // called with a fresh SQE; the SQEs are queued in the user-
+        // side SQ ring and submitted as a batch by submit_and_wait_-
+        // timeout below (or by the next op's submit). Cross-thread
+        // submitters posted these via post_submit() and are not
+        // blocked waiting for us — they returned after pushing.
+        while (auto* sub = pending_submits_.pop())
+        {
+            auto* iop = static_cast<io_uring_op*>(sub);
+            ::io_uring_sqe* sqe = nullptr;
+            {
+                lock_type ring_lock(ring_mutex_);
+                sqe = ::io_uring_get_sqe(&ring_);
+                if (!sqe)
+                {
+                    // SQ ring full — flush and retry once.
+                    ::io_uring_submit(&ring_);
+                    sqe = ::io_uring_get_sqe(&ring_);
+                }
+                if (sqe)
+                {
+                    iop->prep_func(iop, sqe);
+                    ::io_uring_sqe_set_data(sqe, iop);
+                    iop->sqe_set.store(
+                        true, std::memory_order_release);
+                }
+            }
+            if (!sqe)
+            {
+                // SQ stayed full after one flush — synchronous
+                // failure path. Push the op back as a completion
+                // with EAGAIN so do_one dispatches the handler.
+                if (iop->ec_out)
+                    *iop->ec_out = make_err(EAGAIN);
+                completed_ops_.push(iop);
+            }
+        }
 
         if (auto* op = completed_ops_.pop())
         {
