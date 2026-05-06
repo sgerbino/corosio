@@ -1639,10 +1639,7 @@ private:
             return std::noop_coroutine();
         }
 
-        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
-            ::io_uring_prep_sendmsg(sqe, op->fd, &op->msg,
-                op->msg_flags | MSG_NOSIGNAL);
-        });
+        io_uring_submit_op(*sched_, op_guard.release());
         return std::noop_coroutine();
     }
 
@@ -2156,10 +2153,7 @@ private:
             return std::noop_coroutine();
         }
 
-        io_uring_submit_op(*sched_, op_guard.release(), [op](::io_uring_sqe* sqe) {
-            ::io_uring_prep_sendmsg(sqe, op->fd, &op->msg,
-                op->msg_flags | MSG_NOSIGNAL);
-        });
+        io_uring_submit_op(*sched_, op_guard.release());
         return std::noop_coroutine();
     }
 
