@@ -796,6 +796,27 @@ io_uring_scheduler::do_one(long timeout_us)
                     ::io_uring_sqe_set_data(sqe, iop);
                     iop->sqe_set.store(
                         true, std::memory_order_release);
+
+                    // If a stop_token fired between post_submit()
+                    // and now, request_cancel saw sqe_set==false
+                    // and skipped the cancel SQE. Submit it now
+                    // ourselves: the op's user_data is on the SQE
+                    // we just prepped, so cancel-by-user_data
+                    // resolves correctly. Without this, cancelled
+                    // ops would block in the kernel until natural
+                    // completion (which may be never for read).
+                    if (iop->cancelled.load(
+                            std::memory_order_acquire))
+                    {
+                        if (auto* cancel_sqe =
+                                ::io_uring_get_sqe(&ring_))
+                        {
+                            ::io_uring_prep_cancel(
+                                cancel_sqe, iop, 0);
+                            ::io_uring_sqe_set_data(
+                                cancel_sqe, &cancel_sentinel_);
+                        }
+                    }
                 }
             }
             if (!sqe)

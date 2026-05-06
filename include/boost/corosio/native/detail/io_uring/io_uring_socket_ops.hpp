@@ -270,16 +270,22 @@ struct uring_connect_op : io_uring_op
 
 /** Submit an `io_uring_op` whose `prep_func` is set.
 
-    Fast path (same-thread): if the calling thread is currently
-    inside this scheduler's run loop (`running_in_this_thread()`
-    is true), prepares the SQE directly without taking any mutex.
-    The leader's next `submit_and_wait_timeout` will batch-submit
-    the SQE.
+    Fast path (single-threaded mode, current thread inside run loop):
+    prepares the SQE directly without taking any mutex. The leader's
+    next `submit_and_wait_timeout` will batch-submit the SQE.
 
-    Slow path (cross-thread): pushes the op onto the scheduler's
-    `pending_submits_` queue and wakes the leader via the wake
-    eventfd. The leader drains the queue and preps the SQE on its
-    next cycle.
+    Slow path (cross-thread, OR multi-thread mode): pushes the op
+    onto the scheduler's `pending_submits_` queue and wakes the
+    leader via the wake eventfd. The leader drains the queue and
+    preps the SQE on its next cycle.
+
+    The fast path is gated on `is_single_threaded()` because in
+    multi-thread mode `running_in_this_thread()` is true for ANY
+    thread inside `do_one()` — followers as well as the leader —
+    and a follower preparing an SQE without `ring_mutex_` would race
+    with the leader's `submit_and_wait_timeout`. In single-thread
+    mode there is only one run-loop thread, so "running in this
+    thread" implies leader and the lockless ring access is safe.
 
     @pre `op->prep_func != nullptr`.
 
@@ -289,7 +295,7 @@ struct uring_connect_op : io_uring_op
 inline void
 io_uring_submit_op(io_uring_scheduler& sched, io_uring_op* op) noexcept
 {
-    if (sched.running_in_this_thread())
+    if (sched.is_single_threaded() && sched.running_in_this_thread())
     {
         ::io_uring_sqe* sqe = sched.get_sqe_for_leader();
         if (sqe)
