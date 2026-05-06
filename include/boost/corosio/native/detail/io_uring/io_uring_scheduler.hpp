@@ -249,12 +249,21 @@ private:
     mutable int                       wakeup_eventfd_ = -1;
     timer_service*                    timer_svc_      = nullptr;
 
-    // dispatch_mutex_ protects completed_ops_, cond_, task_running_.
-    // ring_mutex_ protects every userspace touch of ring_ (SQ tail, CQ
-    // head): get_sqe / submit / submit_and_wait_timeout / for_each_cqe
-    // / cq_advance. Lock order when both are taken: ring_mutex_ first,
-    // then dispatch_mutex_ (held briefly inside process_completions
-    // for the splice into completed_ops_).
+    // dispatch_mutex_ protects completed_ops_, pending_submits_,
+    // cond_, task_running_. ring_mutex_ protects every userspace
+    // touch of ring_ (SQ tail, CQ head): get_sqe / submit /
+    // submit_and_wait_timeout / for_each_cqe / cq_advance.
+    //
+    // Two patterns where the locks intersect — both are safe because
+    // each holds the inner lock for a short scope and releases before
+    // the outer scope's lifetime ends:
+    //   1. process_completions runs under ring_mutex_ and briefly
+    //      takes dispatch_mutex_ to splice into completed_ops_.
+    //   2. do_one's pending_submits_ drain runs under dispatch_mutex_
+    //      and briefly takes ring_mutex_ per op to prep its SQE.
+    // No path holds both simultaneously for the duration of any
+    // other path's critical section, so the cross-direction
+    // acquisitions don't deadlock.
     mutable mutex_type                dispatch_mutex_{true};
     mutable mutex_type                ring_mutex_{true};
     mutable event_type                cond_{true};
@@ -528,14 +537,22 @@ io_uring_scheduler::drain_wakeup_eventfd() const noexcept
 
     // Re-arm the one-shot poll for the next wake event. The fresh
     // SQE is queued in the user-side SQ now; the leader's next
-    // submit_and_wait_timeout submits it. Caller is process_-
-    // completions, which runs while the leader holds ring_mutex_,
-    // so direct ring access is safe. If get_sqe returns nullptr the
-    // SQ is full; the leader's next submit will drain it and the
-    // next wake event will arrive unpolled briefly, but
-    // interrupt_reactor()'s eventfd write remains pending so the
-    // wake isn't lost — it just defers until the leader's next
-    // CQE-bearing iteration.
+    // submit_and_wait_timeout submits it. Caller is
+    // process_completions, which runs while the leader holds
+    // ring_mutex_, so direct ring access is safe.
+    //
+    // wakeup_armed_ is reset (below) AFTER the SQE is queued but
+    // BEFORE it is submitted to the kernel. During that window a
+    // concurrent interrupt_reactor() can CAS the flag and write the
+    // eventfd; that write lands in the eventfd's counter and is
+    // delivered as soon as the leader's next submit pushes our
+    // poll_add SQE to the kernel. The wake is not lost. The same
+    // counter-semantics buffering protects the SQ-full case below:
+    // if get_sqe returns nullptr we leave the SQ full, the leader's
+    // next submit drains it, and the next wake event arrives
+    // unpolled until the leader's submit re-arms — but again, the
+    // eventfd counter buffers the write so delivery is just
+    // deferred to the next CQE-bearing iteration, not lost.
     if (::io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_))
     {
         ::io_uring_prep_poll_add(sqe, wakeup_eventfd_, POLLIN);
