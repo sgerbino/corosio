@@ -270,22 +270,15 @@ struct uring_connect_op : io_uring_op
 
 /** Submit an `io_uring_op` whose `prep_func` is set.
 
-    Fast path (single-threaded mode, current thread inside run loop):
-    prepares the SQE directly without taking any mutex. The leader's
-    next `submit_and_wait_timeout` will batch-submit the SQE.
+    Wakes the leader (so it releases `ring_mutex_` if blocked in
+    `submit_and_wait_timeout`), then acquires the ring mutex, prepares
+    the SQE, and releases. The leader's next kernel wait submits the
+    SQE to the kernel. Mirrors Boost.Asio's io_uring submission path.
 
-    Slow path (cross-thread, OR multi-thread mode): pushes the op
-    onto the scheduler's `pending_submits_` queue and wakes the
-    leader via the wake eventfd. The leader drains the queue and
-    preps the SQE on its next cycle.
-
-    The fast path is gated on `is_single_threaded()` because in
-    multi-thread mode `running_in_this_thread()` is true for ANY
-    thread inside `do_one()` — followers as well as the leader —
-    and a follower preparing an SQE without `ring_mutex_` would race
-    with the leader's `submit_and_wait_timeout`. In single-thread
-    mode there is only one run-loop thread, so "running in this
-    thread" implies leader and the lockless ring access is safe.
+    On SQ-ring exhaustion, flushes pending submissions and retries
+    once. If the SQ stays full, surfaces `EAGAIN` on `*op->ec_out` and
+    queues the op as completed so its handler dispatches on the next
+    `do_one` cycle.
 
     @pre `op->prep_func != nullptr`.
 
@@ -295,20 +288,41 @@ struct uring_connect_op : io_uring_op
 inline void
 io_uring_submit_op(io_uring_scheduler& sched, io_uring_op* op) noexcept
 {
-    if (sched.is_single_threaded() && sched.running_in_this_thread())
+    sched.lazy_init_ring();
+    // Wake the leader so it returns from submit_and_wait_timeout and
+    // releases ring_mutex_; otherwise we'd block here until the next
+    // organic CQE.
+    sched.interrupt_reactor();
+
+    typename io_uring_scheduler::lock_type ring_lock(sched.ring_mutex());
+
+    ::io_uring_sqe* sqe = ::io_uring_get_sqe(sched.ring());
+    if (!sqe)
     {
-        ::io_uring_sqe* sqe = sched.get_sqe_for_leader();
-        if (sqe)
-        {
-            op->prep_func(op, sqe);
-            ::io_uring_sqe_set_data(sqe, op);
-            op->sqe_set.store(true, std::memory_order_release);
-            return;
-        }
-        // SQ-full on fast path: fall through to slow path so the
-        // leader's next submit drains the SQ before we retry.
+        // SQ ring full — flush to kernel and retry once.
+        ::io_uring_submit(sched.ring());
+        sqe = ::io_uring_get_sqe(sched.ring());
     }
-    sched.post_submit(op);
+
+    if (sqe)
+    {
+        op->prep_func(op, sqe);
+        ::io_uring_sqe_set_data(sqe, op);
+        // Release pairs with the acquire in io_uring_op::request_cancel:
+        // a stop_token firing after we release the mutex will see
+        // sqe_set==true and submit a cancel-by-user_data SQE.
+        op->sqe_set.store(true, std::memory_order_release);
+        return;
+    }
+
+    // SQ stayed full after one flush — synchronous failure path. No
+    // CQE will arrive; queue the op as if a completion delivered
+    // EAGAIN, so do_one dispatches the handler. The caller's
+    // work_started() already counted this op.
+    if (op->ec_out)
+        *op->ec_out = make_err(EAGAIN);
+    typename io_uring_scheduler::lock_type lock(sched.dispatch_mutex());
+    sched.push_completed_locked(op);
 }
 
 /** Non-blocking connect for Unix domain sockets via `IORING_OP_CONNECT`.
