@@ -75,18 +75,6 @@ public:
     void post(std::coroutine_handle<>) const override;
     void post(scheduler_op*) const override;
 
-    /** Slow-path submit for cross-thread io_uring op submission.
-
-        Pushes `op` onto `pending_submits_`. The leader drains the
-        queue at the top of its do_one() cycle, prepping each op's
-        SQE via op->prep_func(). If the leader is currently in
-        kernel wait, also writes the wake eventfd to interrupt it.
-
-        @pre `op->prep_func != nullptr` (op was constructed for the
-              new queue-based path).
-    */
-    void post_submit(io_uring_op* op) const noexcept;
-
     bool running_in_this_thread() const noexcept override;
     void stop() override;
     bool stopped() const noexcept override;
@@ -109,23 +97,6 @@ public:
     {
         lazy_init_ring();
         return &ring_;
-    }
-
-    /** Get an SQE without taking ring_mutex_.
-
-        Only safe to call from the leader's stack between iterations
-        (i.e. when `running_in_this_thread()` is true). Used by the
-        same-thread submit fast path in `io_uring_submit_op(sched, op)`.
-
-        @pre `running_in_this_thread() == true`. Caller is responsible
-             for ensuring the precondition; debug builds may assert.
-        @return A pointer to the freshly-allocated SQE, or `nullptr`
-                if the SQ ring is full.
-    */
-    ::io_uring_sqe* get_sqe_for_leader() noexcept
-    {
-        lazy_init_ring();
-        return ::io_uring_get_sqe(&ring_);
     }
 
     /// Return the dispatch mutex (protects completed_ops_ / cond_).
@@ -257,30 +228,19 @@ private:
     mutable int                       wakeup_eventfd_ = -1;
     timer_service*                    timer_svc_      = nullptr;
 
-    // dispatch_mutex_ protects completed_ops_, pending_submits_,
-    // cond_, task_running_. ring_mutex_ protects every userspace
-    // touch of ring_ (SQ tail, CQ head): get_sqe / submit /
-    // submit_and_wait_timeout / for_each_cqe / cq_advance.
+    // dispatch_mutex_ protects completed_ops_, cond_, task_running_.
+    // ring_mutex_ protects every userspace touch of ring_ (SQ tail,
+    // CQ head): get_sqe / submit / submit_and_wait_timeout /
+    // for_each_cqe / cq_advance.
     //
-    // Two patterns where the locks intersect — both are safe because
-    // each holds the inner lock for a short scope and releases before
-    // the outer scope's lifetime ends:
-    //   1. process_completions runs under ring_mutex_ and briefly
-    //      takes dispatch_mutex_ to splice into completed_ops_.
-    //   2. do_one's pending_submits_ drain runs under dispatch_mutex_
-    //      and briefly takes ring_mutex_ per op to prep its SQE.
-    // No path holds both simultaneously for the duration of any
-    // other path's critical section, so the cross-direction
-    // acquisitions don't deadlock.
+    // process_completions runs under ring_mutex_ and briefly takes
+    // dispatch_mutex_ to splice into completed_ops_. The locks are
+    // never held simultaneously for the full duration of any other
+    // path's critical section, so no deadlock.
     mutable mutex_type                dispatch_mutex_{true};
     mutable mutex_type                ring_mutex_{true};
     mutable event_type                cond_{true};
     mutable op_queue                  completed_ops_;
-    // Queue of ops with prep_func != nullptr that are waiting for the
-    // leader to prep their SQE. Pushed by cross-thread submitters via
-    // post_submit(); drained by the leader at the top of do_one()
-    // before each kernel wait. Protected by dispatch_mutex_.
-    mutable op_queue                  pending_submits_;
     mutable std::atomic<std::int64_t> outstanding_work_{0};
     std::atomic<bool>                 stopped_{false};
     // Leader-follower flag: true while a thread is blocked in
@@ -620,22 +580,6 @@ io_uring_scheduler::post(scheduler_op* op) const
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
-        wake_leader = task_running_;
-        if (!wake_leader)
-            cond_.notify_one();
-    }
-    if (wake_leader)
-        interrupt_reactor();
-}
-
-inline void
-io_uring_scheduler::post_submit(io_uring_op* op) const noexcept
-{
-    lazy_init_ring();
-    bool wake_leader;
-    {
-        lock_type lock(dispatch_mutex_);
-        pending_submits_.push(op);
         wake_leader = task_running_;
         if (!wake_leader)
             cond_.notify_one();
