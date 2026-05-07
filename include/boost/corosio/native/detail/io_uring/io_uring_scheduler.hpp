@@ -777,65 +777,6 @@ io_uring_scheduler::do_one(long timeout_us)
         if (stopped_.load(std::memory_order_acquire))
             return 0;
 
-        // Drain pending_submits_ first. Each op gets its prep_func
-        // called with a fresh SQE; the SQEs are queued in the user-
-        // side SQ ring and submitted as a batch by submit_and_wait_-
-        // timeout below (or by the next op's submit). Cross-thread
-        // submitters posted these via post_submit() and are not
-        // blocked waiting for us — they returned after pushing.
-        while (auto* sub = pending_submits_.pop())
-        {
-            auto* iop = static_cast<io_uring_op*>(sub);
-            ::io_uring_sqe* sqe = nullptr;
-            {
-                lock_type ring_lock(ring_mutex_);
-                sqe = ::io_uring_get_sqe(&ring_);
-                if (!sqe)
-                {
-                    // SQ ring full — flush and retry once.
-                    ::io_uring_submit(&ring_);
-                    sqe = ::io_uring_get_sqe(&ring_);
-                }
-                if (sqe)
-                {
-                    iop->prep_func(iop, sqe);
-                    ::io_uring_sqe_set_data(sqe, iop);
-                    iop->sqe_set.store(
-                        true, std::memory_order_release);
-
-                    // If a stop_token fired between post_submit()
-                    // and now, request_cancel saw sqe_set==false
-                    // and skipped the cancel SQE. Submit it now
-                    // ourselves: the op's user_data is on the SQE
-                    // we just prepped, so cancel-by-user_data
-                    // resolves correctly. Without this, cancelled
-                    // ops would block in the kernel until natural
-                    // completion (which may be never for read).
-                    if (iop->cancelled.load(
-                            std::memory_order_acquire))
-                    {
-                        if (auto* cancel_sqe =
-                                ::io_uring_get_sqe(&ring_))
-                        {
-                            ::io_uring_prep_cancel(
-                                cancel_sqe, iop, 0);
-                            ::io_uring_sqe_set_data(
-                                cancel_sqe, &cancel_sentinel_);
-                        }
-                    }
-                }
-            }
-            if (!sqe)
-            {
-                // SQ stayed full after one flush — synchronous
-                // failure path. Push the op back as a completion
-                // with EAGAIN so do_one dispatches the handler.
-                if (iop->ec_out)
-                    *iop->ec_out = make_err(EAGAIN);
-                completed_ops_.push(iop);
-            }
-        }
-
         if (auto* op = completed_ops_.pop())
         {
             // Hand off any remaining queued work to a follower so we
