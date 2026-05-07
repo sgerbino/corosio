@@ -108,8 +108,16 @@ struct uring_file_write_op : io_uring_op
     std::int64_t offset      = -1;
 
     uring_file_write_op() noexcept
-        : io_uring_op(&do_handler, &do_cqe)
+        : io_uring_op(&do_handler, &do_cqe, &do_prep)
     {}
+
+    static void do_prep(io_uring_op* base, ::io_uring_sqe* sqe) noexcept
+    {
+        auto* self = static_cast<uring_file_write_op*>(base);
+        ::io_uring_prep_writev(
+            sqe, self->fd, self->iovecs, self->iovec_count,
+            static_cast<__u64>(self->offset));
+    }
 
     static void do_cqe(
         io_uring_op* base, int res, unsigned flags,

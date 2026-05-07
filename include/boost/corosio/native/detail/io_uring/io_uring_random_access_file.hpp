@@ -288,12 +288,7 @@ io_uring_random_access_file::write_some_at(
         return std::noop_coroutine();
     }
 
-    io_uring_submit_op(*sched_, op_guard.release(),
-        [op](::io_uring_sqe* sqe) {
-            ::io_uring_prep_writev(
-                sqe, op->fd, op->iovecs, op->iovec_count,
-                static_cast<__u64>(op->offset));
-        });
+    io_uring_submit_op(*sched_, op_guard.release());
     return std::noop_coroutine();
 }
 
