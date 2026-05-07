@@ -134,6 +134,14 @@ public:
     /// Return the ring mutex (serialises userspace SQ/CQ access).
     mutex_type& ring_mutex() const noexcept { return ring_mutex_; }
 
+    /// Initialize the io_uring ring on first access. Idempotent.
+    void lazy_init_ring() const;
+
+    /// Wake the leader if it's blocked in `submit_and_wait_timeout`.
+    /// Best-effort: the wakeup is suppressed if the leader has already
+    /// been signalled and not yet acked.
+    void interrupt_reactor() const noexcept;
+
     /** Submit `IORING_OP_ASYNC_CANCEL` targeting an in-flight op by its
         user_data pointer.
 
@@ -300,9 +308,7 @@ private:
 
     std::size_t do_one(long timeout_us);
     void        process_completions();
-    void        interrupt_reactor() const noexcept;
     void        drain_wakeup_eventfd() const noexcept;
-    void        lazy_init_ring() const;
     void        lazy_init_ring_unlocked() const;
 };
 
