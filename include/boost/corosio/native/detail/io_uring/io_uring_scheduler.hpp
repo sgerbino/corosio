@@ -786,18 +786,34 @@ io_uring_scheduler::do_one(long timeout_us)
         task_running_ = true;
         lock.unlock();
 
-        // Take ring_mutex_ for SQ submit + CQ drain. Cross-thread
-        // cancel paths (cancel_and_flush, drain_cqes_for, etc.) take
-        // the same mutex; they call interrupt_reactor() first so this
-        // submit_and_wait_timeout returns promptly.
-        int rc = 0;
+        // Three-phase kernel wait, matching Boost.Asio's
+        // io_uring_service::run pattern. ring_mutex_ is held briefly
+        // to push pending SQEs and to drain CQEs, but NOT during
+        // the blocking io_uring_wait_cqe_timeout. Cross-thread
+        // submitters (io_uring_submit_op, cancel paths) can take
+        // ring_mutex_ during the wait and prep new SQEs without
+        // blocking on the leader; their wake eventfd write fires the
+        // multishot poll and returns the leader from wait_cqe_timeout
+        // promptly.
+        //
+        // Phase 1 — submit any pending SQEs to the kernel.
         {
             lock_type ring_lock(ring_mutex_);
-            ::io_uring_cqe* cqe = nullptr;
-            rc = ::io_uring_submit_and_wait_timeout(
-                &ring_, &cqe, 1, ts_ptr, nullptr);
+            ::io_uring_submit(&ring_);
+        }
 
-            if (rc >= 0 || rc == -ETIME || rc == -EINTR)
+        // Phase 2 — wait for at least one CQE without holding the
+        // mutex. Multi-thread `io_uring_enter` is permitted without
+        // SINGLE_ISSUER. wait_cqe_timeout only peeks the CQ ring;
+        // head advancement happens under the mutex in
+        // process_completions below.
+        ::io_uring_cqe* cqe = nullptr;
+        int rc = ::io_uring_wait_cqe_timeout(&ring_, &cqe, ts_ptr);
+
+        // Phase 3 — drain CQEs under the mutex.
+        {
+            lock_type ring_lock(ring_mutex_);
+            if (rc == 0 || rc == -ETIME || rc == -EINTR)
                 process_completions();
         }
 
@@ -809,7 +825,7 @@ io_uring_scheduler::do_one(long timeout_us)
             task_running_ = false;
             cond_.notify_all();
             detail::throw_system_error(
-                make_err(-rc), "io_uring_submit_and_wait_timeout");
+                make_err(-rc), "io_uring_wait_cqe_timeout");
         }
 
         timer_svc_->process_expired();
