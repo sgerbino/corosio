@@ -289,40 +289,49 @@ inline void
 io_uring_submit_op(io_uring_scheduler& sched, io_uring_op* op) noexcept
 {
     sched.lazy_init_ring();
-    // Wake the leader so it returns from submit_and_wait_timeout and
-    // releases ring_mutex_; otherwise we'd block here until the next
-    // organic CQE.
+
+    {
+        typename io_uring_scheduler::lock_type ring_lock(sched.ring_mutex());
+
+        ::io_uring_sqe* sqe = ::io_uring_get_sqe(sched.ring());
+        if (!sqe)
+        {
+            // SQ ring full — flush to kernel and retry once.
+            ::io_uring_submit(sched.ring());
+            sqe = ::io_uring_get_sqe(sched.ring());
+        }
+
+        if (sqe)
+        {
+            op->prep_func(op, sqe);
+            ::io_uring_sqe_set_data(sqe, op);
+            // Release pairs with the acquire in io_uring_op::request_cancel:
+            // a stop_token firing after we release the mutex will see
+            // sqe_set==true and submit a cancel-by-user_data SQE.
+            op->sqe_set.store(true, std::memory_order_release);
+        }
+        else
+        {
+            // SQ stayed full after one flush — synchronous failure path.
+            // Surface EAGAIN and queue the op as completed so do_one
+            // dispatches the handler. The caller's work_started() already
+            // counted this op.
+            if (op->ec_out)
+                *op->ec_out = make_err(EAGAIN);
+            typename io_uring_scheduler::lock_type lock(sched.dispatch_mutex());
+            sched.push_completed_locked(op);
+            return;
+        }
+    }
+
+    // Wake the leader AFTER releasing ring_mutex_ so the leader's next
+    // do_one iteration sees the SQE we just queued in user-space SQ.
+    // If we waked before the mutex (or even held the mutex during the
+    // wake), there's a race where the leader's Phase 1 io_uring_submit
+    // could run BEFORE we prep the SQE — the leader would see an empty
+    // SQ and re-enter wait_cqe with no new ops to monitor, leaving the
+    // op stranded until the next organic wake.
     sched.interrupt_reactor();
-
-    typename io_uring_scheduler::lock_type ring_lock(sched.ring_mutex());
-
-    ::io_uring_sqe* sqe = ::io_uring_get_sqe(sched.ring());
-    if (!sqe)
-    {
-        // SQ ring full — flush to kernel and retry once.
-        ::io_uring_submit(sched.ring());
-        sqe = ::io_uring_get_sqe(sched.ring());
-    }
-
-    if (sqe)
-    {
-        op->prep_func(op, sqe);
-        ::io_uring_sqe_set_data(sqe, op);
-        // Release pairs with the acquire in io_uring_op::request_cancel:
-        // a stop_token firing after we release the mutex will see
-        // sqe_set==true and submit a cancel-by-user_data SQE.
-        op->sqe_set.store(true, std::memory_order_release);
-        return;
-    }
-
-    // SQ stayed full after one flush — synchronous failure path. No
-    // CQE will arrive; queue the op as if a completion delivered
-    // EAGAIN, so do_one dispatches the handler. The caller's
-    // work_started() already counted this op.
-    if (op->ec_out)
-        *op->ec_out = make_err(EAGAIN);
-    typename io_uring_scheduler::lock_type lock(sched.dispatch_mutex());
-    sched.push_completed_locked(op);
 }
 
 /** Non-blocking connect for Unix domain sockets via `IORING_OP_CONNECT`.
