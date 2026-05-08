@@ -398,7 +398,11 @@ io_uring_scheduler::lazy_init_ring_unlocked() const
         detail::throw_system_error(
             make_err(ENOSPC), "io_uring_get_sqe (wakeup)");
     }
-    ::io_uring_prep_poll_add(sqe, wakeup_eventfd_, POLLIN);
+    // Multishot poll: fires a CQE on each eventfd POLLIN without
+    // consuming the SQE. Avoids the re-arm hazard of one-shot poll
+    // (where drain_wakeup_eventfd's get_sqe could return null on a
+    // full SQ, leaving no SQE to detect future wakes).
+    ::io_uring_prep_poll_multishot(sqe, wakeup_eventfd_, POLLIN);
     ::io_uring_sqe_set_data(sqe, nullptr);
     int submit_rc = ::io_uring_submit(&ring_);
     if (submit_rc < 0)
@@ -448,8 +452,17 @@ io_uring_scheduler::stop()
         lock_type lock(dispatch_mutex_);
         cond_.notify_all();
     }
-    // Wake the leader if one is blocked in the kernel.
-    interrupt_reactor();
+    // Force-wake unconditionally — bypass interrupt_reactor's CAS
+    // coalescing. A dropped wake here leaves the leader blocked
+    // forever in submit_and_wait_timeout (no further CQE will
+    // arrive after stop()). With multishot poll on wakeup_eventfd_,
+    // this write reliably produces a CQE.
+    if (ring_inited_)
+    {
+        std::uint64_t v = 1;
+        [[maybe_unused]] auto r =
+            ::write(wakeup_eventfd_, &v, sizeof(v));
+    }
 }
 
 inline bool
@@ -501,30 +514,10 @@ io_uring_scheduler::drain_wakeup_eventfd() const noexcept
     std::uint64_t v;
     [[maybe_unused]] auto r = ::read(wakeup_eventfd_, &v, sizeof(v));
 
-    // Re-arm the one-shot poll for the next wake event. The fresh
-    // SQE is queued in the user-side SQ now; the leader's next
-    // submit_and_wait_timeout submits it. Caller is
-    // process_completions, which runs while the leader holds
-    // ring_mutex_, so direct ring access is safe.
+    // Multishot poll never needs re-arming. The poll-add was queued
+    // once at lazy_init_ring with IORING_POLL_ADD_MULTI; each eventfd
+    // POLLIN produces a CQE without consuming the SQE.
     //
-    // wakeup_armed_ is reset (below) AFTER the SQE is queued but
-    // BEFORE it is submitted to the kernel. During that window a
-    // concurrent interrupt_reactor() can CAS the flag and write the
-    // eventfd; that write lands in the eventfd's counter and is
-    // delivered as soon as the leader's next submit pushes our
-    // poll_add SQE to the kernel. The wake is not lost. The same
-    // counter-semantics buffering protects the SQ-full case below:
-    // if get_sqe returns nullptr we leave the SQ full, the leader's
-    // next submit drains it, and the next wake event arrives
-    // unpolled until the leader's submit re-arms — but again, the
-    // eventfd counter buffers the write so delivery is just
-    // deferred to the next CQE-bearing iteration, not lost.
-    if (::io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_))
-    {
-        ::io_uring_prep_poll_add(sqe, wakeup_eventfd_, POLLIN);
-        ::io_uring_sqe_set_data(sqe, nullptr);
-    }
-
     // Release pairs with the acquire side of interrupt_reactor's CAS:
     // a posting thread that observes wakeup_armed_ == false from this
     // store will see the eventfd already drained by the leader.
@@ -852,6 +845,24 @@ io_uring_scheduler::process_completions()
         {
             // Wakeup eventfd CQE: drain the eventfd byte.
             drain_wakeup_eventfd();
+            // If multishot terminated (kernel dropped under memory
+            // pressure or similar), re-arm. Each CQE except the last
+            // sets IORING_CQE_F_MORE.
+            if ((cqe->flags & IORING_CQE_F_MORE) == 0)
+            {
+                ::io_uring_sqe* re = ::io_uring_get_sqe(&ring_);
+                if (!re)
+                {
+                    ::io_uring_submit(&ring_);
+                    re = ::io_uring_get_sqe(&ring_);
+                }
+                if (re)
+                {
+                    ::io_uring_prep_poll_multishot(
+                        re, wakeup_eventfd_, POLLIN);
+                    ::io_uring_sqe_set_data(re, nullptr);
+                }
+            }
         }
         else if (ud == &cancel_sentinel_)
         {
