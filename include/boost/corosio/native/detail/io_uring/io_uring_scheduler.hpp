@@ -498,14 +498,23 @@ io_uring_scheduler::interrupt_reactor() const noexcept
     if (!ring_inited_)
         return;
 
-    bool expected = false;
-    if (wakeup_armed_.compare_exchange_strong(
-            expected, true, std::memory_order_release,
-            std::memory_order_relaxed))
-    {
-        std::uint64_t v = 1;
-        [[maybe_unused]] auto r = ::write(wakeup_eventfd_, &v, sizeof(v));
-    }
+    // Single-thread: the user's coroutines run on the leader thread,
+    // so when interrupt_reactor is called from user code the leader
+    // is not in kernel wait — there is nothing to wake.
+    if (single_threaded_)
+        return;
+
+    // Multi-thread: write the eventfd unconditionally. CAS-coalescing
+    // is unsafe here because the leader's Phase 2 in do_one waits
+    // indefinitely for a CQE; a dropped wake leaves the leader
+    // blocked forever when there is no other CQE-producing activity.
+    // Multishot poll on wakeup_eventfd_ delivers a CQE for every
+    // write, so multiple writes in flight produce multiple CQEs
+    // (drained together by drain_wakeup_eventfd's single read of
+    // the eventfd counter).
+    std::uint64_t v = 1;
+    [[maybe_unused]] auto r = ::write(wakeup_eventfd_, &v, sizeof(v));
+    wakeup_armed_.store(true, std::memory_order_release);
 }
 
 inline void
