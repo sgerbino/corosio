@@ -717,6 +717,22 @@ io_uring_scheduler::do_one(long timeout_us)
     if (stopped_.load(std::memory_order_acquire))
         return 0;
 
+    // If user code keeps posting completions inline (e.g. a polling
+    // timer with 0ns expiry), completed_ops_ never empties, the leader-
+    // path kernel pass below never runs, and SQEs queued by
+    // io_uring_submit_op stay in the userspace SQ ring forever. Force a
+    // non-blocking submit + CQ drain each call so kernel work makes
+    // progress alongside user work. submit_and_get_events (rather than
+    // plain submit) is required: io_uring_submit alone does not run
+    // task work when IORING_SETUP_DEFER_TASKRUN is set; the GETEVENTS
+    // flag is what triggers it.
+    if (ring_inited_)
+    {
+        lock_type ring_lock(ring_mutex_);
+        ::io_uring_submit_and_get_events(&ring_);
+        process_completions();
+    }
+
     lock_type lock(dispatch_mutex_);
     for (;;)
     {
