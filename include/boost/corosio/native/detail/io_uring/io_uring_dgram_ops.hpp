@@ -79,9 +79,7 @@ struct uring_dgram_send_op : io_uring_op
 
         if (owner == nullptr)
         {
-            auto h = self->h;
             delete self;
-            if (h) h.destroy();
             return;
         }
 
@@ -163,9 +161,7 @@ struct uring_dgram_recv_op : io_uring_op
 
         if (owner == nullptr)
         {
-            auto h = self->h;
             delete self;
-            if (h) h.destroy();
             return;
         }
 

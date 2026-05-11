@@ -144,11 +144,17 @@ struct uring_accept_op : io_uring_op
     }
 
     static void do_handler(
-        void* /*owner*/, scheduler_op* base,
+        void* owner, scheduler_op* base,
         std::uint32_t /*bytes*/, std::uint32_t /*error*/) noexcept
     {
         auto* self = static_cast<uring_accept_op*>(base);
         self->stop_cb.reset();
+
+        if (owner == nullptr)
+        {
+            delete self;
+            return;
+        }
 
         bool was_cancelled =
             self->cancelled.load(std::memory_order_acquire);

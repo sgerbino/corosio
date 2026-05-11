@@ -74,9 +74,7 @@ struct uring_file_read_op : io_uring_op
 
         if (owner == nullptr)
         {
-            auto h = self->h;
             delete self;
-            if (h) h.destroy();
             return;
         }
 
@@ -138,9 +136,7 @@ struct uring_file_write_op : io_uring_op
 
         if (owner == nullptr)
         {
-            auto h = self->h;
             delete self;
-            if (h) h.destroy();
             return;
         }
 
