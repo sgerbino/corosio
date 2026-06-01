@@ -26,6 +26,16 @@ on:
     paths:
       - 'src/**'
       - 'include/**'
+      - 'test/**'
+      - '.github/workflows/code-coverage.yml'
+  pull_request:
+    branches:
+      - master
+      - develop
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
       - '.github/workflows/code-coverage.yml'
   workflow_dispatch:
 
@@ -309,6 +319,14 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 120
 
+    # Diagnostic hang watchdog: if any test process runs longer than
+    # this many seconds it dumps every thread's stack and aborts (see
+    # test/unit/watchdog_windows.cpp). Healthy suites finish in seconds;
+    # this only fires on the coverage-build hang and surfaces where it
+    # is stuck instead of a bare 1500s CTest timeout.
+    env:
+      COROSIO_WATCHDOG_SECS: "180"
+
     steps:
       - name: Clone Boost.Corosio
         uses: actions/checkout@v6
@@ -445,6 +463,19 @@ jobs:
           package-artifact: false
           ref-source-dir: boost-root/libs/corosio
 
+      # Always capture the CTest logs so the watchdog thread-stack dump
+      # (printed to a hung test's stderr before it aborts) is preserved
+      # even when the build step fails. Resolve exe frames with:
+      #   addr2line -f -C -i -e boost_corosio_tests.exe $((0x140000000 + rva))
+      - name: Upload CTest logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows
+          path: |
+            boost-root/__build_cmake_test__/Testing/Temporary/*.log
+          if-no-files-found: ignore
+
       - name: Install Python
         uses: actions/setup-python@v6
         with:
@@ -527,7 +558,11 @@ jobs:
 
   deploy:
     needs: [build-linux, build-macos, build-windows]
-    if: ${{ !cancelled() }}
+    # Publishing pushes to the code-coverage branch / Pages, so only do
+    # it on merges to master/develop. PR runs and manual workflow_dispatch
+    # runs (used to surface the coverage-build hang via the watchdog)
+    # build and test but never publish.
+    if: ${{ github.event_name == 'push' && !cancelled() }}
     defaults:
       run:
         shell: bash

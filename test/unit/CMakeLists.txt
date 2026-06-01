@@ -41,6 +41,12 @@ endif()
 
 target_include_directories(boost_corosio_tests PRIVATE . ../../)
 
+# dbghelp backs the diagnostic hang watchdog (watchdog_windows.cpp),
+# which walks every thread's stack when COROSIO_WATCHDOG_SECS fires.
+if (WIN32)
+    target_link_libraries(boost_corosio_tests PRIVATE dbghelp)
+endif()
+
 # Register individual tests with CTest
 boost_capy_test_suite_discover_tests(boost_corosio_tests)
 
