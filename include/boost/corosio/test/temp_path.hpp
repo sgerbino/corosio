@@ -19,6 +19,16 @@
 #include <string>
 #include <system_error>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace boost::corosio::test {
 
 /** RAII temp directory holding a path for a Unix-domain socket.
@@ -81,11 +91,41 @@ public:
 
     ~temp_socket_dir() noexcept
     {
-        if (!dir_.empty())
+        if (dir_.empty())
+            return;
+
+#if defined(_WIN32)
+        // A bound AF_UNIX socket leaves a special socket file on disk.
+        // std::filesystem::remove_all() stats each entry via
+        // symlink_status(), which (on libstdc++) opens the file with
+        // CreateFileW -- and opening an AF_UNIX socket file hangs in
+        // ZwCreateFile, deadlocking test teardown (observed as the
+        // MinGW coverage-build timeout). FindFirstFileW reads directory
+        // entries without opening the files, and DeleteFileW removes
+        // the socket file's directory entry without that hanging open.
+        std::wstring spec = dir_.wstring() + L"\\*";
+        WIN32_FIND_DATAW fd;
+        HANDLE h = ::FindFirstFileW(spec.c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE)
         {
-            std::error_code ec;
-            std::filesystem::remove_all(dir_, ec);
+            do
+            {
+                std::wstring name = fd.cFileName;
+                if (name == L"." || name == L"..")
+                    continue;
+                std::wstring full = dir_.wstring() + L"\\" + name;
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    ::RemoveDirectoryW(full.c_str());
+                else
+                    ::DeleteFileW(full.c_str());
+            } while (::FindNextFileW(h, &fd));
+            ::FindClose(h);
         }
+        ::RemoveDirectoryW(dir_.wstring().c_str());
+#else
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+#endif
     }
 
     temp_socket_dir(temp_socket_dir const&)            = delete;
