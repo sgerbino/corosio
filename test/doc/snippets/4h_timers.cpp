@@ -85,6 +85,18 @@ capy::task<> delay_timepoint_frag()
     // end::delay_timepoint[]
 }
 
+// This fragment waits on a real 5-minute wall-clock deadline, so
+// (like the connect fragments below) it is compiled but never
+// launched.
+capy::task<> delay_wallclock_frag()
+{
+    // tag::delay_wallclock[]
+    auto deadline = std::chrono::system_clock::now() +
+        std::chrono::minutes(5);
+    auto [ec] = co_await corosio::delay(deadline);
+    // end::delay_wallclock[]
+}
+
 capy::task<> delay_cancel_frag(std::error_code& out)
 {
     // tag::delay_cancel[]

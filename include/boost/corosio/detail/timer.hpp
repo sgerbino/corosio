@@ -157,6 +157,20 @@ public:
         // symbol from outside the corosio DLL.
         BOOST_COROSIO_DECL
         std::coroutine_handle<> wait(waiter_node& w);
+
+        /** Publish a waiter unconditionally.
+
+            Like `wait`, but never takes the elapsed fast path. The
+            fast path posts the continuation directly, bypassing the
+            embedded op; hook-driven waits must observe every
+            completion through the op, where the re-arm hook runs.
+
+            @par Preconditions
+            Same as `wait`.
+
+            @param w The waiter to publish.
+        */
+        std::coroutine_handle<> publish(waiter_node& w);
     };
 
     /// The clock type used for time operations.
@@ -409,6 +423,41 @@ public:
     // Defined below wait_awaitable, which needs timer complete.
     wait_awaitable wait();
 
+    /** Publish a hook-driven wait.
+
+        Bypasses the elapsed fast path so every completion is
+        delivered through the waiter's embedded op, where the
+        re-arm hook is consulted. Used by awaitables that
+        re-publish the waiter to continue a logical wait across
+        several timer expirations.
+
+        @par Preconditions
+        @p w is fully initialized ( handle, executor, stop token,
+        hook fields ) and its storage outlives the wait.
+
+        @param w The waiter to publish.
+
+        @return `std::noop_coroutine()`.
+    */
+    std::coroutine_handle<> publish_wait(waiter_node& w);
+
+    /** Re-arm an already-fired waiter with a new relative expiry.
+
+        Stores the ( saturated ) expiry and re-publishes @p w. The
+        waiter's original work count and stop callback remain in
+        effect. Must only be called from the waiter's re-arm hook,
+        where the waiter has been popped from the service but not
+        yet resumed.
+
+        @par Preconditions
+        The timer has no other waiters — this is what makes the
+        unlocked expiry write race-free.
+
+        @param w The waiter to re-publish.
+        @param d The next expiry relative to now.
+    */
+    void rearm_wait(waiter_node& w, duration d);
+
 protected:
     explicit timer(handle h) noexcept : io_object(std::move(h)) {}
 
@@ -496,6 +545,18 @@ struct BOOST_COROSIO_SYMBOL_VISIBLE waiter_node
 
     /// The completion result read by `await_resume`.
     std::error_code ec_;
+
+    // Consulted by the completion op before resuming; lets a
+    // clock-facade wait re-publish itself instead of completing.
+    // Never consulted on the shutdown destroy path. Consulted on
+    // every completion, including cancellation ( `ec_` set ) — the
+    // hook must inspect `w`'s `ec_` and must not re-arm a canceled
+    // waiter.
+    /// Re-arm hook: return true to skip resumption ( wait continues ).
+    bool (*on_fire_)(void*) = nullptr;
+
+    /// Context passed to `on_fire_` ( the owning awaitable ).
+    void* on_fire_ctx_ = nullptr;
 
     /// The embedded completion op posted to the scheduler.
     completion_op op_;
