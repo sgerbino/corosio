@@ -94,6 +94,13 @@ struct io_uring_op : coro_op
     /// op's result owns nothing.
     retire_func_type                             retire_func = nullptr;
 
+    /// Set when no `work_started()` backs this op. The scheduler spends
+    /// a `work_finished()` on everything it dispatches out of
+    /// `completed_ops_`, so an uncounted op must never be queued there;
+    /// its owner reports a failed submission through its own channel
+    /// instead (see `io_uring_submit_op`).
+    bool                                         uncounted = false;
+
     /// Bridge virtual dispatch to func-pointer dispatch. Lets the run
     /// loop dispatch any scheduler_op via `(*op)()` — both reactor-style
     /// services posted into the queue and proactor-style io_uring ops.

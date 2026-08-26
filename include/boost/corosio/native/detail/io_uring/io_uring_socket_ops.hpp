@@ -440,13 +440,18 @@ struct uring_connect_op : io_uring_op
     On SQ-ring exhaustion (after one flush retry), completes the op
     with `EAGAIN` and queues it so its handler dispatches on the next
     `do_one` cycle, exactly as if the kernel had returned that error.
+    An op marked `uncounted` is the exception: it cannot ride that
+    queue, so the failure is handed back to the caller instead.
 
     @pre `op->prep_func != nullptr`.
 
     @par Exception Safety
     Nothrow.
+
+    @return `false` when the SQ stayed full and `op->uncounted` left
+        the failure for the caller to report; `true` otherwise.
 */
-inline void
+inline bool
 io_uring_submit_op(io_uring_scheduler& sched, io_uring_op* op) noexcept
 {
     sched.lazy_init_ring();
@@ -471,16 +476,21 @@ io_uring_submit_op(io_uring_scheduler& sched, io_uring_op* op) noexcept
             // to ec_out is overwritten on the way out, and a res left at
             // zero reads as end-of-file, a zero-byte write, or a
             // successful connect that never happened. Queue the op as
-            // completed so do_one dispatches the handler. The caller's
-            // work_started() already counted this op, with one exception:
-            // the multishot accept arm deliberately counts nothing, so a
-            // failure here spends a work_finished() it never matched. Its
-            // handler is a no-op, which makes that an accounting slip and
-            // not a use-after-free. (CAS path is not entered here.)
+            // completed so do_one dispatches the handler; the caller's
+            // work_started() pays for the work_finished() do_one spends
+            // on it. (CAS path is not entered here.)
             op->res = -EAGAIN;
+            if (op->uncounted)
+            {
+                // Nothing counted this op, so queueing it would spend a
+                // work_finished() the context never owed and drive
+                // outstanding_work_ below what is really outstanding.
+                // The owner reports the failure instead.
+                return false;
+            }
             typename io_uring_scheduler::lock_type lock(sched.dispatch_mutex());
             sched.push_completed_locked(op);
-            return;
+            return true;
         }
 
         op->prep_func(op, sqe);
@@ -505,6 +515,7 @@ io_uring_submit_op(io_uring_scheduler& sched, io_uring_op* op) noexcept
         // Flush is deferred to submit_sqes_op; post() owns the wake.
         sched.post(&sched.submit_op_ref());
     }
+    return true;
 }
 
 /** Readiness wait via `IORING_OP_POLL_ADD`.
