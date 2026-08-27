@@ -618,7 +618,7 @@ struct self_test
 #if BOOST_COROSIO_HAVE_LIBURING
     void testUringSubmitFails()
     {
-        io_uring ring;
+        ::io_uring ring;
         io_uring_params p{};
         BOOST_TEST_EQ(io_uring_queue_init_params(4, &ring, &p), 0);
         {
@@ -633,7 +633,7 @@ struct self_test
     void testUringSqeFull()
     {
         fault_scope f(sys::uring_sqe_full, 0);
-        io_uring ring;
+        ::io_uring ring;
         io_uring_params p{};
         BOOST_TEST_EQ(io_uring_queue_init_params(64, &ring, &p), 0);
         // liburing may round the clamped entry count up to its own
@@ -649,7 +649,7 @@ struct self_test
 
     void testCqeRewrite()
     {
-        io_uring ring;
+        ::io_uring ring;
         io_uring_params p{};
         BOOST_TEST_EQ(io_uring_queue_init_params(4, &ring, &p), 0);
         int sv[2];
@@ -676,7 +676,7 @@ struct self_test
     // the kernel clears. Rewriting `res` alone cannot reach them.
     void testCqeFlagsCleared()
     {
-        io_uring ring;
+        ::io_uring ring;
         io_uring_params p{};
         BOOST_TEST_EQ(io_uring_queue_init_params(4, &ring, &p), 0);
         int sv[2];
