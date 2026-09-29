@@ -111,10 +111,17 @@ jobs:
 
       - name: Create capy provider
         run: |
+          # Git Bash's `pwd` prints an MSYS path (e.g. /d/a/...) that the
+          # native cmake.exe can't resolve when embedded in a generated
+          # file; cygpath -m gives the drive-letter form cmake expects.
+          capy_dir="$(pwd)/ws/capy"
+          if command -v cygpath > /dev/null 2>&1; then
+            capy_dir="$(cygpath -m "$capy_dir")"
+          fi
           cat > ws/provide-capy.cmake << EOF
           set(BOOST_CAPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
           set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-          add_subdirectory("$(pwd)/ws/capy"
+          add_subdirectory("$capy_dir"
               "\${CMAKE_BINARY_DIR}/_deps/capy-build" EXCLUDE_FROM_ALL)
           EOF
 
