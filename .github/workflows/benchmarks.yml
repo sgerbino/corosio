@@ -21,6 +21,13 @@ name: benchmarks
 on:
   push:
     branches: [ pr/pr-benchmarks ]   # TEMPORARY: stage-1 smoke trigger
+  pull_request:
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'bench/**'
+      - '.github/workflows/benchmarks.yml'
+      - '.github/bench/**'
 
 env:
   BENCH_ITERATIONS: 1       # TEMPORARY smoke profile (production: 5)
@@ -48,14 +55,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          # Stage-1: push event only. Head = pushed sha, base = merge-base
-          # with develop, resolved via the compare API (no checkout needed).
-          head_sha="${{ github.sha }}"
-          base_sha=$(gh api "repos/${{ github.repository }}/compare/develop...${head_sha}" \
-                       --jq .merge_base_commit.sha)
+          # Resolve head/base entirely via the API (no checkout needed).
+          # PR events compare against the PR's base branch; push events
+          # (stage-1 smoke trigger) compare against develop.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            head_sha="${{ github.event.pull_request.head.sha }}"
+            base_sha=$(gh api "repos/${{ github.repository }}/compare/${{ github.event.pull_request.base.ref }}...${head_sha}" \
+                         --jq .merge_base_commit.sha)
+            echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            head_sha="${{ github.sha }}"
+            base_sha=$(gh api "repos/${{ github.repository }}/compare/develop...${head_sha}" \
+                         --jq .merge_base_commit.sha)
+            echo "pr=" >> "$GITHUB_OUTPUT"
+          fi
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "pr=" >> "$GITHUB_OUTPUT"
           echo "mode=ab" >> "$GITHUB_OUTPUT"
 
   bench:
