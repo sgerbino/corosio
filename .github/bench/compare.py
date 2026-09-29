@@ -34,6 +34,92 @@ def primary_metric(category, metrics):
     return None, None
 
 
+def human(value, metric):
+    """Format a metric value with readable units."""
+    if metric.endswith("_ns"):
+        for factor, unit in ((1e9, "s"), (1e6, "ms"), (1e3, "µs")):
+            if abs(value) >= factor:
+                return f"{value / factor:.2f} {unit}"
+        return f"{value:.0f} ns"
+    suffix = "B/s" if metric == "bytes_per_sec" else "/s"
+    for factor, prefix in ((1e9, "G"), (1e6, "M"), (1e3, "K")):
+        if abs(value) >= factor:
+            n = value / factor
+            return f"{n:.2f} {prefix}{suffix}" if n < 100 else f"{n:.1f} {prefix}{suffix}"
+    return f"{value:.1f} {suffix}"
+
+
+MARKER = "<!-- corosio-bench-report -->"
+
+
+def _row_line(platform, r):
+    arrow = "🔻" if r["delta_pct"] < 0 else "🔺"
+    noise = "—" if r["noise_pct"] is None else f"{r['noise_pct']:.2f}%"
+    return (f"| {platform} | {r['backend']} | {r['category']} | {r['name']} "
+            f"| {r['metric']} | {human(r['base_mean'], r['metric'])} "
+            f"| {human(r['head_mean'], r['metric'])} "
+            f"| {arrow} {r['delta_pct']:+.2f}% | {noise} |")
+
+
+def report(summaries, base_sha, head_sha, run_url):
+    lines = [MARKER, "## Benchmark report", ""]
+    mode = next((s["mode"] for s in summaries.values() if s), "ab")
+    if mode == "aa":
+        lines += ["**A/A validation run** — base compared against itself; "
+                  "every flag below is a false positive.", ""]
+    lines += [f"`{base_sha[:12]}` (base) vs `{head_sha[:12]}` (head)", ""]
+
+    for platform, s in summaries.items():
+        if s is None:
+            lines.append(f"- ❌ **{platform}** — no results "
+                         "(job failed or runner offline)")
+        elif s["flagged_count"]:
+            lines.append(f"- ⚠️ **{platform}** — {s['flagged_count']} flagged "
+                         f"({', '.join(s['backends'])})")
+        else:
+            lines.append(f"- ✅ **{platform}** — clean "
+                         f"({', '.join(s['backends'])})")
+    lines.append("")
+
+    header = ("| Platform | Backend | Category | Benchmark | Metric "
+              "| Base | Head | Δ | Noise |")
+    rule = "|---|---|---|---|---|---|---|---|---|"
+
+    flagged = [(p, r) for p, s in summaries.items() if s
+               for r in s["rows"] if r["flagged"]]
+    if flagged:
+        lines += ["### ⚠️ Flagged", "", header, rule]
+        lines += [_row_line(p, r) for p, r in flagged]
+        lines.append("")
+
+    for platform, s in summaries.items():
+        if s is None:
+            continue
+        lines += [f"<details><summary>{platform} — full results "
+                  f"({len(s['rows'])} benchmarks, {s['iterations']} iterations, "
+                  f"{s['duration_s']}s each)</summary>", "", header, rule]
+        lines += [_row_line(platform, r) for r in s["rows"]]
+        lines.append("")
+        if s["new"]:
+            lines += ["**New benchmarks (no baseline):**", ""]
+            lines += [f"- `{n['category']}/{n['name']}` [{n['backend']}] "
+                      f"{human(n['head_mean'], n['metric'])}" for n in s["new"]]
+            lines.append("")
+        if s["removed"]:
+            lines += ["**Removed benchmarks:** " +
+                      ", ".join(f"`{r['category']}/{r['name']}`"
+                                for r in s["removed"]), ""]
+        if s["unsupported"]:
+            lines += ["**Unsupported (no recognized metric):** " +
+                      ", ".join(f"`{u['category']}/{u['name']}`"
+                                for u in s["unsupported"]), ""]
+        lines += ["</details>", ""]
+
+    lines += [f"[Run & raw JSON artifacts]({run_url}) · "
+              "flag rule: |Δ| > max(2%, 3×CV of base runs) · advisory only"]
+    return "\n".join(lines) + "\n"
+
+
 def load_runs(input_dir):
     """Return {(side, backend, iter): {(category, name): {metric: value}}}."""
     runs = {}
@@ -173,6 +259,15 @@ def main(argv=None):
     s.add_argument("--input-dir", required=True)
     s.add_argument("--output", required=True)
     s.add_argument("--mode", default="ab", choices=("ab", "aa"))
+    r = sub.add_parser("report")
+    r.add_argument("--summaries", required=True,
+                   help="dir containing bench-<platform>/summary.json")
+    r.add_argument("--expect", required=True,
+                   help="comma-separated platform list")
+    r.add_argument("--base-sha", required=True)
+    r.add_argument("--head-sha", required=True)
+    r.add_argument("--run-url", required=True)
+    r.add_argument("--output", required=True)
     args = ap.parse_args(argv)
 
     if args.cmd == "summarize":
@@ -180,6 +275,17 @@ def main(argv=None):
         Path(args.output).write_text(json.dumps(summary, indent=2))
         print(f"{args.platform}: {len(summary['rows'])} rows, "
               f"{summary['flagged_count']} flagged")
+    elif args.cmd == "report":
+        summaries = {}
+        for platform in args.expect.split(","):
+            p = Path(args.summaries) / f"bench-{platform}" / "summary.json"
+            try:
+                summaries[platform] = json.loads(p.read_text())
+            except (OSError, json.JSONDecodeError):
+                summaries[platform] = None
+        md = report(summaries, args.base_sha, args.head_sha, args.run_url)
+        Path(args.output).write_text(md)
+        print(f"report written: {args.output}")
     return 0
 
 
