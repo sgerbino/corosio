@@ -12,7 +12,8 @@
 # Runner prerequisites (per machine, maintained by the infra admin):
 #   all      : git, cmake >= 3.20, ninja or make/msbuild, python3
 #   linux    : gcc or clang, liburing-dev
-#   windows  : MSVC (vcvars auto-detected by cmake), python on PATH
+#   windows  : MSVC (vcvars auto-detected by cmake), python on PATH,
+#              Git Bash (for shell: bash steps)
 #   macos    : Xcode command line tools
 
 name: benchmarks
@@ -218,8 +219,7 @@ jobs:
             exit 0
           fi
           marker="<!-- corosio-bench-report -->"
-          cid=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" \
-                  --paginate \
+          cid=$(gh api "repos/${{ github.repository }}/issues/$PR/comments?per_page=100" \
                   --jq "[.[] | select(.user.login == \"github-actions[bot]\")
                              | select(.body | startswith(\"$marker\"))] | first | .id // empty")
           if [ -n "$cid" ]; then
