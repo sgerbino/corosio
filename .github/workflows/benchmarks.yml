@@ -65,13 +65,13 @@ jobs:
       matrix:
         include:
           - platform: linux
-            labels: '["self-hosted", "Linux", "X64"]'
+            labels: '["ubuntu-latest"]'
             backends: "epoll uring"
           - platform: windows
-            labels: '["self-hosted", "Windows", "X64"]'
+            labels: '["windows-latest"]'
             backends: "iocp"
           - platform: macos
-            labels: '["self-hosted", "macOS", "ARM64"]'
+            labels: '["macos-latest"]'
             backends: "kqueue"
     name: bench-${{ matrix.platform }}
     runs-on: ${{ fromJSON(matrix.labels) }}
@@ -117,6 +117,10 @@ jobs:
           add_subdirectory("$(pwd)/ws/capy"
               "\${CMAKE_BINARY_DIR}/_deps/capy-build" EXCLUDE_FROM_ALL)
           EOF
+
+      - name: Install dependencies (hosted linux)
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
 
       - name: Build head and base
         run: |
