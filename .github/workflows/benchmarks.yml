@@ -1,0 +1,231 @@
+#
+# Copyright (c) 2026 Steve Gerbino
+#
+# Distributed under the Boost Software License, Version 1.0. (See accompanying
+# file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+#
+# Official repository: https://github.com/cppalliance/corosio/
+#
+# Per-PR performance benchmarks on dedicated self-hosted runners.
+# Advisory only. See issue #343.
+#
+# Runner prerequisites (per machine, maintained by the infra admin):
+#   all      : git, cmake >= 3.20, ninja or make/msbuild, python3
+#   linux    : gcc or clang, liburing-dev
+#   windows  : MSVC (vcvars auto-detected by cmake), python on PATH
+#   macos    : Xcode command line tools
+
+name: benchmarks
+
+on:
+  push:
+    branches: [ pr/pr-benchmarks ]   # TEMPORARY: stage-1 smoke trigger
+
+env:
+  BENCH_ITERATIONS: 1       # TEMPORARY smoke profile (production: 5)
+  BENCH_DURATION: "0.5"     # TEMPORARY smoke profile (production: 1.5)
+  BENCH_CATEGORY: io_context  # TEMPORARY smoke profile (production: empty)
+
+concurrency:
+  group: benchmarks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      base_sha: ${{ steps.decide.outputs.base_sha }}
+      pr: ${{ steps.decide.outputs.pr }}
+      mode: ${{ steps.decide.outputs.mode }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          # Stage-1: push event only. Head = pushed sha, base = merge-base
+          # with develop, resolved via the compare API (no checkout needed).
+          head_sha="${{ github.sha }}"
+          base_sha=$(gh api "repos/${{ github.repository }}/compare/develop...${head_sha}" \
+                       --jq .merge_base_commit.sha)
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "pr=" >> "$GITHUB_OUTPUT"
+          echo "mode=ab" >> "$GITHUB_OUTPUT"
+
+  bench:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            labels: '["self-hosted", "Linux", "X64"]'
+            backends: "epoll uring"
+          - platform: windows
+            labels: '["self-hosted", "Windows", "X64"]'
+            backends: "iocp"
+          - platform: macos
+            labels: '["self-hosted", "macOS", "ARM64"]'
+            backends: "kqueue"
+    name: bench-${{ matrix.platform }}
+    runs-on: ${{ fromJSON(matrix.labels) }}
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Clean workspace
+        run: rm -rf results build-base build-head comment ws && mkdir -p results
+
+      - name: Checkout head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.head_sha }}
+          path: ws/head
+          persist-credentials: false
+
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.base_sha }}
+          path: ws/base
+          persist-credentials: false
+
+      - name: Resolve Capy branch
+        id: capy-ref
+        uses: ./ws/head/.github/actions/resolve-capy
+
+      - name: Checkout capy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.capy-ref.outputs.repo }}
+          ref: ${{ steps.capy-ref.outputs.ref }}
+          path: ws/capy
+          persist-credentials: false
+
+      - name: Create capy provider
+        run: |
+          cat > ws/provide-capy.cmake << EOF
+          set(BOOST_CAPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+          set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+          add_subdirectory("$(pwd)/ws/capy"
+              "\${CMAKE_BINARY_DIR}/_deps/capy-build" EXCLUDE_FROM_ALL)
+          EOF
+
+      - name: Build head and base
+        run: |
+          set -e
+          for side in head base; do
+            cmake -S "ws/$side" -B "build-$side" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBOOST_COROSIO_BUILD_BENCH=ON \
+              -DBOOST_COROSIO_BUILD_TESTS=OFF \
+              -DBOOST_COROSIO_BUILD_EXAMPLES=OFF \
+              -DCMAKE_PROJECT_boost_corosio_INCLUDE="$(pwd)/ws/provide-capy.cmake"
+            cmake --build "build-$side" --config Release \
+              --target corosio_bench --parallel
+          done
+
+      - name: Locate binaries
+        id: bins
+        run: |
+          set -e
+          for side in head base; do
+            bin=$(find "build-$side/bench" -type f \
+                    \( -name corosio_bench -o -name corosio_bench.exe \) | head -1)
+            test -n "$bin"
+            echo "$side=$bin" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Run interleaved benchmarks
+        run: |
+          set -e
+          cat_flag=""
+          if [ -n "$BENCH_CATEGORY" ]; then
+            cat_flag="--category $BENCH_CATEGORY"
+          fi
+          for i in $(seq 1 "$BENCH_ITERATIONS"); do
+            # ABBA: odd iterations base first, even iterations head first
+            if [ $((i % 2)) -eq 1 ]; then order="base head"; else order="head base"; fi
+            for side in $order; do
+              if [ "$side" = base ]; then bin="${{ steps.bins.outputs.base }}";
+              else bin="${{ steps.bins.outputs.head }}"; fi
+              for b in ${{ matrix.backends }}; do
+                "$bin" --library corosio --backend "$b" \
+                  --duration "$BENCH_DURATION" $cat_flag \
+                  --output "results/$side-$b-$i.json"
+              done
+            done
+          done
+
+      - name: Summarize
+        run: |
+          python3 ws/head/.github/bench/compare.py summarize \
+            --platform "${{ matrix.platform }}" \
+            --input-dir results \
+            --output results/summary.json \
+            --mode "${{ needs.gate.outputs.mode }}"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.platform }}
+          path: results/
+
+  report:
+    needs: [gate, bench]
+    if: always() && needs.gate.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout head (for compare.py)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Download summaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          path: artifacts
+
+      - name: Build report
+        run: |
+          python3 .github/bench/compare.py report \
+            --summaries artifacts \
+            --expect linux,windows,macos \
+            --base-sha "${{ needs.gate.outputs.base_sha }}" \
+            --head-sha "${{ needs.gate.outputs.head_sha }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --output comment.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.gate.outputs.pr }}
+        run: |
+          set -e
+          if [ -z "$PR" ]; then
+            cat comment.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          marker="<!-- corosio-bench-report -->"
+          cid=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" \
+                  --paginate \
+                  --jq "[.[] | select(.user.login == \"github-actions[bot]\")
+                             | select(.body | startswith(\"$marker\"))] | first | .id // empty")
+          if [ -n "$cid" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$cid" \
+              -F body=@comment.md
+          else
+            gh api "repos/${{ github.repository }}/issues/$PR/comments" \
+              -F body=@comment.md
+          fi
