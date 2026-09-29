@@ -47,8 +47,18 @@ def load_runs(input_dir):
         except (OSError, json.JSONDecodeError) as e:
             print(f"warning: skipping unreadable {p.name}: {e}", file=sys.stderr)
             continue
+        if not isinstance(payload, dict):
+            print(f"warning: skipping non-object JSON {p.name}", file=sys.stderr)
+            continue
+        benchmarks = payload.get("benchmarks", [])
+        if not isinstance(benchmarks, list):
+            print(f"warning: skipping {p.name}: benchmarks field is not a list", file=sys.stderr)
+            continue
         table = {}
-        for b in payload.get("benchmarks", []):
+        for b in benchmarks:
+            if not isinstance(b, dict):
+                print(f"warning: skipping non-object benchmark entry in {p.name}", file=sys.stderr)
+                continue
             key = (b.get("category", ""), b.get("name", ""))
             table[key] = {
                 k: v for k, v in b.items()
