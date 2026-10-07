@@ -21,6 +21,7 @@
 #include <boost/corosio/native/detail/make_err.hpp>
 #include <boost/corosio/native/detail/endpoint_convert.hpp>
 
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -273,23 +274,44 @@ public:
 
     /** Reset descriptor state for recycling.
 
-        `close_socket()` already drove fd_ and every parked op pointer
-        to their closed state before the refcount reached zero, so
-        this only asserts those invariants — see
-        reactor_basic_socket::reuse() for the same rationale.
+        Actively re-initializes every field it owns rather than
+        trusting `close_socket()`'s prior writes to still be there —
+        see reactor_basic_socket::reuse() for the same rationale.
+        `object_ref_` and `is_enqueued_` are asserted instead: `poison()`
+        never touches them, so they must already hold their
+        zero-action-complete state.
 
         @pre refs_ == 0, fd closed and deregistered, no op in flight.
     */
     void reuse() noexcept
     {
-        BOOST_COROSIO_ASSERT(fd_ == -1);
-        this->assert_quiescent();
+        fd_             = -1;
+        local_endpoint_ = Endpoint{};
+        this->reset_desc_state();
         BOOST_COROSIO_ASSERT(!acc_.stop_cb);
         BOOST_COROSIO_ASSERT(!wait_rd_.stop_cb);
         BOOST_COROSIO_ASSERT(!wait_wr_.stop_cb);
         BOOST_COROSIO_ASSERT(!wait_er_.stop_cb);
-        BOOST_COROSIO_ASSERT(local_endpoint_ == Endpoint{});
     }
+
+#if !defined(NDEBUG)
+    /** Poison the fields `reuse()` re-initializes, before the pool
+        parks this impl on the free list. See
+        reactor_basic_socket::poison() for the full rationale and the
+        list of fields deliberately left untouched.
+
+        @pre refs_ == 0, fd closed and deregistered, no op in flight.
+    */
+    void poison() noexcept
+    {
+        auto smash = [](auto& field) {
+            std::memset(static_cast<void*>(&field), 0xDB, sizeof(field));
+        };
+        smash(fd_);
+        smash(local_endpoint_);
+        this->poison_desc_state();
+    }
+#endif
 
     /** Bind the acceptor socket to an endpoint.
 
