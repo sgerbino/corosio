@@ -14,6 +14,7 @@
 #include <boost/corosio/udp_socket.hpp>
 #include <boost/corosio/shutdown_type.hpp>
 #include <boost/corosio/wait_type.hpp>
+#include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/native/detail/reactor/reactor_basic_socket.hpp>
 #include <boost/corosio/native/detail/reactor/reactor_descriptor_state.hpp>
 #include <boost/corosio/native/detail/msg_flags.hpp>
@@ -327,6 +328,30 @@ public:
         return fd;
     }
 
+    /** Reset op slots and the cached peer for recycling.
+
+        See reactor_stream_socket::reuse() — same rationale: op state
+        is overwritten by the next do_* call, `remote_endpoint_` and
+        every parked op pointer are already cleared by
+        `do_close_socket()`, so this only asserts `stop_cb` disengaged
+        on each slot.
+
+        @pre refs_ == 0, fd closed and deregistered, no op in flight.
+    */
+    void reuse() noexcept
+    {
+        base_type::reuse();
+        BOOST_COROSIO_ASSERT(!conn_.stop_cb);
+        BOOST_COROSIO_ASSERT(!wr_.stop_cb);
+        BOOST_COROSIO_ASSERT(!rd_.stop_cb);
+        BOOST_COROSIO_ASSERT(!send_wr_.stop_cb);
+        BOOST_COROSIO_ASSERT(!recv_rd_.stop_cb);
+        BOOST_COROSIO_ASSERT(!wait_rd_.stop_cb);
+        BOOST_COROSIO_ASSERT(!wait_wr_.stop_cb);
+        BOOST_COROSIO_ASSERT(!wait_er_.stop_cb);
+        BOOST_COROSIO_ASSERT(remote_endpoint_ == Endpoint{});
+    }
+
     /** Shut down part or all of the full-duplex connection.
 
         Not an override — concrete backends forward here.
@@ -499,7 +524,7 @@ reactor_datagram_socket<
         op.ec_out    = ec;
         op.bytes_out = bytes_out;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(err, bytes);
         this->svc_.post(&op);
         return std::noop_coroutine();
@@ -511,7 +536,7 @@ reactor_datagram_socket<
     op.ec_out    = ec;
     op.bytes_out = bytes_out;
     op.start(token, static_cast<Derived*>(this));
-    op.impl_ptr = this->shared_from_this();
+    op.object_ref_ = detail::object_ref(this);
 
     this->register_op(
         op, this->desc_state_.write_op, this->desc_state_.write_ready, true);
@@ -569,7 +594,7 @@ reactor_datagram_socket<
         op.ec_out    = ec;
         op.bytes_out = bytes_out;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(0, 0);
         this->svc_.post(&op);
         return std::noop_coroutine();
@@ -621,7 +646,7 @@ reactor_datagram_socket<
         op.ec_out    = ec;
         op.bytes_out = bytes_out;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(err, bytes);
         this->svc_.post(&op);
         return std::noop_coroutine();
@@ -633,7 +658,7 @@ reactor_datagram_socket<
     op.ec_out    = ec;
     op.bytes_out = bytes_out;
     op.start(token, static_cast<Derived*>(this));
-    op.impl_ptr = this->shared_from_this();
+    op.object_ref_ = detail::object_ref(this);
 
     this->register_op(
         op, this->desc_state_.read_op, this->desc_state_.read_ready);
@@ -710,7 +735,7 @@ reactor_datagram_socket<
     op.fd              = this->fd_;
     op.target_endpoint = ep;
     op.start(token, static_cast<Derived*>(this));
-    op.impl_ptr = this->shared_from_this();
+    op.object_ref_ = detail::object_ref(this);
     op.complete(err, 0);
     this->svc_.post(&op);
     return std::noop_coroutine();
@@ -802,7 +827,7 @@ reactor_datagram_socket<
         op.ec_out    = ec;
         op.bytes_out = bytes_out;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(err, bytes);
         this->svc_.post(&op);
         return std::noop_coroutine();
@@ -814,7 +839,7 @@ reactor_datagram_socket<
     op.ec_out    = ec;
     op.bytes_out = bytes_out;
     op.start(token, static_cast<Derived*>(this));
-    op.impl_ptr = this->shared_from_this();
+    op.object_ref_ = detail::object_ref(this);
 
     this->register_op(
         op, this->desc_state_.write_op, this->desc_state_.write_ready, true);
@@ -870,7 +895,7 @@ reactor_datagram_socket<
         op.ec_out    = ec;
         op.bytes_out = bytes_out;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(0, 0);
         this->svc_.post(&op);
         return std::noop_coroutine();
@@ -914,7 +939,7 @@ reactor_datagram_socket<
         op.ec_out    = ec;
         op.bytes_out = bytes_out;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(err, bytes);
         this->svc_.post(&op);
         return std::noop_coroutine();
@@ -926,7 +951,7 @@ reactor_datagram_socket<
     op.ec_out    = ec;
     op.bytes_out = bytes_out;
     op.start(token, static_cast<Derived*>(this));
-    op.impl_ptr = this->shared_from_this();
+    op.object_ref_ = detail::object_ref(this);
 
     this->register_op(
         op, this->desc_state_.read_op, this->desc_state_.read_ready);
@@ -1012,7 +1037,7 @@ reactor_datagram_socket<
         op.ec_out     = ec;
         op.fd         = this->fd_;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(perr, 0);
         this->svc_.post(&op);
         return std::noop_coroutine();
@@ -1025,7 +1050,7 @@ reactor_datagram_socket<
     op.ec_out     = ec;
     op.fd         = this->fd_;
     op.start(token, static_cast<Derived*>(this));
-    op.impl_ptr = this->shared_from_this();
+    op.object_ref_ = detail::object_ref(this);
 
     // Force register_op's ready path so the wait op re-probes under
     // the descriptor mutex before parking. An edge consumed between

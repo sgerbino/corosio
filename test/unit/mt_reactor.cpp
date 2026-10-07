@@ -32,6 +32,7 @@
 #include <boost/capy/error.hpp>
 #include <boost/capy/ex/io_env.hpp>
 #include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/ex/thread_pool.hpp>
 #include <boost/capy/task.hpp>
 
 #include <atomic>
@@ -40,6 +41,7 @@
 #include <stop_token>
 #include <system_error>
 #include <thread>
+#include <tuple>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -222,11 +224,144 @@ struct mt_reactor_test
         ioc.run();
     }
 
+    // A reactor pass can hold an event for a descriptor that another run
+    // thread closes before the pass queues it. The closed socket's impl
+    // must outlive that pass, not be recycled under it. Each iteration
+    // makes a descriptor readable and destroys its socket while a second
+    // run thread polls.
+    void testCloseRacesReactorPass()
+    {
+        int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+        BOOST_TEST(lfd >= 0);
+        int one = 1;
+        ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in addr{};
+        addr.sin_family      = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len        = sizeof(addr);
+        BOOST_TEST(
+            ::bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) ==
+            0);
+        BOOST_TEST(
+            ::getsockname(lfd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        BOOST_TEST(::listen(lfd, 64) == 0);
+
+        io_context ioc(Backend, 2);
+        int completed = 0;
+        capy::run_async(ioc.get_executor())(
+            [](io_context& c, int listener, sockaddr_in a,
+               int& done) -> capy::task<> {
+                for (int i = 0; i < 2000; ++i)
+                {
+                    int peer = ::socket(AF_INET, SOCK_STREAM, 0);
+                    if (::connect(
+                            peer, reinterpret_cast<sockaddr*>(&a),
+                            sizeof(a)) != 0)
+                    {
+                        ::close(peer);
+                        co_return;
+                    }
+                    int fd = ::accept(listener, nullptr, nullptr);
+                    {
+                        tcp_socket s(c);
+                        std::ignore  = s.assign(fd);
+                        char const b = 'x';
+                        std::ignore  = ::send(peer, &b, 1, 0);
+                    }
+                    ::close(peer);
+                    ++done;
+                }
+            }(ioc, lfd, addr, completed));
+
+        std::thread second([&] { ioc.run(); });
+        ioc.run();
+        second.join();
+        ::close(lfd);
+        BOOST_TEST_EQ(completed, 2000);
+    }
+
+    // An op started from a thread that is not running the context posts
+    // its completion through the scheduler lock. It must not do so while
+    // holding the descriptor lock, which the reactor takes after the
+    // scheduler lock when settling a descriptor closed during its pass.
+    // A stop racing the start makes it complete without parking, taking
+    // that posting path while the reactor settles the previous
+    // incarnation's close.
+    void testForeignStartRacesSettle()
+    {
+        int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+        BOOST_TEST(lfd >= 0);
+        sockaddr_in addr{};
+        addr.sin_family      = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len        = sizeof(addr);
+        BOOST_TEST(
+            ::bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) ==
+            0);
+        BOOST_TEST(
+            ::getsockname(lfd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        BOOST_TEST(::listen(lfd, 64) == 0);
+        auto make_pair = [&](int& mine, int& peer) {
+            peer = ::socket(AF_INET, SOCK_STREAM, 0);
+            std::ignore = ::connect(
+                peer, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+            mine = ::accept(lfd, nullptr, nullptr);
+        };
+
+        io_context ioc(Backend, 2);
+        capy::thread_pool pool(1);
+
+        // A parked wait keeps run() polling until the end.
+        int idle_fd  = -1;
+        int idle_peer = -1;
+        make_pair(idle_fd, idle_peer);
+        tcp_socket idle(ioc);
+        BOOST_TEST(!idle.assign(idle_fd));
+        capy::run_async(ioc.get_executor())(
+            [](tcp_socket& i) -> capy::task<> {
+                std::ignore = co_await i.wait(wait_type::read);
+            }(idle));
+        std::thread runner([&] { ioc.run(); });
+
+        tcp_socket s(ioc);
+        int peer = -1;
+        std::atomic<int> finished{0};
+        for (int i = 0; i < 500; ++i)
+        {
+            if (peer >= 0)
+                ::close(peer);
+            s.close();
+            int fd = -1;
+            make_pair(fd, peer);
+            BOOST_TEST(!s.assign(fd));
+            std::stop_source stop;
+            capy::run_async(pool.get_executor(), stop.get_token())(
+                [](tcp_socket& x, std::atomic<int>& n) -> capy::task<> {
+                    std::ignore = co_await x.wait(wait_type::read);
+                    ++n;
+                }(s, finished));
+            stop.request_stop();
+            while (finished.load() == i)
+                std::this_thread::yield();
+        }
+
+        char const b = 'x';
+        std::ignore  = ::send(idle_peer, &b, 1, 0);
+        runner.join();
+        pool.join();
+        ::close(peer);
+        ::close(idle_peer);
+        ::close(lfd);
+        BOOST_TEST_EQ(finished.load(), 500);
+    }
+
     void run()
     {
         testEventCompletesBatchedOps();
         testForeignPostWakesParkedFollower();
         testAcceptorWaitWakesBlockedReactor();
+        testCloseRacesReactorPass();
+        testForeignStartRacesSettle();
     }
 };
 

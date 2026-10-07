@@ -42,6 +42,12 @@ struct uring_test_context : native_io_context<uring>
     }
 };
 
+inline capy::task<>
+noop_task()
+{
+    co_return;
+}
+
 struct multishot_acceptor_test
 {
     void testContextConstructs()
@@ -50,13 +56,11 @@ struct multishot_acceptor_test
         BOOST_TEST(!ioc.stopped());
     }
 
-    // Regression: drain_cqes_for (run from the multishot acceptor's
-    // destructor) used to advance CQEs without decrementing
-    // uring_inflight_, leaking the counts of the multishot accept SQE
-    // and the cancel SQEs it submits. The counter gates the do_one ring
-    // pump, so the leak accumulated across every acceptor teardown for the
-    // lifetime of the io_context. After the fix the counter returns to
-    // zero once teardown settles.
+    // Destroying an acceptor must leave uring_inflight_ balanced: the
+    // multishot accept SQE and the cancel SQEs close submits are each
+    // counted once and must each be uncounted by their CQEs. The
+    // counter gates the do_one ring pump, so a leak would accumulate
+    // across every acceptor teardown for the lifetime of the io_context.
     void testDrainCqesBalancesInflight()
     {
         uring_test_context ctx;
@@ -77,14 +81,19 @@ struct multishot_acceptor_test
             ctx.poll();
             BOOST_TEST(ctx.inflight() >= 1);
         }
-        // acc destroyed: the impl destructor runs cancel-by-fd and
-        // drain_cqes_for(multi_op_). Drain the CQEs those produce that the
-        // destructor's bounded loop did not itself consume.
+        // acc destroyed: close cancelled the arming and recycling handed
+        // the op to the scheduler, so the run loop reaps the remaining
+        // CQEs. poll() only pumps the ring while work is outstanding.
+        auto ex = ctx.get_executor();
         for (int i = 0; i < 64 && ctx.inflight() != 0; ++i)
+        {
+            capy::run_async(ex)(noop_task());
+            ctx.restart();
             ctx.poll();
+        }
 
         // Every submitted SQE (the multishot accept plus the teardown
-        // cancels) is now accounted for. Before the fix this stayed > 0.
+        // cancels) is now accounted for.
         BOOST_TEST_EQ(ctx.inflight(), 0);
     }
 

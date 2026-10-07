@@ -70,7 +70,6 @@ class posix_random_access_file_service;
 /** Random-access file implementation for POSIX backends. */
 class posix_random_access_file final
     : public random_access_file::implementation
-    , public std::enable_shared_from_this<posix_random_access_file>
     , public intrusive_list<posix_random_access_file>::node
 {
     friend class posix_random_access_file_service;
@@ -101,7 +100,7 @@ public:
         int errn                      = 0;
         std::size_t bytes_transferred = 0;
 
-        // Raw back-pointer for the typed work; `impl_ptr` is the keepalive.
+        // Raw back-pointer for the typed work; `object_ref_` is the keepalive.
         posix_random_access_file* file_ = nullptr;
 
         // The awaitable's, not the embedded `cont`: this op is freed
@@ -117,6 +116,27 @@ public:
 
     explicit posix_random_access_file(
         posix_random_access_file_service& svc) noexcept;
+
+    /// Recycle into the owning service's pool. Defined out-of-line
+    /// after posix_random_access_file_service for its complete type.
+    void retire() noexcept override;
+
+    /** Reset for recycling.
+
+        `close_file()` already drove fd_ to its closed value before
+        the refcount reached zero. Every `raf_op` is heap-allocated
+        per submission and holds its own `object_ref`, so the refcount
+        cannot reach zero while one is outstanding — asserting
+        `outstanding_ops_` is empty is therefore a precondition check,
+        not a defensive one.
+
+        @pre refs_ == 0, fd closed, no op in flight.
+    */
+    void reuse() noexcept
+    {
+        BOOST_COROSIO_ASSERT(fd_ == -1);
+        BOOST_COROSIO_ASSERT(outstanding_ops_.empty());
+    }
 
     // -- random_access_file::implementation --
 
@@ -312,7 +332,7 @@ posix_random_access_file::raf_op::operator()()
         file_->outstanding_ops_.remove(this);
     }
 
-    impl_ptr.reset();
+    object_ref_.reset();
 
     auto* c       = awaiting;
     auto local_ex = ex;
@@ -331,7 +351,7 @@ posix_random_access_file::raf_op::destroy()
         std::lock_guard<std::mutex> lock(file_->ops_mutex_);
         file_->outstanding_ops_.remove(this);
     }
-    impl_ptr.reset();
+    object_ref_.reset();
     ex.on_work_finished();
     delete this;
 }

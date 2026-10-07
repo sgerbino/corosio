@@ -14,6 +14,8 @@
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/wait_type.hpp>
 #include <boost/corosio/detail/intrusive.hpp>
+#include <boost/corosio/detail/config.hpp>
+#include <boost/corosio/detail/object_ref.hpp>
 #include <boost/corosio/native/detail/reactor/reactor_io_core.hpp>
 #include <boost/corosio/native/detail/reactor/reactor_descriptor_state.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
@@ -59,7 +61,6 @@ template<
     class Endpoint = endpoint>
 class reactor_acceptor
     : public ImplBase
-    , public std::enable_shared_from_this<Derived>
     , public reactor_io_core<Derived, Service, DescState>
     , public intrusive_list<Derived>::node
 {
@@ -252,7 +253,6 @@ public:
     void do_close_socket() noexcept
     {
         this->abandon_all();
-        this->unregister_fd(fd_);
         if (fd_ >= 0)
         {
             ::close(fd_);
@@ -266,10 +266,29 @@ public:
     {
         this->abandon_all();
         native_handle_type released = fd_;
-        this->unregister_fd(fd_);
-        fd_             = -1;
-        local_endpoint_ = Endpoint{};
+        fd_                         = -1;
+        local_endpoint_             = Endpoint{};
         return released;
+    }
+
+    /** Reset descriptor state for recycling.
+
+        `close_socket()` already drove fd_ and every parked op pointer
+        to their closed state before the refcount reached zero, so
+        this only asserts those invariants — see
+        reactor_basic_socket::reuse() for the same rationale.
+
+        @pre refs_ == 0, fd closed and deregistered, no op in flight.
+    */
+    void reuse() noexcept
+    {
+        BOOST_COROSIO_ASSERT(fd_ == -1);
+        this->assert_quiescent();
+        BOOST_COROSIO_ASSERT(!acc_.stop_cb);
+        BOOST_COROSIO_ASSERT(!wait_rd_.stop_cb);
+        BOOST_COROSIO_ASSERT(!wait_wr_.stop_cb);
+        BOOST_COROSIO_ASSERT(!wait_er_.stop_cb);
+        BOOST_COROSIO_ASSERT(local_endpoint_ == Endpoint{});
     }
 
     /** Bind the acceptor socket to an endpoint.
@@ -434,7 +453,7 @@ reactor_acceptor<
         op.ec_out     = ec;
         op.fd         = this->fd_;
         op.start(token, static_cast<Derived*>(this));
-        op.impl_ptr = this->shared_from_this();
+        op.object_ref_ = detail::object_ref(this);
         op.complete(ENOTSUP, 0);
         svc_.post(&op);
         return std::noop_coroutine();
@@ -465,7 +484,7 @@ reactor_acceptor<
     op.ec_out     = ec;
     op.fd         = this->fd_;
     op.start(token, static_cast<Derived*>(this));
-    op.impl_ptr = this->shared_from_this();
+    op.object_ref_ = detail::object_ref(this);
 
     // A listener's readiness can predate the wait: an adopted or
     // shared descriptor has history the reactor never saw, and an
@@ -481,25 +500,35 @@ reactor_acceptor<
 
     svc_.work_started();
 
-    std::lock_guard lock(desc_state_.mutex);
-    if (op.cancelled.load(std::memory_order_acquire))
+    // Posted after the descriptor lock is released: the scheduler
+    // takes its own lock before descriptor locks.
+    bool post_now = false;
     {
-        svc_.post(&op);
-        svc_.work_finished();
+        std::lock_guard lock(desc_state_.mutex);
+        if (op.cancelled.load(std::memory_order_acquire))
+        {
+            post_now = true;
+        }
+        else if (WaitOp::probe(this->fd_, event, perr))
+        {
+            // Close the probe-to-park window: an edge that landed after
+            // the first probe was consumed, so re-check under the mutex
+            // the dispatch path holds.
+            op.complete(perr, 0);
+            post_now = true;
+        }
+        else
+        {
+            *desc_slot_ptr = &op;
+        }
     }
-    else if (WaitOp::probe(this->fd_, event, perr))
+    if (post_now)
     {
-        // Close the probe-to-park window: an edge that landed after
-        // the first probe was consumed, so re-check under the mutex
-        // the dispatch path holds.
-        op.complete(perr, 0);
         svc_.post(&op);
         svc_.work_finished();
     }
     else
     {
-        *desc_slot_ptr = &op;
-
         // Select watches an fd only while an op is parked; see
         // register_op.
         if constexpr (Service::needs_park_notification)

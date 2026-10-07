@@ -335,7 +335,7 @@ public:
         Callers must hold neither.
 
         @pre After @p prepare runs, @p slot must hold no reference back
-            to its owner (`impl_ptr` cleared, back-pointers nulled).
+            to its owner (`object_ref_` cleared, back-pointers nulled).
             `release_retired_op` deletes the op from inside the CQE
             loop with `ring_mutex_` held, so its destructor must not
             re-enter the scheduler or touch the owner.
@@ -343,19 +343,26 @@ public:
         @param slot The owner's pointer to the op. Emptied on return;
             ignored if already empty.
         @param prepare Invoked as `prepare(*slot)` under `ring_mutex_`
-            to clear back-pointers and install a `retire_func`. Must
-            not take `ring_mutex_` or post work.
+            to clear back-pointers and install a `retire_func`. Returns
+            whether the kernel still owes the op a terminal CQE; if
+            not, the op is freed rather than parked. Must not take
+            `ring_mutex_` or post work.
     */
     template<class Op, class PrepareFn>
     void retire_op(std::unique_ptr<Op>& slot, PrepareFn prepare) noexcept
     {
+        // Only the owner moves the slot, so it can be tested unlocked.
+        if (!slot)
+            return;
         // Interrupt first so a leader parked in the kernel drops
         // ring_mutex_ promptly, as cancel_and_flush does.
         interrupt_reactor();
         lock_type lock(ring_mutex_);
-        if (!slot)
+        if (!prepare(*slot))
+        {
+            slot.reset();
             return;
-        prepare(*slot);
+        }
         slot->retired = true;
         std::lock_guard<std::mutex> retired_lock(retired_mutex_);
         retired_ops_.push_back(std::move(slot));
@@ -733,19 +740,57 @@ uring_scheduler::shutdown()
 {
     stopped_.store(true, std::memory_order_release);
 
-    // Drain posted ops, calling destroy() on each so embedded handles
-    // (coroutine frames, error_code outputs) get torn down rather
-    // than leaked. Mirrors reactor_scheduler::shutdown_drain.
-    //
-    // Service shutdown order (driven by capy::execution_context):
-    // each socket/acceptor service::shutdown() submits a cancel SQE
-    // for every live impl. The CQEs that result either land in
-    // completed_ops_ (drained here as op->destroy()) or stay in the
-    // kernel ring; ~scheduler's io_uring_queue_exit cleans the
-    // latter up at process teardown. Self-referential impl_ptr
-    // cycles (e.g. multishot acceptor's multi_op_->impl_ptr) are
-    // broken explicitly inside each service before the scheduler
-    // shutdown runs.
+    // Cancel every request still in the kernel and wait for each to
+    // come back: the services free their impls next, and an op still
+    // armed would write into freed memory. One cancel-any covers ops
+    // whose own service-side cancel could not be queued. The kernel
+    // answers every cancel, so once it is submitted the wait ends; a
+    // ring that will not take it leaves nothing that could end a wait.
+    // A signal or a full completion queue only delays either step.
+    if (ring_inited_)
+    {
+        lock_type ring_lock(ring_mutex_);
+        io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_);
+        if (!sqe)
+        {
+            ::io_uring_submit(&ring_);
+            sqe = ::io_uring_get_sqe(&ring_);
+        }
+        if (sqe)
+        {
+            ::io_uring_prep_cancel64(sqe, 0, IORING_ASYNC_CANCEL_ANY);
+            ::io_uring_sqe_set_data(sqe, &cancel_sentinel_);
+            inflight_inc();
+        }
+        int submitted = -EINVAL;
+        if (sqe)
+        {
+            do
+            {
+                submitted = ::io_uring_submit(&ring_);
+                if (submitted == -EBUSY)
+                    process_completions();
+            }
+            while (submitted == -EINTR || submitted == -EAGAIN ||
+                   submitted == -EBUSY);
+        }
+        while (submitted >= 0 &&
+               uring_inflight_.load(std::memory_order_acquire) > 0)
+        {
+            ::io_uring_cqe* cqe = nullptr;
+            int const rc = ::io_uring_wait_cqe_timeout(&ring_, &cqe, nullptr);
+            if (rc == -EINTR || rc == -EAGAIN || rc == -ETIME)
+                continue;
+            if (rc != 0)
+                break;
+            process_completions();
+        }
+    }
+
+    // Drain posted ops, including the completions reaped above,
+    // calling destroy() on each so embedded handles (coroutine frames,
+    // error_code outputs) get torn down rather than leaked. Mirrors
+    // reactor_scheduler::shutdown_drain.
     lock_type lock(dispatch_mutex_);
     while (auto e = completed_ops_.pop())
     {

@@ -275,10 +275,11 @@ struct uring_faults
         }
     }
 
-    // The acceptor's close path drains its multishot CQEs; a failing
-    // submit_and_wait_timeout breaks that loop silently, so the only
-    // observable is that the fault was reached.
-    void testAcceptorDrainSubmitFails()
+    // Closing and destroying a listening acceptor on a live context
+    // hands its multishot op to the scheduler rather than draining the
+    // ring, which would swallow other ops' completions. The drain's
+    // kernel wait is the observable: it must not be reached.
+    void testAcceptorRecycleDoesNotDrain()
     {
         io_context ioc(uring);
         fault_scope f(sys::io_uring_submit_and_wait_timeout, EBADF);
@@ -296,7 +297,7 @@ struct uring_faults
             ioc.poll();
             BOOST_TEST(aec == capy::error::canceled);
         }
-        BOOST_TEST(f.fired());
+        BOOST_TEST(!f.fired());
     }
 
     // A ring clamped to one SQE spends it on the wakeup poll, and the
@@ -1039,7 +1040,7 @@ struct uring_faults
         testAcceptorAssignProbeFails();
         testCancelSqFull();
         testWaitFails();
-        testAcceptorDrainSubmitFails();
+        testAcceptorRecycleDoesNotDrain();
         testAcceptorArmSqFull();
         testSqFull();
         testConnectCqeRewrite();

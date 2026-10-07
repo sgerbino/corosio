@@ -11,6 +11,7 @@
 #ifndef BOOST_COROSIO_NATIVE_DETAIL_REACTOR_REACTOR_BASIC_SOCKET_HPP
 #define BOOST_COROSIO_NATIVE_DETAIL_REACTOR_REACTOR_BASIC_SOCKET_HPP
 
+#include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/intrusive.hpp>
 #include <boost/corosio/detail/native_handle.hpp>
 #include <boost/corosio/endpoint.hpp>
@@ -130,7 +131,6 @@ public:
     void do_close_socket() noexcept
     {
         this->abandon_all();
-        this->unregister_fd(fd_);
         if (fd_ >= 0)
         {
             ::close(fd_);
@@ -148,10 +148,27 @@ public:
     {
         this->abandon_all();
         native_handle_type released = fd_;
-        this->unregister_fd(fd_);
-        fd_             = -1;
-        local_endpoint_ = Endpoint{};
+        fd_                         = -1;
+        local_endpoint_             = Endpoint{};
         return released;
+    }
+
+    /** Reset descriptor state for recycling.
+
+        Called by the owning service's `construct()` when popping this
+        impl back off the free list. `close_socket()` already drove fd_,
+        the descriptor's registration, and every parked op pointer to
+        their closed state before the refcount reached zero, so this
+        only asserts those invariants rather than re-clearing them —
+        a non-null parked op or a lingering `object_ref_` here would mean
+        a reference survived close, which is the real bug to catch.
+
+        @pre refs_ == 0, fd closed and deregistered, no op in flight.
+    */
+    void reuse() noexcept
+    {
+        BOOST_COROSIO_ASSERT(fd_ == -1);
+        this->assert_quiescent();
     }
 };
 
