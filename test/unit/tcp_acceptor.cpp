@@ -280,8 +280,8 @@ struct tcp_acceptor_test
     void testCancelAccept()
     {
         // Tests that cancel() properly cancels a pending accept operation.
-        // This exercises the acceptor_ptr shared_ptr that keeps the
-        // acceptor impl alive until IOCP delivers the cancellation.
+        // The accept op's keepalive must hold the acceptor impl until
+        // IOCP delivers the cancellation.
         io_context ioc(Backend);
         tcp_acceptor acc(ioc);
         BOOST_TEST(!acc.open());
@@ -562,7 +562,7 @@ struct tcp_acceptor_test
         // This is the key test for the cancel/destruction race condition:
         // when close() is called, CancelIoEx is invoked, the tcp_socket is closed,
         // but the impl must stay alive until IOCP delivers the cancellation.
-        // The acceptor_ptr shared_ptr in accept_op ensures this.
+        // The accept op's keepalive ensures this.
         io_context ioc(Backend);
         tcp_acceptor acc(ioc);
         BOOST_TEST(!acc.open());
