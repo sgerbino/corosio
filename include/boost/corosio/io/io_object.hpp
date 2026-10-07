@@ -65,11 +65,17 @@ public:
 
         /** Called when the reference count reaches zero.
 
-            @note Transitional default is a no-op while backends are
-            migrated; it becomes pure virtual at the end of the
-            migration.
+            Every concrete implementation's override follows the same
+            shape: recycle into the owning service's pool member as the
+            final statement (the service befriends the impl so it can
+            reach that private member directly), with any required
+            last-rites cleanup — releasing state that is only safe to
+            tear down once idle — as ordinary statements immediately
+            before it.
+            Whichever action runs — recycle or delete — must be the
+            final statement: nothing touches the impl after.
         */
-        virtual void retire() noexcept {}
+        virtual void retire() noexcept = 0;
 
         /// In-flight + service references; starts at the service's 1.
         std::atomic<std::size_t> refs_{1};
