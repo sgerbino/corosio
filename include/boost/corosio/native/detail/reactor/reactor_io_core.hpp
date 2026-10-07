@@ -15,6 +15,7 @@
 #include <boost/corosio/native/detail/reactor/reactor_op_base.hpp>
 
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <system_error>
 #include <utility>
@@ -218,22 +219,57 @@ protected:
         post_claimed(claimed, count);
     }
 
-    /// Assert the closed state a recycled object must start from.
-    void assert_quiescent() const noexcept
+    /** Reset the descriptor state a recycled object starts from.
+
+        Every field is reset rather than asserted so a debug build may
+        poison them on retirement. References and the queued flag are
+        asserted: nothing may hold one once the count reached zero.
+    */
+    void reset_desc_state() noexcept
     {
-        BOOST_COROSIO_ASSERT(desc_state_.fd == -1);
-        BOOST_COROSIO_ASSERT(desc_state_.read_op == nullptr);
-        BOOST_COROSIO_ASSERT(desc_state_.write_op == nullptr);
-        BOOST_COROSIO_ASSERT(desc_state_.connect_op == nullptr);
-        BOOST_COROSIO_ASSERT(desc_state_.wait_read_op == nullptr);
-        BOOST_COROSIO_ASSERT(desc_state_.wait_write_op == nullptr);
-        BOOST_COROSIO_ASSERT(desc_state_.wait_error_op == nullptr);
+        desc_state_.fd                = -1;
+        desc_state_.registered_events = 0;
+        desc_state_.unpollable        = false;
+        desc_state_.read_op           = nullptr;
+        desc_state_.write_op          = nullptr;
+        desc_state_.connect_op        = nullptr;
+        desc_state_.wait_read_op      = nullptr;
+        desc_state_.wait_write_op     = nullptr;
+        desc_state_.wait_error_op     = nullptr;
+        desc_state_.read_ready        = false;
+        desc_state_.write_ready       = false;
         BOOST_COROSIO_ASSERT(!desc_state_.object_ref_);
         BOOST_COROSIO_ASSERT(!desc_state_.retired_ref_);
         BOOST_COROSIO_ASSERT(!desc_state_.dropped_ref_);
         BOOST_COROSIO_ASSERT(
             !desc_state_.is_enqueued_.load(std::memory_order_relaxed));
     }
+
+#if !defined(NDEBUG)
+    /** Poison the descriptor fields `reset_desc_state()` re-initializes.
+
+        Leaves the mutex, the atomics, `scheduler_`, the references and
+        the retirement links alone: the scheduler and `recycle()` may
+        still read them.
+    */
+    void poison_desc_state() noexcept
+    {
+        auto smash = [](auto& field) {
+            std::memset(static_cast<void*>(&field), 0xDB, sizeof(field));
+        };
+        smash(desc_state_.fd);
+        smash(desc_state_.registered_events);
+        smash(desc_state_.unpollable);
+        smash(desc_state_.read_op);
+        smash(desc_state_.write_op);
+        smash(desc_state_.connect_op);
+        smash(desc_state_.wait_read_op);
+        smash(desc_state_.wait_write_op);
+        smash(desc_state_.wait_error_op);
+        smash(desc_state_.read_ready);
+        smash(desc_state_.write_ready);
+    }
+#endif
 
 private:
     // A claim empties its slot, so no more ops are claimed than

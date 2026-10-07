@@ -31,6 +31,7 @@
 
 #include <atomic>
 #include <coroutine>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -269,25 +270,38 @@ public:
     /// Recycle into the owning service's pool at zero references.
     void retire() noexcept override
     {
+#if !defined(NDEBUG)
+        poison();
+#endif
         svc_.state_->pool_.recycle(static_cast<Derived*>(this));
     }
 
     // --- Service-facing (non-virtual) ---
 
-    /** Assert the closed state a recycled descriptor starts from.
+    /** Reset descriptor state for recycling.
 
-        `close_descriptor()` already drove fd_ and every parked op to
-        their closed state before the refcount reached zero.
+        Re-initializes every field it owns rather than trusting
+        `close_descriptor()`'s prior writes; see
+        reactor_basic_socket::reuse().
 
         @pre refs_ == 0, fd closed and deregistered, no op in flight.
     */
     void reuse() noexcept
     {
-        BOOST_COROSIO_ASSERT(fd_ == -1);
-        BOOST_COROSIO_ASSERT(
-            !nonblocking_.load(std::memory_order_relaxed));
-        this->assert_quiescent();
+        fd_ = -1;
+        nonblocking_.store(false, std::memory_order_relaxed);
+        this->reset_desc_state();
     }
+
+#if !defined(NDEBUG)
+    /// Poison the fields `reuse()` re-initializes; see
+    /// reactor_basic_socket::poison().
+    void poison() noexcept
+    {
+        std::memset(static_cast<void*>(&fd_), 0xDB, sizeof(fd_));
+        this->poison_desc_state();
+    }
+#endif
 
     /** Adopt the fd, initialize descriptor state, and register it.
 

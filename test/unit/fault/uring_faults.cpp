@@ -275,6 +275,57 @@ struct uring_faults
         }
     }
 
+    // Parks a receive in the kernel, so the context's teardown has a
+    // request to cancel and wait for.
+    static void park_receive(io_context& ioc, udp_socket& s, char* buf)
+    {
+        BOOST_TEST(!s.open(family::v4));
+        BOOST_TEST(!s.bind(endpoint(ipv4_address::loopback(), 0)));
+        capy::run_async(ioc.get_executor())(
+            [](udp_socket& s, char* b) -> capy::task<> {
+                endpoint from;
+                std::ignore =
+                    co_await s.recv_from(capy::mutable_buffer(b, 8), from);
+            }(s, buf));
+        ioc.poll();
+    }
+
+    // Teardown waits for the kernel to finish every request it holds;
+    // a signal interrupting that wait must not end it early, or the
+    // services free implementations the kernel can still write to.
+    void testShutdownWaitRetriesAfterEintr()
+    {
+        char buf[8];
+        std::optional<fault_scope> first;
+        std::optional<fault_scope> again;
+        {
+            io_context ioc(uring);
+            udp_socket s(ioc);
+            park_receive(ioc, s, buf);
+            first.emplace(sys::io_uring_wait_cqe_timeout, EINTR);
+            again.emplace(sys::io_uring_wait_cqe_timeout, EINTR, 2);
+        }
+        BOOST_TEST(first->fired());
+        BOOST_TEST(again->fired()); // the interrupted wait was retried
+    }
+
+    // Same for the cancel that teardown submits before waiting.
+    void testShutdownCancelRetriesAfterEintr()
+    {
+        char buf[8];
+        std::optional<fault_scope> waits;
+        std::optional<fault_scope> submit;
+        {
+            io_context ioc(uring);
+            udp_socket s(ioc);
+            park_receive(ioc, s, buf);
+            waits.emplace(sys::io_uring_wait_cqe_timeout, EINTR, 1000);
+            submit.emplace(sys::io_uring_submit, EINTR);
+        }
+        BOOST_TEST(submit->fired());
+        BOOST_TEST_GE(waits->count(), 1u);
+    }
+
     // Closing and destroying a listening acceptor on a live context
     // hands its multishot op to the scheduler rather than draining the
     // ring, which would swallow other ops' completions. The drain's
@@ -1041,6 +1092,8 @@ struct uring_faults
         testCancelSqFull();
         testWaitFails();
         testAcceptorRecycleDoesNotDrain();
+        testShutdownWaitRetriesAfterEintr();
+        testShutdownCancelRetriesAfterEintr();
         testAcceptorArmSqFull();
         testSqFull();
         testConnectCqeRewrite();
