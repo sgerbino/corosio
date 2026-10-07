@@ -52,6 +52,11 @@ struct uring_multi_accept_op : uring_op
     /// Owning acceptor; raw because the op IS owned by the acceptor.
     void* acceptor_impl = nullptr;
 
+    /// The kernel delivered the terminal CQE (no `IORING_CQE_F_MORE`)
+    /// for the current arming. Written by `do_cqe` under the
+    /// scheduler's `ring_mutex_` and cleared before each submission.
+    bool terminated = false;
+
     /** Callback into the acceptor for each accept CQE.
 
         @param acceptor The owning acceptor_impl pointer.
@@ -101,6 +106,8 @@ struct uring_multi_accept_op : uring_op
         bool more  = (flags & IORING_CQE_F_MORE) != 0;
         int err    = (res < 0) ? -res : 0;
         int new_fd = (res >= 0) ? res : -1;
+        if (!more)
+            self->terminated = true;
         if (self->on_cqe)
             self->on_cqe(self->acceptor_impl, new_fd, err, more);
         // Intentionally NOT pushed into local: the acceptor decides

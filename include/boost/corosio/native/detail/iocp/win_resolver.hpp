@@ -163,6 +163,7 @@ struct resolve_op : overlapped_op
     std::wstring host_w;
     std::wstring service_w;
     win_resolver* impl = nullptr;
+    std::shared_ptr<void> impl_ptr;
 
     /** Completion callback for GetAddrInfoExW. */
     static void CALLBACK completion(DWORD dwError, DWORD bytes, OVERLAPPED* ov);
@@ -186,6 +187,7 @@ struct reverse_resolve_op : overlapped_op
     std::string stored_service;
     int gai_error      = 0;
     win_resolver* impl = nullptr;
+    std::shared_ptr<void> impl_ptr;
 
     static void do_complete(
         void* owner,
