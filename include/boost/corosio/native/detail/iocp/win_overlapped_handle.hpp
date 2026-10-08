@@ -46,8 +46,9 @@
 
    Two op models sit on one handle base. The slot model embeds one read
    and one write op (one of each in flight) and either tracks a file
-   position or submits at offset 0. The concurrent model allocates an op
-   per call so any number of positional ops can be in flight.
+   position or submits at offset 0. The concurrent model takes an op
+   per call from a per-handle free list, so any number of positional
+   ops can be in flight and steady state allocates nothing.
 
    Each front embeds its handle core in the pooled implementation the
    service recycles. Ops hold a reference on that implementation until
@@ -407,6 +408,14 @@ class win_concurrent_handle : public win_handle_base
 public:
     using win_handle_base::win_handle_base;
 
+    // The recycled ops belong to the implementation's storage, which
+    // survives recycling; only its destruction frees them.
+    ~win_concurrent_handle()
+    {
+        while (auto* op = free_ops_.pop_front())
+            delete op;
+    }
+
     std::coroutine_handle<> read_some_at(
         std::uint64_t offset,
         capy::continuation& cont,
@@ -480,17 +489,15 @@ protected:
         {
             auto* op   = static_cast<concurrent_op*>(base);
             auto* self = static_cast<win_concurrent_handle*>(op->owner);
-            auto keep  = std::move(op->object_ref_);
+            // Dropped after the op is back on the free list, so a final
+            // release never runs under ops_mutex_.
+            auto keep = std::move(op->object_ref_);
             op->stop_cb.reset();
-            {
-                std::lock_guard<win_mutex> lock(self->ops_mutex_);
-                self->outstanding_ops_.remove(op);
-            }
 
             if (!owner)
             {
                 op->h = {};
-                delete op;
+                self->recycle_op(op);
                 return;
             }
 
@@ -506,10 +513,19 @@ protected:
             capy::continuation* c = op->user_cont;
             c->h                  = op->h;
             capy::executor_ref ex = op->ex;
-            delete op;
+            // Once recycled, a concurrent initiation may refill the op.
+            self->recycle_op(op);
             dispatch_coro(ex, *c).resume();
         }
     };
+
+    /// Move a finished op from `outstanding_ops_` to `free_ops_`.
+    void recycle_op(concurrent_op* op) noexcept
+    {
+        std::lock_guard<win_mutex> lock(ops_mutex_);
+        outstanding_ops_.remove(op);
+        free_ops_.push_front(op);
+    }
 
     void request_cancel_all() noexcept
     {
@@ -528,7 +544,13 @@ protected:
         std::error_code* ec,
         std::size_t* bytes_out)
     {
-        auto* op       = new concurrent_op();
+        concurrent_op* op;
+        {
+            std::lock_guard<win_mutex> lock(ops_mutex_);
+            op = free_ops_.pop_front();
+        }
+        if (!op)
+            op = new concurrent_op();
         op->object_ref_ = detail::object_ref(&io_);
         op->reset();
         op->owner     = this;
@@ -551,6 +573,7 @@ protected:
 
     win_mutex ops_mutex_;
     intrusive_list<concurrent_op> outstanding_ops_;
+    intrusive_list<concurrent_op> free_ops_;
 };
 
 } // namespace boost::corosio::detail
