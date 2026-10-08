@@ -786,8 +786,7 @@ public:
         // instead of parking a waiter no accept machinery will signal.
         if (this->fd_ < 0)
         {
-            // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) — noexcept-adjacent initiation path: OOM => std::terminate is the intended behavior
-            auto* op   = new uring_accept_op();
+            auto* op   = this->acquire_node();
             op->h      = h;
             op->ex     = ex;
             op->ec_out = ec;
@@ -807,8 +806,7 @@ public:
         // fail uniformly instead of never completing.
         if (w == wait_type::write)
         {
-            // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) — noexcept-adjacent initiation path: OOM => std::terminate is the intended behavior
-            auto* op   = new uring_accept_op();
+            auto* op   = this->acquire_node();
             op->h      = h;
             op->ex     = ex;
             op->ec_out = ec;
@@ -1675,8 +1673,7 @@ public:
         // instead of parking a waiter no accept machinery will signal.
         if (this->fd_ < 0)
         {
-            // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) — noexcept-adjacent initiation path: OOM => std::terminate is the intended behavior
-            auto* op   = new uring_accept_op();
+            auto* op   = this->acquire_node();
             op->h      = h;
             op->ex     = ex;
             op->ec_out = ec;
@@ -1696,8 +1693,7 @@ public:
         // fail uniformly instead of never completing.
         if (w == wait_type::write)
         {
-            // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) — noexcept-adjacent initiation path: OOM => std::terminate is the intended behavior
-            auto* op   = new uring_accept_op();
+            auto* op   = this->acquire_node();
             op->h      = h;
             op->ex     = ex;
             op->ec_out = ec;

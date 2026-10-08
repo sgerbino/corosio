@@ -161,7 +161,22 @@ struct uring_accept_op : uring_op
         sockaddr_storage const& peer,
         socklen_t peer_len) noexcept = nullptr;
 
+    /** Disposal hook, run exactly once when the op is consumed.
+
+        Heap-allocated ops delete themselves (the default); the
+        multishot acceptor's pooled nodes override this to return to
+        their acceptor's free list instead. Factoring disposal out of
+        `do_handler` is what lets one completion routine serve both
+        ownership models.
+    */
+    void (*dispose)(uring_accept_op*) noexcept = &dispose_delete;
+
     uring_accept_op() noexcept : uring_op(&do_handler, &do_cqe) {}
+
+    static void dispose_delete(uring_accept_op* op) noexcept
+    {
+        delete op;
+    }
 
     // LCOV_EXCL_START: never receives a CQE; present for vtable
     // completeness.
@@ -179,7 +194,10 @@ struct uring_accept_op : uring_op
 
         if (owner == nullptr)
         {
-            delete self;
+            // A delivered connection that nobody will adopt.
+            if (self->accepted_fd >= 0)
+                ::close(self->accepted_fd);
+            self->dispose(self);
             return;
         }
 
@@ -193,7 +211,7 @@ struct uring_accept_op : uring_op
                     : make_err(self->err);
             self->cont.h = self->h;
             auto next    = dispatch_coro(self->ex, self->cont);
-            delete self;
+            self->dispose(self);
             next.resume();
             return;
         }
@@ -214,7 +232,7 @@ struct uring_accept_op : uring_op
 
         self->cont.h = self->h;
         auto next    = dispatch_coro(self->ex, self->cont);
-        delete self;
+        self->dispose(self);
         next.resume();
     }
 };

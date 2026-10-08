@@ -160,22 +160,23 @@ struct zero_alloc_test
         // reconnected client fd) every cycle, regardless of impl
         // recycling; 2 allocations/cycle pins that known cost.
         //
-        // uring: the multishot acceptor heap-allocates a fresh
-        // uring_accept_op plus a waiter_node per accepted connection
-        // (uring_multishot_acceptor.hpp) -- also out of scope here;
-        // 2 allocations/cycle pins that known cost.
+        // uring: the multishot acceptor's accept nodes and ready-fd
+        // nodes recycle through per-acceptor free lists
+        // (uring_multishot_acceptor.hpp), so warmed accept churn is
+        // allocation-free like epoll.
         //
         // Either way, pinning the exact number (0, or the documented
         // non-zero count) means a regression or an improvement both
         // trip this assert instead of silently drifting.
-#if BOOST_COROSIO_HAS_EPOLL
-        if constexpr (std::is_same_v<std::decay_t<decltype(Backend)>, epoll_t>)
-            BOOST_TEST_EQ(alloc_count.load(std::memory_order_relaxed), 0LL);
-        else
-#endif
+#if BOOST_COROSIO_HAS_SELECT
+        if constexpr (
+            std::is_same_v<std::decay_t<decltype(Backend)>, select_t>)
             BOOST_TEST_EQ(
                 alloc_count.load(std::memory_order_relaxed),
                 static_cast<long long>(2 * measured_cycles));
+        else
+#endif
+            BOOST_TEST_EQ(alloc_count.load(std::memory_order_relaxed), 0LL);
     }
 
     // Reuse identity at the tcp_socket level: once the pool has one
