@@ -97,8 +97,14 @@ public:
         std::stop_token token,
         std::error_code* ec)
     {
-        std::uint64_t const cur = state_.load(std::memory_order_acquire);
-        if ((cur & phase_mask) != phase_idle)
+        // Reserved as claimed under the current generation until armed:
+        // a concurrent wait() sees it busy, nothing else claims it, and
+        // a rundown in the meantime records a generation this wait never
+        // uses.
+        std::uint64_t cur = state_.load(std::memory_order_acquire);
+        if ((cur & phase_mask) != phase_idle ||
+            !state_.compare_exchange_strong(
+                cur, cur | phase_claimed, std::memory_order_acq_rel))
         {
             // Complete immediately: the returned handle is resumed by
             // symmetric transfer on the caller's own executor.
