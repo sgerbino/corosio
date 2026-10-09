@@ -18,6 +18,7 @@
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/corosio/detail/scheduler_op.hpp>
 #include <boost/corosio/detail/thread_local_ptr.hpp>
+#include <boost/corosio/detail/timer_service.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -35,7 +36,6 @@ namespace boost::corosio::detail {
 
 // Forward declarations
 class reactor_scheduler;
-class timer_service;
 
 /** A deregistered descriptor whose owner must outlive the reactor pass
     that may still hold it.
@@ -778,6 +778,13 @@ reactor_scheduler::settle_retired(lock_type& lock) const
 inline void
 reactor_scheduler::shutdown_drain()
 {
+    // The timer service registered after this scheduler, so the
+    // context shuts it down later; its waiters' frames must be
+    // destroyed before the drain, which then destroys whatever their
+    // destructors post. The context's own call later finds no waiter.
+    if (timer_svc_)
+        timer_svc_->shutdown();
+
     lock_type lock(mutex_);
     settle_retired(lock);
 

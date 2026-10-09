@@ -627,6 +627,10 @@ uring_scheduler::shutdown()
 {
     stopped_.store(true, std::memory_order_release);
 
+    // See reactor_scheduler::shutdown_drain().
+    if (timer_svc_)
+        timer_svc_->shutdown();
+
     // Cancel every request still in the kernel and wait for each to
     // come back: the services free their impls next, and an op still
     // armed would write into freed memory. One cancel-any covers ops
