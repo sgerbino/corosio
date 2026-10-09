@@ -20,6 +20,8 @@
 #include <boost/capy/task.hpp>
 
 #include <atomic>
+#include <cstdlib>
+#include <cstdio>
 #include <csignal>
 #include <chrono>
 #include <optional>
@@ -472,6 +474,50 @@ struct signal_set_test
 
         BOOST_TEST(second_done);
         BOOST_TEST(!second_ec);
+    }
+
+    // With two threads running the context, a signal raised while one
+    // is blocked in the reactor must still be delivered after the other
+    // re-arms the signal pipe.
+    void testDeliveryWithTwoRunThreads()
+    {
+        io_context ioc(Backend, 2);
+        signal_set s(ioc, SIGINT);
+        constexpr int n = 200;
+        std::atomic<int> got{0};
+
+        capy::run_async(ioc.get_executor())(
+            [](signal_set& s, std::atomic<int>& got) -> capy::task<> {
+                for (int i = 0; i < n; ++i)
+                {
+                    auto [ec, signum] = co_await s.wait();
+                    std::ignore       = signum;
+                    if (ec)
+                        co_return;
+                    ++got;
+                }
+            }(s, got));
+
+        std::thread t1([&] { ioc.run(); });
+        std::thread t2([&] { ioc.run(); });
+        int delivered = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            std::raise(SIGINT);
+            // Bounds a hang, not a timing assertion.
+            auto const until =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (got.load() <= i && std::chrono::steady_clock::now() < until)
+                std::this_thread::yield();
+            if (got.load() <= i)
+                break;
+            delivered = i + 1;
+        }
+        BOOST_TEST_EQ(delivered, n);
+        s.cancel();
+        ioc.stop();
+        t1.join();
+        t2.join();
     }
 
     void testWaitAgainAfterStopCancel()
@@ -1474,6 +1520,7 @@ struct signal_set_test
     void run()
     {
         // Construction and move semantics
+        testDeliveryWithTwoRunThreads();
         testConstruction();
         testDestroyWithQueuedSignalCompletion();
         testConstructWithOneSignal();
@@ -1572,5 +1619,84 @@ struct signal_set_test
 };
 
 COROSIO_BACKEND_TESTS(signal_set_test, "boost.corosio.signal_set")
+
+#if BOOST_COROSIO_POSIX && BOOST_COROSIO_HAS_SELECT
+// Two contexts watch the process's signal pipe. Whichever drains a
+// signal delivers it to every context's sets, so a drain running under
+// one context's pipe lock posts into the other context's scheduler.
+// Neither drain may hold a lock the other context's reactor takes
+// first, or the two run threads of a select context and a drain on
+// another context deadlock.
+template<auto Backend>
+struct signal_set_cross_context_test
+{
+    static constexpr int rounds = 400;
+
+    static capy::task<> counter(signal_set& s, std::atomic<int>& n)
+    {
+        for (;;)
+        {
+            auto [ec, sig] = co_await s.wait();
+            std::ignore    = sig;
+            if (ec)
+                co_return;
+            ++n;
+        }
+    }
+
+    void run()
+    {
+        io_context a(Backend);
+        io_context b(select);
+        signal_set sa(a, SIGINT);
+        signal_set sb(b, SIGINT);
+        std::atomic<int> na{0}, nb{0};
+        // A stop token, unlike cancel(), also ends a wait the counter
+        // starts after the request, so run() returns once both finish.
+        std::stop_source quit;
+        capy::run_async(a.get_executor(), quit.get_token())(counter(sa, na));
+        capy::run_async(b.get_executor(), quit.get_token())(counter(sb, nb));
+
+        std::thread ra([&] { a.run(); });
+        std::thread rb1([&] { b.run(); });
+        std::thread rb2([&] { b.run(); });
+
+        // Turns a deadlock into a failure rather than a hung test.
+        std::atomic<bool> finished{false};
+        std::thread watchdog([&] {
+            for (int i = 0; i < 300 && !finished.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (!finished.load())
+            {
+                std::fputs(
+                    "signal_set_cross_context: deadlocked\n", stderr);
+                std::abort();
+            }
+        });
+
+        for (int i = 0; i < rounds; ++i)
+        {
+            std::raise(SIGINT);
+            // Lets each round's deliveries race the next drain.
+            while (na.load() <= i / 2 && nb.load() <= i / 2)
+                std::this_thread::yield();
+        }
+        while (na.load() < rounds / 2 || nb.load() < rounds / 2)
+            std::this_thread::yield();
+
+        quit.request_stop();
+        ra.join();
+        rb1.join();
+        rb2.join();
+        finished = true;
+        watchdog.join();
+        BOOST_TEST_GE(na.load(), rounds / 2);
+        BOOST_TEST_GE(nb.load(), rounds / 2);
+    }
+};
+
+COROSIO_NON_IOCP_BACKEND_TESTS(
+    signal_set_cross_context_test, "boost.corosio.signal_set.cross_context")
+#endif
 
 } // namespace boost::corosio

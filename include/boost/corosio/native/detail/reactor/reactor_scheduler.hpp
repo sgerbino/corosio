@@ -219,6 +219,13 @@ public:
         no handler will be executed. Must be called from a scheduler
         thread.
     */
+    /** Note that an op was parked outside the usual registration path.
+
+        A reactor that builds its poll set from parked ops must rebuild
+        it; one the kernel tracks needs nothing.
+    */
+    virtual void notify_reparked() const {}
+
     void compensating_work_started() const noexcept;
 
     /** Post completed operations for deferred invocation.
