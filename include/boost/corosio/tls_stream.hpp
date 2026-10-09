@@ -23,6 +23,55 @@
 
 namespace boost::corosio {
 
+namespace detail {
+
+/** A transport a TLS stream owns, held apart from its `any_stream`.
+
+    Destroying the stream cancels the transport's pending operations
+    while the TLS state they complete into stays alive; the transport
+    itself outlives every operation that could be parked on it.
+*/
+struct tls_owned_transport
+{
+    /// The owned transport, or null in reference mode.
+    void* p = nullptr;
+
+    /// Destroy the transport `p` points to.
+    void (*destroy)(void*) noexcept = nullptr;
+
+    /// Cancel the transport's pending operations, or null if it can't.
+    void (*cancel)(void*) noexcept = nullptr;
+};
+
+/// Destroy an owned transport of type `S`.
+template<class S>
+void
+destroy_owned_transport(void* p) noexcept
+{
+    delete static_cast<S*>(p);
+}
+
+/// Cancel an owned transport of type `S`'s pending operations.
+template<class S>
+void
+cancel_owned_transport(void* p) noexcept
+{
+    static_cast<S*>(p)->cancel();
+}
+
+/// Make the owned-transport record for a transport of type `S`.
+template<class S>
+tls_owned_transport
+make_owned_transport(S* p) noexcept
+{
+    tls_owned_transport t{p, &destroy_owned_transport<S>, nullptr};
+    if constexpr (requires(S& s) { s.cancel(); })
+        t.cancel = &cancel_owned_transport<S>;
+    return t;
+}
+
+} // namespace detail
+
 /** TLS handshake role.
 
     Specifies whether to perform the TLS handshake as a client or server.

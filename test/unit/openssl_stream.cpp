@@ -464,6 +464,11 @@ struct openssl_stream_test
     void run()
     {
         test::testIoBeforeHandshake(make_stream);
+        test::testDestroyWithPendingRead(make_stream, false);
+        test::testDestroyWithPendingRead(make_stream, true);
+        test::testMoveWithPendingRead(make_stream);
+        test::testDestroyWithPartialWriteInFlight(make_stream);
+        test::testDestroyTypeErasedOwnerWithPendingRead(make_stream);
         test::testHandshakeFuse(make_stream);
         test::testReadWriteFuse(make_stream);
         test::testShutdownFuse(make_stream);
