@@ -357,6 +357,7 @@ public:
         if (fd_ >= 0)
         {
             drain_waiters_only();
+            static_cast<Derived*>(this)->cancel_wait_op();
             sched_->cancel_and_flush(fd_);
         }
         int fd          = fd_;
