@@ -19,7 +19,9 @@
 #include <boost/corosio/tls_stream.hpp>
 #include <boost/corosio/test/mocket.hpp>
 #include <boost/capy/ex/async_event.hpp>
+#include <boost/capy/ex/io_env.hpp>
 #include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/io/any_stream.hpp>
 #include <boost/capy/ex/strand.hpp>
 #include <boost/capy/test/fuse.hpp>
 #include <boost/capy/task.hpp>
@@ -27,7 +29,10 @@
 #include <boost/capy/write.hpp>
 
 #include <array>
+#include <coroutine>
 #include <cstddef>
+#include <memory>
+#include <optional>
 #include <stop_token>
 #include <thread>
 #include <tuple>
@@ -1597,6 +1602,383 @@ testVerifyCallbackOnSuccess(StreamFactory make_stream)
         run_tls_test_fail(
             ioc, client_ctx, server_ctx, make_stream, make_stream);
     }
+}
+
+/** Handshake a client and server stream over a mocket pair.
+
+    @return True if both sides completed without error.
+*/
+template<typename Client, typename Server>
+bool
+handshake_pair(io_context& ioc, Client& client, Server& server)
+{
+    bool ok    = true;
+    auto first = [](Client& c, bool& ok) -> capy::task<> {
+        auto [ec] = co_await c.handshake(tls_role::client);
+        ok        = ok && !ec;
+    };
+    auto second = [](Server& s, bool& ok) -> capy::task<> {
+        auto [ec] = co_await s.handshake(tls_role::server);
+        ok        = ok && !ec;
+    };
+    capy::run_async(ioc.get_executor())(first(client, ok));
+    capy::run_async(ioc.get_executor())(second(server, ok));
+    ioc.run();
+    ioc.restart();
+    return ok;
+}
+
+/** Destroy a stream while a read on it is parked in the transport.
+
+    The read must still complete exactly once, as cancelled, and
+    nothing may touch the destroyed stream's state afterwards. With
+    @p owning the stream owns its socket; otherwise it refers to one
+    that stays open.
+*/
+template<typename StreamFactory>
+void
+testDestroyWithPendingRead(StreamFactory make_stream, bool owning)
+{
+    io_context ioc;
+    auto [m1, m2]   = corosio::test::make_mocket_pair(ioc);
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+    using stream_t  = decltype(make_stream(m1, client_ctx));
+
+    auto client = owning
+        ? std::make_unique<stream_t>(std::move(m1), client_ctx)
+        : std::make_unique<stream_t>(make_stream(m1, client_ctx));
+    auto server = make_stream(m2, server_ctx);
+    BOOST_TEST(handshake_pair(ioc, *client, server));
+
+    int resumed = 0;
+    std::error_code rec;
+    char buf[16];
+    auto reader = [](stream_t& s, char* b, std::error_code& ec,
+                     int& n) -> capy::task<> {
+        auto [e, k] = co_await s.read_some(capy::mutable_buffer(b, 16));
+        std::ignore = k;
+        ec          = e;
+        ++n;
+    };
+    capy::run_async(ioc.get_executor())(reader(*client, buf, rec, resumed));
+    std::ignore = ioc.poll();
+    BOOST_TEST_EQ(resumed, 0);
+
+    client.reset();
+
+    // Data arriving for the destroyed stream must not reach its state.
+    auto writer = [](stream_t& s) -> capy::task<> {
+        std::ignore = co_await s.write_some(capy::const_buffer("hello", 5));
+    };
+    capy::run_async(ioc.get_executor())(writer(server));
+    ioc.run();
+    BOOST_TEST_EQ(resumed, 1);
+    BOOST_TEST(rec == capy::cond::canceled);
+}
+
+/** Destroy an owning stream with an operation created but never
+    awaited, and let that operation outlive the context. The owned
+    transport must go with the stream, not with the operation: by then
+    its context and service are gone.
+*/
+template<typename StreamFactory>
+void
+testUnawaitedReadOutlivesContext(StreamFactory make_stream)
+{
+    auto client_ctx = make_client_context();
+    char buf[16];
+    std::optional<capy::io_task<std::size_t>> op;
+    {
+        io_context ioc;
+        auto [m1, m2]  = corosio::test::make_mocket_pair(ioc);
+        using stream_t = decltype(make_stream(m1, client_ctx));
+        auto client = std::make_unique<stream_t>(std::move(m1), client_ctx);
+        op.emplace(client->read_some(capy::mutable_buffer(buf, sizeof(buf))));
+        client.reset();
+    }
+    op.reset();
+    BOOST_TEST_PASS();
+}
+
+/** Destroy a stream that owns another TLS stream while a read is
+    parked through both. The cancellation must reach the innermost
+    transport, so the read completes without help from the peer.
+*/
+template<class Outer, class Inner>
+void
+testDestroyNestedOwnerWithPendingRead()
+{
+    io_context ioc;
+    auto [m1, m2]   = corosio::test::make_mocket_pair(ioc);
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+
+    Inner inner_client(std::move(m1), client_ctx);
+    Inner inner_server(&m2, server_ctx);
+    BOOST_TEST(handshake_pair(ioc, inner_client, inner_server));
+    ioc.restart();
+
+    auto client = std::make_unique<Outer>(std::move(inner_client), client_ctx);
+    Outer server(&inner_server, server_ctx);
+    BOOST_TEST(handshake_pair(ioc, *client, server));
+    ioc.restart();
+
+    int resumed = 0;
+    std::error_code rec;
+    bool failsafe_hit = false;
+    std::stop_source failsafe_stop;
+    char buf[16];
+    auto reader = [&]() -> capy::task<> {
+        auto [e, k] =
+            co_await client->read_some(capy::mutable_buffer(buf, sizeof(buf)));
+        std::ignore = k;
+        rec         = e;
+        ++resumed;
+        failsafe_stop.request_stop();
+    };
+    auto failsafe_task = [&]() -> capy::task<> {
+        auto [ec] = co_await corosio::delay(failsafe_timeout);
+        if (!ec)
+        {
+            failsafe_hit = true;
+            if (m2.is_open())
+                m2.close();
+        }
+    };
+    capy::run_async(ioc.get_executor())(reader());
+    std::ignore = ioc.poll();
+    BOOST_TEST_EQ(resumed, 0);
+
+    client.reset();
+    capy::run_async(
+        ioc.get_executor(), failsafe_stop.get_token())(failsafe_task());
+    ioc.run();
+
+    BOOST_TEST(!failsafe_hit);
+    BOOST_TEST_EQ(resumed, 1);
+    BOOST_TEST(rec == capy::cond::canceled);
+}
+
+/** cancel() ends a read parked on an owned transport and leaves the
+    stream usable; on a referenced transport it does nothing.
+*/
+template<typename StreamFactory>
+void
+testCancelPendingRead(StreamFactory make_stream, bool owning)
+{
+    io_context ioc;
+    auto [m1, m2]   = corosio::test::make_mocket_pair(ioc);
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+    using stream_t  = decltype(make_stream(m1, client_ctx));
+
+    auto client = owning
+        ? std::make_unique<stream_t>(std::move(m1), client_ctx)
+        : std::make_unique<stream_t>(make_stream(m1, client_ctx));
+    auto server = make_stream(m2, server_ctx);
+    BOOST_TEST(handshake_pair(ioc, *client, server));
+    ioc.restart();
+
+    std::error_code rec;
+    std::size_t rn = 0;
+    char buf[16];
+    auto reader = [&]() -> capy::task<> {
+        auto [e, k] =
+            co_await client->read_some(capy::mutable_buffer(buf, sizeof(buf)));
+        rec = e;
+        rn  = k;
+    };
+    auto writer = [&]() -> capy::task<> {
+        std::ignore = co_await server.write_some(capy::const_buffer("hi", 2));
+    };
+
+    capy::run_async(ioc.get_executor())(reader());
+    std::ignore = ioc.poll();
+    client->cancel();
+    if (owning)
+    {
+        std::ignore = ioc.poll();
+        BOOST_TEST(rec == capy::cond::canceled);
+        ioc.restart();
+
+        // The session survives: the next read gets the peer's data.
+        rec = {};
+        capy::run_async(ioc.get_executor())(reader());
+    }
+    capy::run_async(ioc.get_executor())(writer());
+    ioc.run();
+    BOOST_TEST(!rec);
+    BOOST_TEST_EQ(rn, 2u);
+}
+
+/// An awaitable that resumes its caller through the executor's queue.
+struct posted_resume
+{
+    capy::continuation c;
+
+    bool await_ready() const noexcept
+    {
+        return false;
+    }
+
+    void await_suspend(std::coroutine_handle<> h, capy::io_env const* env)
+    {
+        c.h = h;
+        env->executor.post(c);
+    }
+
+    void await_resume() noexcept {}
+};
+
+/** A transport whose writes, once armed, report one byte through a
+    completion queued on the executor.
+*/
+struct partial_write_transport
+{
+    corosio::test::mocket m;
+    bool const* armed;
+    int* armed_writes;
+
+    template<class Buffers>
+    capy::io_task<std::size_t> read_some(Buffers buffers)
+    {
+        co_return co_await m.read_some(buffers);
+    }
+
+    template<class Buffers>
+    capy::io_task<std::size_t> write_some(Buffers buffers)
+    {
+        if (*armed)
+        {
+            ++*armed_writes;
+            co_await posted_resume{};
+            co_return {std::error_code{}, 1};
+        }
+        co_return co_await m.write_some(buffers);
+    }
+};
+
+/** Destroy a stream while a partial transport write is still to report.
+
+    The write loop must not go back to the transport the stream owned
+    once the stream is gone.
+*/
+template<typename StreamFactory>
+void
+testDestroyWithPartialWriteInFlight(StreamFactory make_stream)
+{
+    io_context ioc;
+    auto [m1, m2]   = corosio::test::make_mocket_pair(ioc);
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+    using stream_t  = decltype(make_stream(m1, client_ctx));
+
+    bool armed       = false;
+    int armed_writes = 0;
+    auto client      = std::make_unique<stream_t>(
+        partial_write_transport{std::move(m1), &armed, &armed_writes},
+        client_ctx);
+    auto server = make_stream(m2, server_ctx);
+    BOOST_TEST(handshake_pair(ioc, *client, server));
+
+    armed       = true;
+    auto writer = [](stream_t& s) -> capy::task<> {
+        std::ignore = co_await s.write_some(capy::const_buffer("hello", 5));
+    };
+    auto destroyer = [](std::unique_ptr<stream_t>& c) -> capy::task<> {
+        c.reset();
+        co_return;
+    };
+    capy::run_async(ioc.get_executor())(writer(*client));
+    capy::run_async(ioc.get_executor())(destroyer(client));
+    ioc.run();
+    BOOST_TEST_EQ(armed_writes, 1);
+}
+
+/** Destroy an owning stream whose transport keeps its own operation
+    state, while a read on it is parked.
+*/
+template<typename StreamFactory>
+void
+testDestroyTypeErasedOwnerWithPendingRead(StreamFactory make_stream)
+{
+    io_context ioc;
+    auto [m1, m2]   = corosio::test::make_mocket_pair(ioc);
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+    using stream_t  = decltype(make_stream(m1, client_ctx));
+
+    auto client = std::make_unique<stream_t>(
+        capy::any_stream(std::move(m1)), client_ctx);
+    auto server = make_stream(m2, server_ctx);
+    BOOST_TEST(handshake_pair(ioc, *client, server));
+
+    int resumed = 0;
+    std::error_code rec;
+    char buf[16];
+    auto reader = [](stream_t& s, char* b, std::error_code& ec,
+                     int& n) -> capy::task<> {
+        auto [e, k] = co_await s.read_some(capy::mutable_buffer(b, 16));
+        std::ignore = k;
+        ec          = e;
+        ++n;
+    };
+    capy::run_async(ioc.get_executor())(reader(*client, buf, rec, resumed));
+    std::ignore = ioc.poll();
+
+    client.reset();
+
+    auto writer = [](stream_t& s) -> capy::task<> {
+        std::ignore = co_await s.write_some(capy::const_buffer("hello", 5));
+    };
+    capy::run_async(ioc.get_executor())(writer(server));
+    ioc.run();
+    BOOST_TEST_EQ(resumed, 1);
+    BOOST_TEST(rec == capy::cond::canceled);
+}
+
+/** Move a stream while a read on it is parked in the transport.
+
+    The read completes through the moved-to stream, and the moved-from
+    stream may be destroyed first.
+*/
+template<typename StreamFactory>
+void
+testMoveWithPendingRead(StreamFactory make_stream)
+{
+    io_context ioc;
+    auto [m1, m2]   = corosio::test::make_mocket_pair(ioc);
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+    using stream_t  = decltype(make_stream(m1, client_ctx));
+
+    auto client = std::make_unique<stream_t>(make_stream(m1, client_ctx));
+    auto server = make_stream(m2, server_ctx);
+    BOOST_TEST(handshake_pair(ioc, *client, server));
+
+    std::error_code rec;
+    std::size_t got = 0;
+    char buf[16];
+    auto reader = [](stream_t& s, char* b, std::error_code& ec,
+                     std::size_t& n) -> capy::task<> {
+        auto [e, k] = co_await s.read_some(capy::mutable_buffer(b, 16));
+        ec          = e;
+        n           = k;
+    };
+    capy::run_async(ioc.get_executor())(reader(*client, buf, rec, got));
+    std::ignore = ioc.poll();
+
+    stream_t moved(std::move(*client));
+    client.reset();
+
+    auto writer = [](stream_t& s) -> capy::task<> {
+        std::ignore = co_await s.write_some(capy::const_buffer("hello", 5));
+    };
+    capy::run_async(ioc.get_executor())(writer(server));
+    ioc.run();
+    BOOST_TEST(!rec);
+    BOOST_TEST_EQ(got, 5u);
 }
 
 /** Test move construction and move assignment of a live stream.
