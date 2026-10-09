@@ -26,6 +26,7 @@
 #include <boost/capy/concept/executor.hpp>
 
 #include <system_error>
+#include <utility>
 
 #include <cassert>
 #include <concepts>
@@ -103,6 +104,7 @@ class BOOST_COROSIO_DECL local_stream_acceptor : public io_object
         local_stream_acceptor& acc_;
         mutable io_object::implementation* peer_impl_ = nullptr;
 
+
         explicit move_accept_awaitable(local_stream_acceptor& acc) noexcept
             : acc_(acc)
         {
@@ -116,6 +118,14 @@ class BOOST_COROSIO_DECL local_stream_acceptor : public io_object
         }
 
     public:
+        // A peer accepted for an awaiter that never resumed is closed
+        // here, or nothing would own it.
+        ~move_accept_awaitable()
+        {
+            if (peer_impl_)
+                discard_peer(acc_, peer_impl_);
+        }
+
         [[nodiscard]] capy::io_result<local_stream_socket>
         await_resume() const noexcept
         {
@@ -123,7 +133,7 @@ class BOOST_COROSIO_DECL local_stream_acceptor : public io_object
                 return {this->ec_, local_stream_socket()};
 
             local_stream_socket peer(acc_.ctx_);
-            reset_peer_impl(peer, peer_impl_);
+            reset_peer_impl(peer, std::exchange(peer_impl_, nullptr));
             return {this->ec_, std::move(peer)};
         }
     };
@@ -137,6 +147,7 @@ class BOOST_COROSIO_DECL local_stream_acceptor : public io_object
         local_stream_acceptor& acc_;
         local_stream_socket& peer_;
         mutable io_object::implementation* peer_impl_ = nullptr;
+
 
         accept_awaitable(
             local_stream_acceptor& acc, local_stream_socket& peer) noexcept
@@ -153,10 +164,18 @@ class BOOST_COROSIO_DECL local_stream_acceptor : public io_object
         }
 
     public:
+        // A peer accepted for an awaiter that never resumed is closed
+        // here, or nothing would own it.
+        ~accept_awaitable()
+        {
+            if (peer_impl_)
+                discard_peer(acc_, peer_impl_);
+        }
+
         [[nodiscard]] capy::io_result<> await_resume() const noexcept
         {
             if (!this->ec_ && peer_impl_)
-                peer_.h_.reset(peer_impl_);
+                peer_.h_.reset(std::exchange(peer_impl_, nullptr));
             return {this->ec_};
         }
     };
@@ -691,6 +710,10 @@ private:
     {
         return *static_cast<implementation*>(h_.get());
     }
+
+    /// Close and release a non-null accepted peer no socket took over.
+    static void discard_peer(
+        local_stream_acceptor& acc, io_object::implementation* impl) noexcept;
 };
 
 } // namespace boost::corosio
