@@ -214,6 +214,15 @@ struct object_reuse_test
             // ready_fds_ (uring) or nothing to hold (epoll/select).
         }
 
+        // On uring the impl recycles only once the cancelled arming's
+        // terminal CQE is reaped, and poll() pumps the ring only while
+        // work is outstanding.
+        for (int i = 0; i < 8; ++i)
+        {
+            capy::run_async(ex)([]() -> capy::task<> { co_return; }());
+            ioc.restart();
+            ioc.poll();
+        }
         ioc.restart();
 
         // A fresh acceptor on the same context pops the just-recycled

@@ -918,21 +918,13 @@ public:
         auto* acc = static_cast<uring_tcp_acceptor*>(h.get());
         if (acc && acc->fd_ >= 0)
         {
-            // Flush the cancel SQE before closing the fd so the kernel
-            // resolves the file from the fd number while it is still
-            // valid. drain_waiters_only avoids submitting cancel-by-fd
-            // a second time (cancel_and_flush already did it).
-            sched_->cancel_and_flush(acc->fd_);
+            // Disown the arming before the cancel, then flush the
+            // cancel while the fd still names the listener.
             acc->drain_waiters_only();
+            sched_->cancel_and_flush(acc->fd_);
             ::close(acc->fd_);
             acc->fd_             = -1;
             acc->local_endpoint_ = endpoint{};
-
-            // Break the multi_op_ -> object_ref_ (object_ref) cycle
-            // start_multishot established, so the impl can reach zero
-            // references and retire() can hand the op to the scheduler.
-            if (acc->multi_op_)
-                acc->multi_op_->object_ref_.reset();
         }
     }
 
@@ -988,10 +980,6 @@ public:
         // The public assign() guarantees the object is closed.
         if (auto ec = validate_socket_fd(nfd, SOCK_STREAM, true))
             return ec;
-
-        // Unconditional: release_socket() also leaves the op in flight,
-        // and it clears fd_ before returning.
-        acc.retire_multishot();
 
         acc.adopt_listening_fd(nfd);
 
@@ -1802,19 +1790,12 @@ public:
         auto* acc = static_cast<uring_local_stream_acceptor*>(h.get());
         if (acc && acc->fd_ >= 0)
         {
-            // cancel_and_flush submits cancel-by-fd; drain_waiters_only
-            // drains queued waiters without re-submitting it.
-            sched_->cancel_and_flush(acc->fd_);
+            // See uring_tcp_acceptor_service::close.
             acc->drain_waiters_only();
+            sched_->cancel_and_flush(acc->fd_);
             ::close(acc->fd_);
             acc->fd_             = -1;
             acc->local_endpoint_ = corosio::local_endpoint{};
-
-            // Break the multi_op_ -> object_ref_ (object_ref) cycle
-            // start_multishot established. See the symmetric comment
-            // in uring_tcp_acceptor_service::close.
-            if (acc->multi_op_)
-                acc->multi_op_->object_ref_.reset();
         }
     }
 
@@ -1864,10 +1845,6 @@ public:
         // The public assign() guarantees the object is closed.
         if (auto ec = validate_socket_fd(nfd, SOCK_STREAM, false))
             return ec;
-
-        // Unconditional: release_socket() also leaves the op in flight,
-        // and it clears fd_ before returning.
-        acc.retire_multishot();
 
         acc.adopt_listening_fd(nfd);
 
