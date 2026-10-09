@@ -224,30 +224,39 @@ posix_stream_file::do_read_work(pool_work_item* w) noexcept
 
     if (!op.cancelled.load(std::memory_order_acquire))
     {
-        ssize_t n;
-        do
+        if (!self->gate_.enter(op.fd))
         {
-            n = file_preadv(
-                op.fd, op.iovecs, op.iovec_count,
-                static_cast<file_off_t>(op.offset));
-        }
-        while (n < 0 && errno == EINTR);
-
-        if (n >= 0)
-        {
-            op.errn              = 0;
-            op.bytes_transferred = static_cast<std::size_t>(n);
-
-            // The file may have been replaced while this ran; its
-            // position belongs to whatever it now holds.
-            std::lock_guard<std::mutex> lock(self->offset_mutex_);
-            if (self->generation_ == op.generation)
-                self->offset_ += static_cast<std::uint64_t>(n);
+            // Closed or replaced since this was queued.
+            op.request_cancel();
         }
         else
         {
-            op.errn              = errno;
-            op.bytes_transferred = 0;
+            ssize_t n;
+            do
+            {
+                n = file_preadv(
+                    op.fd, op.iovecs, op.iovec_count,
+                    static_cast<file_off_t>(op.offset));
+            }
+            while (n < 0 && errno == EINTR);
+
+            if (n >= 0)
+            {
+                op.errn              = 0;
+                op.bytes_transferred = static_cast<std::size_t>(n);
+
+                // The file may have been replaced while this ran; its
+                // position belongs to whatever it now holds.
+                std::lock_guard<std::mutex> lock(self->offset_mutex_);
+                if (self->generation_ == op.generation)
+                    self->offset_ += static_cast<std::uint64_t>(n);
+            }
+            else
+            {
+                op.errn              = errno;
+                op.bytes_transferred = 0;
+            }
+            self->gate_.leave();
         }
     }
 
@@ -332,30 +341,39 @@ posix_stream_file::do_write_work(pool_work_item* w) noexcept
 
     if (!op.cancelled.load(std::memory_order_acquire))
     {
-        ssize_t n;
-        do
+        if (!self->gate_.enter(op.fd))
         {
-            n = file_pwritev(
-                op.fd, op.iovecs, op.iovec_count,
-                static_cast<file_off_t>(op.offset));
-        }
-        while (n < 0 && errno == EINTR);
-
-        if (n >= 0)
-        {
-            op.errn              = 0;
-            op.bytes_transferred = static_cast<std::size_t>(n);
-
-            // The file may have been replaced while this ran; its
-            // position belongs to whatever it now holds.
-            std::lock_guard<std::mutex> lock(self->offset_mutex_);
-            if (self->generation_ == op.generation)
-                self->offset_ += static_cast<std::uint64_t>(n);
+            // Closed or replaced since this was queued.
+            op.request_cancel();
         }
         else
         {
-            op.errn              = errno;
-            op.bytes_transferred = 0;
+            ssize_t n;
+            do
+            {
+                n = file_pwritev(
+                    op.fd, op.iovecs, op.iovec_count,
+                    static_cast<file_off_t>(op.offset));
+            }
+            while (n < 0 && errno == EINTR);
+
+            if (n >= 0)
+            {
+                op.errn              = 0;
+                op.bytes_transferred = static_cast<std::size_t>(n);
+
+                // The file may have been replaced while this ran; its
+                // position belongs to whatever it now holds.
+                std::lock_guard<std::mutex> lock(self->offset_mutex_);
+                if (self->generation_ == op.generation)
+                    self->offset_ += static_cast<std::uint64_t>(n);
+            }
+            else
+            {
+                op.errn              = errno;
+                op.bytes_transferred = 0;
+            }
+            self->gate_.leave();
         }
     }
 
