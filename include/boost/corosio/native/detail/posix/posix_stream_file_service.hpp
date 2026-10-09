@@ -149,7 +149,7 @@ private:
 
 inline std::coroutine_handle<>
 posix_stream_file::read_some(
-    std::coroutine_handle<> h,
+    capy::continuation& cont,
     capy::executor_ref ex,
     buffer_param param,
     std::stop_token token,
@@ -165,8 +165,7 @@ posix_stream_file::read_some(
     {
         *ec        = make_error_code(std::errc::bad_file_descriptor);
         *bytes_out = 0;
-        op.cont.h  = h;
-        return dispatch_coro(ex, op.cont);
+        return dispatch_coro(ex, cont);
     }
 
     capy::mutable_buffer bufs[max_buffers];
@@ -176,8 +175,7 @@ posix_stream_file::read_some(
     {
         *ec        = {};
         *bytes_out = 0;
-        op.cont.h  = h;
-        return dispatch_coro(ex, op.cont);
+        return dispatch_coro(ex, cont);
     }
 
     for (int i = 0; i < op.iovec_count; ++i)
@@ -186,7 +184,7 @@ posix_stream_file::read_some(
         op.iovecs[i].iov_len  = bufs[i].size();
     }
 
-    op.h         = h;
+    op.cont      = &cont;
     op.ex        = ex;
     op.ec_out    = ec;
     op.bytes_out = bytes_out;
@@ -212,8 +210,7 @@ posix_stream_file::read_some(
         op.ex.on_work_finished();
         *ec        = pec;
         *bytes_out = 0;
-        op.cont.h  = h;
-        return dispatch_coro(ex, op.cont);
+        return dispatch_coro(ex, cont);
     }
     return std::noop_coroutine();
 }
@@ -260,7 +257,7 @@ posix_stream_file::do_read_work(pool_work_item* w) noexcept
 
 inline std::coroutine_handle<>
 posix_stream_file::write_some(
-    std::coroutine_handle<> h,
+    capy::continuation& cont,
     capy::executor_ref ex,
     buffer_param param,
     std::stop_token token,
@@ -276,8 +273,7 @@ posix_stream_file::write_some(
     {
         *ec        = make_error_code(std::errc::bad_file_descriptor);
         *bytes_out = 0;
-        op.cont.h  = h;
-        return dispatch_coro(ex, op.cont);
+        return dispatch_coro(ex, cont);
     }
 
     capy::mutable_buffer bufs[max_buffers];
@@ -287,8 +283,7 @@ posix_stream_file::write_some(
     {
         *ec        = {};
         *bytes_out = 0;
-        op.cont.h  = h;
-        return dispatch_coro(ex, op.cont);
+        return dispatch_coro(ex, cont);
     }
 
     for (int i = 0; i < op.iovec_count; ++i)
@@ -297,7 +292,7 @@ posix_stream_file::write_some(
         op.iovecs[i].iov_len  = bufs[i].size();
     }
 
-    op.h         = h;
+    op.cont      = &cont;
     op.ex        = ex;
     op.ec_out    = ec;
     op.bytes_out = bytes_out;
@@ -323,8 +318,7 @@ posix_stream_file::write_some(
         op.ex.on_work_finished();
         *ec        = pec;
         *bytes_out = 0;
-        op.cont.h  = h;
-        return dispatch_coro(ex, op.cont);
+        return dispatch_coro(ex, cont);
     }
     return std::noop_coroutine();
 }

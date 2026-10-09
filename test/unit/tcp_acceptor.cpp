@@ -21,10 +21,13 @@
 #include <boost/capy/buffers.hpp>
 #include <boost/capy/cond.hpp>
 #include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/ex/thread_pool.hpp>
 #include <boost/capy/task.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <latch>
 #include <stdexcept>
 #include <stop_token>
 #include <system_error>
@@ -1951,6 +1954,78 @@ struct tcp_acceptor_test
         close_native_socket(second);
     }
 
+    // An accept awaited from a non-io_context executor takes the deferring
+    // branch. The queued continuation must survive the next accept reusing
+    // the op.
+    void testDeferredExecutorCompletion()
+    {
+        io_context ioc(Backend);
+        capy::thread_pool pool(1);
+
+        tcp_acceptor acc(ioc);
+        BOOST_TEST(!acc.open());
+        acc.set_option(socket_option::reuse_address(true));
+        BOOST_TEST(!acc.bind(endpoint(ipv4_address::loopback(), 0)));
+        BOOST_TEST(!acc.listen());
+        endpoint ep(ipv4_address::loopback(), acc.local_endpoint().port());
+
+        std::latch started(1);
+        std::latch hold(1);
+        std::atomic<bool> c1_done{false};
+        std::atomic<bool> c2_done{false};
+        tcp_socket s1(ioc);
+        tcp_socket s2(ioc);
+
+        auto accepter = [](tcp_acceptor& a, tcp_socket& s,
+                           std::atomic<bool>& done) -> capy::task<> {
+            auto [ec] = co_await a.accept(s);
+            done      = !ec;
+        };
+        auto connector = [](tcp_socket& c, endpoint e) -> capy::task<> {
+            std::ignore = co_await c.connect(e);
+        };
+
+        // Awaited on the pool, so the completion takes the deferring path.
+        capy::run_async(pool.get_executor())(accepter(acc, s1, c1_done));
+
+        // Parked behind the first accept on the single worker: once this
+        // runs, that accept has parked and suspended.
+        capy::run_async(pool.get_executor())(
+            [](std::latch& s, std::latch& h) -> capy::task<> {
+                s.count_down();
+                h.wait();
+                co_return;
+            }(started, hold));
+        started.wait();
+
+        // The completion queues the first accept's resume into the
+        // parked pool and consumes the op.
+        tcp_socket client1(ioc);
+        capy::run_async(ioc.get_executor())(connector(client1, ep));
+        ioc.run();
+        ioc.restart();
+
+        // Reuses the op while the pool still holds the first continuation.
+        tcp_socket client2(ioc);
+        capy::run_async(ioc.get_executor())(accepter(acc, s2, c2_done));
+        capy::run_async(ioc.get_executor())(connector(client2, ep));
+        ioc.run();
+        ioc.restart();
+        BOOST_TEST(c2_done.load());
+
+        hold.count_down();
+        std::latch drained(1);
+        capy::run_async(pool.get_executor())(
+            [](std::latch& d) -> capy::task<> {
+                d.count_down();
+                co_return;
+            }(drained));
+        drained.wait();
+
+        BOOST_TEST(c1_done.load());
+        pool.join();
+    }
+
     void run()
     {
         testAssignOnOpenIsAlreadyOpen();
@@ -1962,6 +2037,7 @@ struct tcp_acceptor_test
 
         // Cancellation
         testCancelAccept();
+        testDeferredExecutorCompletion();
         testCloseWhilePendingAccept();
 #if !COROSIO_TEST_HAS_ASAN
         // Abandon parked coroutine frames by design; see context.hpp.

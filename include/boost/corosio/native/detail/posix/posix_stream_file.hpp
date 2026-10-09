@@ -28,6 +28,7 @@
 #include <boost/corosio/native/detail/make_err.hpp>
 #include <boost/corosio/native/detail/posix/large_file.hpp>
 #include <boost/corosio/native/detail/validate_fd.hpp>
+#include <boost/capy/continuation.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <boost/capy/error.hpp>
 #include <boost/capy/buffers.hpp>
@@ -167,7 +168,7 @@ public:
     // -- io_stream::implementation --
 
     std::coroutine_handle<> read_some(
-        std::coroutine_handle<>,
+        capy::continuation&,
         capy::executor_ref,
         buffer_param,
         std::stop_token,
@@ -175,7 +176,7 @@ public:
         std::size_t*) override;
 
     std::coroutine_handle<> write_some(
-        std::coroutine_handle<>,
+        capy::continuation&,
         capy::executor_ref,
         buffer_param,
         std::stop_token,
@@ -442,8 +443,7 @@ posix_stream_file::file_op::operator()()
     // posix_stream_file (which embeds this file_op) alive.
     auto prevent_destroy = std::move(object_ref_);
     ex.on_work_finished();
-    cont.h = h;
-    dispatch_coro(ex, cont).resume();
+    dispatch_coro(ex, *cont).resume();
 }
 
 inline void

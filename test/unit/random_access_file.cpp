@@ -25,6 +25,7 @@
 #include <boost/capy/ex/io_env.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/ex/strand.hpp>
+#include <boost/capy/ex/thread_pool.hpp>
 #include <boost/capy/task.hpp>
 
 #include "context.hpp"
@@ -33,12 +34,14 @@
 
 #include <coroutine>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <atomic>
 #include <limits>
+#include <latch>
 #include <stop_token>
 #include <string>
 #include <system_error>
@@ -992,6 +995,71 @@ struct random_access_file_test
 #endif
     }
 
+    // A read awaited from a non-io_context executor takes the deferring
+    // branch. The queued continuation must survive the next read reusing
+    // the recycled op.
+    void testDeferredExecutorCompletion()
+    {
+        std::string data = "ABCDEFGHIJ";
+        temp_file tmp("raf_deferred_", data);
+        io_context ioc(Backend);
+        capy::thread_pool pool(1);
+        random_access_file f(ioc);
+        BOOST_TEST(!f.open(tmp.path, file_base::read_only));
+
+        std::latch started(1);
+        std::latch hold(1);
+        std::atomic<bool> c1_done{false};
+        std::atomic<bool> c2_done{false};
+        char b1[2] = {};
+        char b2[2] = {};
+
+        auto reader = [](random_access_file& f, std::uint64_t at, char* b,
+                         std::atomic<bool>& done) -> capy::task<> {
+            auto [ec, n] =
+                co_await f.read_some_at(at, capy::mutable_buffer(b, 2));
+            done = !ec && n == 2;
+        };
+
+        // Awaited on the pool, so the completion takes the deferring path.
+        capy::run_async(pool.get_executor())(reader(f, 0, b1, c1_done));
+
+        // Parked behind the first read on the single worker: once this
+        // runs, that read has been issued and its coroutine suspended.
+        capy::run_async(pool.get_executor())(
+            [](std::latch& s, std::latch& h) -> capy::task<> {
+                s.count_down();
+                h.wait();
+                co_return;
+            }(started, hold));
+        started.wait();
+
+        // The completion queues the first read's resume into the parked
+        // pool and recycles the op.
+        ioc.run();
+        ioc.restart();
+
+        // Reuses the op while the pool still holds the first continuation.
+        capy::run_async(ioc.get_executor())(reader(f, 4, b2, c2_done));
+        ioc.run();
+        ioc.restart();
+        BOOST_TEST(c2_done.load());
+
+        hold.count_down();
+        std::latch drained(1);
+        capy::run_async(pool.get_executor())(
+            [](std::latch& d) -> capy::task<> {
+                d.count_down();
+                co_return;
+            }(drained));
+        drained.wait();
+
+        BOOST_TEST(c1_done.load());
+        BOOST_TEST(std::memcmp(b1, "AB", 2) == 0);
+        BOOST_TEST(std::memcmp(b2, "EF", 2) == 0);
+        pool.join();
+    }
+
     void run()
     {
         testAssignOnOpenIsAlreadyOpen();
@@ -1007,6 +1075,7 @@ struct random_access_file_test
         testResize();
 
         testReadSomeAt();
+        testDeferredExecutorCompletion();
         testReadSomeAtBeginning();
         testReadSomeAtEOF();
 
