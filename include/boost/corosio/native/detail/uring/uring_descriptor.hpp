@@ -64,7 +64,7 @@
 
    The gap between a CQE and its dispatch is the whole difficulty of
    that shape, and one epoch counter closes it. Nothing of a transfer
-   waiting in that gap is in the ring, so cancel-by-fd cannot reach
+   waiting in that gap is in the ring, so a kernel cancel cannot reach
    it. cancel() and every descriptor change bump epoch_ before they
    take ring_mutex_, and do_prep, which runs under ring_mutex_,
    compares the op's snapshot against it: an op that no longer
@@ -411,14 +411,13 @@ public:
 
     native_handle_type release_descriptor() noexcept override
     {
-        // Bump before the flush, as close_descriptor does. Flush the
-        // cancel while the fd is still open so the kernel resolves it
-        // before the caller can close and recycle the number. Do NOT
+        // Bump before the flush, as close_descriptor does. Do NOT
         // close -- the caller takes ownership.
         epoch_.fetch_add(1, std::memory_order_release);
         cancel_waits();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(
+                fd_, {&rd_, &wr_, &wait_rd_, &wait_wr_, &wait_er_});
         native_handle_type released = fd_;
         fd_                         = -1;
         return released;
@@ -426,12 +425,12 @@ public:
 
     void cancel() noexcept override
     {
-        // Bump before the SQE: cancel-by-fd reaches only what the ring
+        // Bump before the SQE: the cancel reaches only what the ring
         // currently holds, and an op waiting for its handler to run
         // holds nothing there. The epoch is what that op consults.
         epoch_.fetch_add(1, std::memory_order_release);
         if (fd_ >= 0)
-            sched_->submit_cancel_by_fd(fd_);
+            sched_->cancel_ops({&rd_, &wr_, &wait_rd_, &wait_wr_, &wait_er_});
     }
 
     /// Epoch bumped by every @ref cancel and every descriptor change.
@@ -480,7 +479,8 @@ public:
         // Both kernel entries below can run a queued pipe write as task
         // work; with the reader already gone that raises SIGPIPE.
         scoped_sigpipe_block no_sigpipe;
-        sched_->cancel_and_flush(fd_);
+        sched_->flush_after_cancel(
+            fd_, {&rd_, &wr_, &wait_rd_, &wait_wr_, &wait_er_});
         ::close(fd_);
         fd_ = -1;
     }

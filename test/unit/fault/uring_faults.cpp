@@ -204,34 +204,31 @@ struct uring_faults
         acc.close();
     }
 
-    /* Cancellation is best-effort when the submission queue is full.
+    /* A full submission queue does not hold a close.
 
        A ring clamped to one SQE spends it on the wakeup poll, and the
        flush that would free it is a no-op while the arm is alive, so
        every cancel below finds the queue still full after its own
-       retry and gives up. Nothing observable changes — the descriptor
-       is closed either way — which is why the arm's own report is the
-       only witness that the give-up was taken.
+       retry. Cancels name operations rather than the descriptor, so a
+       close still closes at once.
     */
     void testCancelSqFull()
     {
         std::optional<fault_scope> f;
         f.emplace(sys::uring_sqe_full, 0);
         io_context ioc(uring);
+        int before = 0;
         {
-            // close() submits the cancel while the descriptor is still
-            // open, so the kernel resolves it before the number can be
-            // recycled.
             tcp_socket s(ioc);
             BOOST_TEST(!s.open(family::v4));
-            int const before = open_fds();
+            before = open_fds();
             s.close();
             BOOST_TEST(!s.is_open());
             BOOST_TEST_EQ(open_fds(), before - 1);
         }
         {
-            // cancel() reaches the by-descriptor cancel without going
-            // through a close.
+            // cancel() reaches the cancel path without going through a
+            // close.
             tcp_socket s(ioc);
             BOOST_TEST(!s.open(family::v4));
             s.cancel();
@@ -245,6 +242,12 @@ struct uring_faults
         }
         BOOST_TEST(f->fired());
         f.reset();
+
+        // Nothing was left waiting for the queue to drain.
+        capy::run_async(ioc.get_executor())(
+            []() -> capy::task<> { co_return; }());
+        ioc.poll();
+        BOOST_TEST_EQ(open_fds(), before - 1);
     }
 
     void testWaitFails()
@@ -412,6 +415,207 @@ struct uring_faults
         BOOST_TEST(wec == capy::cond::canceled);
     }
 
+    // A close whose cancel cannot be queued must not strand the
+    // request: the descriptor stays open until the cancel reaches the
+    // kernel, and the receive completes canceled.
+    void testCloseWithFullQueueStillCancels()
+    {
+        io_context ioc(uring);
+        char buf[8];
+        udp_socket s(ioc);
+        BOOST_TEST(!s.open(family::v4));
+        BOOST_TEST(!s.bind(endpoint(ipv4_address::loopback(), 0)));
+        bool done = false;
+        std::error_code rec;
+        capy::run_async(ioc.get_executor())(
+            [](udp_socket& s, char* b, bool& done,
+               std::error_code& ec) -> capy::task<> {
+                endpoint from;
+                auto [e, n] =
+                    co_await s.recv_from(capy::mutable_buffer(b, 8), from);
+                std::ignore = n;
+                ec          = e;
+                done        = true;
+            }(s, buf, done, rec));
+        bool fired  = false;
+        auto closer = [&]() -> capy::task<> {
+            // A run-loop flush applies the fill; see
+            // testCancelSqFullBestEffort.
+            fault_scope f(sys::uring_sq_fill, 0);
+            std::ignore = co_await corosio::delay(std::chrono::milliseconds(1));
+            s.close();
+            fired = f.fired();
+        };
+        capy::run_async(ioc.get_executor())(closer());
+        while (!done && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(fired);
+        BOOST_TEST(done);
+        BOOST_TEST(rec == capy::cond::canceled);
+    }
+
+    // release() hands the descriptor to a caller who may close it at
+    // once. A cancel that could not reach the kernel first must still
+    // end the parked receive, and must not later cancel whatever
+    // reuses the number.
+    void testReleaseWithFullQueueStillCancels()
+    {
+        io_context ioc(uring);
+        char buf[8];
+        udp_socket s(ioc);
+        BOOST_TEST(!s.open(family::v4));
+        BOOST_TEST(!s.bind(endpoint(ipv4_address::loopback(), 0)));
+        bool done = false;
+        std::error_code rec;
+        capy::run_async(ioc.get_executor())(
+            [](udp_socket& s, char* b, bool& done,
+               std::error_code& ec) -> capy::task<> {
+                endpoint from;
+                auto [e, n] =
+                    co_await s.recv_from(capy::mutable_buffer(b, 8), from);
+                std::ignore = n;
+                ec          = e;
+                done        = true;
+            }(s, buf, done, rec));
+        bool fired    = false;
+        auto releaser = [&]() -> capy::task<> {
+            // A run-loop flush applies the fill; see
+            // testCancelSqFullBestEffort.
+            fault_scope f(sys::uring_sq_fill, 0);
+            std::ignore = co_await corosio::delay(std::chrono::milliseconds(1));
+            ::close(static_cast<int>(s.release()));
+            fired = f.fired();
+        };
+        capy::run_async(ioc.get_executor())(releaser());
+        while (!done && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(fired);
+        BOOST_TEST(done);
+        BOOST_TEST(rec == capy::cond::canceled);
+    }
+
+    // A release that could not queue its cancel still hands back the
+    // descriptor itself and cancels the receive later. That cancel names
+    // the receive, so another object adopting the descriptor keeps its
+    // own receive.
+    void testDeferredCancelSparesReadoptedDescriptor()
+    {
+        io_context ioc(uring);
+        char buf[8];
+        udp_socket s(ioc);
+        BOOST_TEST(!s.open(family::v4));
+        BOOST_TEST(!s.bind(endpoint(ipv4_address::loopback(), 0)));
+        int const orig = static_cast<int>(s.native_handle());
+        bool done1     = false;
+        std::error_code rec1;
+        capy::run_async(ioc.get_executor())(
+            [](udp_socket& s, char* b, bool& done,
+               std::error_code& ec) -> capy::task<> {
+                endpoint from;
+                auto [e, n] =
+                    co_await s.recv_from(capy::mutable_buffer(b, 8), from);
+                std::ignore = n;
+                ec          = e;
+                done        = true;
+            }(s, buf, done1, rec1));
+
+        udp_socket s2(ioc);
+        char buf2[8];
+        bool done2 = false;
+        std::error_code rec2;
+        std::size_t n2 = 0;
+        int released   = -1;
+        bool fired     = false;
+        auto releaser  = [&]() -> capy::task<> {
+            {
+                // A run-loop flush applies the fill; see
+                // testCancelSqFullBestEffort.
+                fault_scope f(sys::uring_sq_fill, 0);
+                std::ignore =
+                    co_await corosio::delay(std::chrono::milliseconds(1));
+                released = static_cast<int>(s.release());
+                fired    = f.fired();
+            }
+            BOOST_TEST(!s2.assign(released));
+            endpoint from;
+            auto [e, n] =
+                co_await s2.recv_from(capy::mutable_buffer(buf2, 8), from);
+            rec2  = e;
+            n2    = n;
+            done2 = true;
+        };
+        capy::run_async(ioc.get_executor())(releaser());
+        while (!done1 && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(fired);
+        BOOST_TEST_EQ(released, orig);
+        BOOST_TEST(done1);
+        BOOST_TEST(rec1 == capy::cond::canceled);
+
+        // The deferred cancel has run; the adopter's receive must still
+        // be waiting for data.
+        udp_socket sender(ioc);
+        BOOST_TEST(!sender.open(family::v4));
+        auto to = s2.local_endpoint();
+        capy::run_async(ioc.get_executor())(
+            [](udp_socket& u, endpoint ep) -> capy::task<> {
+                std::ignore =
+                    co_await u.send_to(capy::const_buffer("hi", 2), ep);
+            }(sender, to));
+        while (!done2 && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(done2);
+        BOOST_TEST(!rec2);
+        BOOST_TEST_EQ(n2, 2u);
+        s2.close();
+        ioc.restart();
+        ioc.run();
+    }
+
+    // A close whose flush fails must not leave an SQE that still names
+    // the descriptor by number: the queued receive completes canceled
+    // before the number can be reused.
+    void testCloseWithFailedFlushCancelsQueuedOp()
+    {
+        io_context ioc(uring);
+        char buf[8];
+        udp_socket s(ioc);
+        BOOST_TEST(!s.open(family::v4));
+        BOOST_TEST(!s.bind(endpoint(ipv4_address::loopback(), 0)));
+        bool done = false;
+        std::error_code rec;
+        bool fired = false;
+        // The receive links its SQE and posts the flush behind the
+        // closer, which therefore closes with the SQE still queued.
+        capy::run_async(ioc.get_executor())(
+            [](udp_socket& s, char* b, bool& done,
+               std::error_code& ec) -> capy::task<> {
+                endpoint from;
+                auto [e, n] =
+                    co_await s.recv_from(capy::mutable_buffer(b, 8), from);
+                std::ignore = n;
+                ec          = e;
+                done        = true;
+            }(s, buf, done, rec));
+        capy::run_async(ioc.get_executor())(
+            [](udp_socket& s, bool& fired) -> capy::task<> {
+                fault_scope f(sys::io_uring_submit, ENOMEM);
+                s.close();
+                fired = f.fired();
+                co_return;
+            }(s, fired));
+        while (!done && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(fired);
+        BOOST_TEST(done);
+        BOOST_TEST(rec == capy::cond::canceled);
+    }
+
     // Closing and destroying a listening acceptor on a live context
     // leaves the arming's terminal completion to the run loop. Waiting
     // on the ring for it instead would swallow other ops' completions;
@@ -455,7 +659,8 @@ struct uring_faults
                 return;
             }
             make_native_adoptable(sv[1]);
-            fault_scope f(sys::uring_sqe_full, 0);
+            std::optional<fault_scope> f;
+            f.emplace(sys::uring_sqe_full, 0);
             fault_scope g(sys::io_uring_submit_and_get_events, EBADF);
             io_context ioc(uring);
             local_stream_socket b(ioc);
@@ -483,7 +688,9 @@ struct uring_faults
             };
             capy::run_async(ioc.get_executor())(read_body());
             ioc.run();
-            BOOST_TEST(f.fired());
+            BOOST_TEST(f->fired());
+            // A real flush would take shutdown's own cancel.
+            f.reset();
             BOOST_TEST(g.fired());
             BOOST_TEST(rec == std::errc::resource_unavailable_try_again);
             BOOST_TEST_EQ(n1, 0u);
@@ -503,7 +710,8 @@ struct uring_faults
                 return;
             }
             make_native_adoptable(sv[1]);
-            fault_scope f(sys::uring_sqe_full, 0);
+            std::optional<fault_scope> f;
+            f.emplace(sys::uring_sqe_full, 0);
             fault_scope g(sys::io_uring_submit_and_get_events, EBADF);
             io_context ioc(uring);
             local_stream_socket b(ioc);
@@ -522,7 +730,9 @@ struct uring_faults
             };
             capy::run_async(ioc.get_executor())(write_body());
             ioc.run();
-            BOOST_TEST(f.fired());
+            BOOST_TEST(f->fired());
+            // A real flush would take shutdown's own cancel.
+            f.reset();
             BOOST_TEST(g.fired());
             BOOST_TEST(wec == std::errc::resource_unavailable_try_again);
             BOOST_TEST_EQ(wn, 0u);
@@ -540,7 +750,8 @@ struct uring_faults
                 return;
             }
             make_native_adoptable(sv[1]);
-            fault_scope f(sys::uring_sqe_full, 0);
+            std::optional<fault_scope> f;
+            f.emplace(sys::uring_sqe_full, 0);
             fault_scope g(sys::io_uring_submit_and_get_events, EBADF);
             io_context ioc(uring);
             local_stream_socket b(ioc);
@@ -552,7 +763,9 @@ struct uring_faults
             };
             capy::run_async(ioc.get_executor())(wait_body());
             ioc.run();
-            BOOST_TEST(f.fired());
+            BOOST_TEST(f->fired());
+            // A real flush would take shutdown's own cancel.
+            f.reset();
             BOOST_TEST(g.fired());
             BOOST_TEST(pec == std::errc::resource_unavailable_try_again);
             BOOST_TEST(b.is_open());
@@ -1240,6 +1453,10 @@ struct uring_faults
         testShutdownCancelRetriesAfterEintr();
         testReleaseDuringConnect();
         testErrorWaitAfterCloseSkipsProbe();
+        testCloseWithFullQueueStillCancels();
+        testReleaseWithFullQueueStillCancels();
+        testDeferredCancelSparesReadoptedDescriptor();
+        testCloseWithFailedFlushCancelsQueuedOp();
         testAcceptorArmSqFull();
         testSqFull();
         testConnectCqeRewrite();

@@ -418,7 +418,7 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(fd_, {&rd_, &wr_, &conn_, &wait_op_});
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = endpoint{};
@@ -431,13 +431,12 @@ public:
     void cancel() noexcept override
     {
         if (fd_ >= 0)
-            sched_->submit_cancel_by_fd(fd_);
+            sched_->cancel_ops({&rd_, &wr_, &conn_, &wait_op_});
     }
 
     /// Cancel in-flight ops, close the fd, and reset cached endpoints.
-    /// Called by the service on close()/teardown. cancel_and_flush submits
-    /// the cancel SQE while the fd is still open so IORING_ASYNC_CANCEL_FD
-    /// resolves before the fd number can be recycled.
+    /// Called by the service on close()/teardown. The flush runs while
+    /// the fd is still open, so no queued SQE can name a recycled number.
     void close_socket() noexcept
     {
         // A connect completing after this must not write endpoints into
@@ -446,7 +445,7 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(fd_, {&rd_, &wr_, &conn_, &wait_op_});
             ::close(fd_);
             fd_ = -1;
         }
@@ -595,10 +594,7 @@ public:
         // LCOV_EXCL_START: dead — open() guards is_open(), so open_socket
         // never runs against an already-open fd (assign_socket handles that).
         if (sock.fd_ >= 0)
-        {
-            sched_->submit_cancel_by_fd(sock.fd_);
-            ::close(sock.fd_);
-        }
+            sock.close_socket();
         // LCOV_EXCL_STOP
         sock.fd_     = fd;
         sock.family_ = family;
@@ -927,11 +923,8 @@ public:
         auto* acc = static_cast<uring_tcp_acceptor*>(h.get());
         if (acc && acc->fd_ >= 0)
         {
-            // Disown the arming before the cancel, then flush the
-            // cancel while the fd still names the listener.
-            acc->drain_waiters_only();
-            acc->cancel_wait_op();
-            sched_->cancel_and_flush(acc->fd_);
+            // Close only once no queued SQE can name the listener.
+            acc->flush_listener();
             ::close(acc->fd_);
             acc->fd_             = -1;
             acc->local_endpoint_ = endpoint{};
@@ -961,7 +954,7 @@ public:
         // never runs against an already-open fd (assign_socket handles that).
         if (acc.fd_ >= 0)
         {
-            sched_->submit_cancel_by_fd(acc.fd_);
+            acc.flush_listener();
             ::close(acc.fd_);
         }
         // LCOV_EXCL_STOP
@@ -1397,7 +1390,7 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(fd_, {&rd_, &wr_, &conn_, &wait_op_});
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = corosio::local_endpoint{};
@@ -1408,7 +1401,7 @@ public:
     void cancel() noexcept override
     {
         if (fd_ >= 0)
-            sched_->submit_cancel_by_fd(fd_);
+            sched_->cancel_ops({&rd_, &wr_, &conn_, &wait_op_});
     }
 
     /// Cancel in-flight ops, close the fd, and reset cached endpoints.
@@ -1421,7 +1414,7 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(fd_, {&rd_, &wr_, &conn_, &wait_op_});
             ::close(fd_);
             fd_ = -1;
         }
@@ -1526,10 +1519,7 @@ public:
         // LCOV_EXCL_START: dead — open() guards is_open(), so open_socket
         // never runs against an already-open fd (assign_socket handles that).
         if (sock.fd_ >= 0)
-        {
-            sched_->submit_cancel_by_fd(sock.fd_);
-            ::close(sock.fd_);
-        }
+            sock.close_socket();
         // LCOV_EXCL_STOP
         sock.fd_ = fd;
         return {};
@@ -1810,9 +1800,7 @@ public:
         if (acc && acc->fd_ >= 0)
         {
             // See uring_tcp_acceptor_service::close.
-            acc->drain_waiters_only();
-            acc->cancel_wait_op();
-            sched_->cancel_and_flush(acc->fd_);
+            acc->flush_listener();
             ::close(acc->fd_);
             acc->fd_             = -1;
             acc->local_endpoint_ = corosio::local_endpoint{};
@@ -1842,7 +1830,7 @@ public:
         // never runs against an already-open fd (assign_socket handles that).
         if (acc.fd_ >= 0)
         {
-            sched_->submit_cancel_by_fd(acc.fd_);
+            acc.flush_listener();
             ::close(acc.fd_);
         }
         // LCOV_EXCL_STOP
@@ -2168,7 +2156,8 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(
+                fd_, {&conn_, &send_, &recv_, &wait_op_});
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = endpoint{};
@@ -2179,7 +2168,7 @@ public:
     void cancel() noexcept override
     {
         if (fd_ >= 0)
-            sched_->submit_cancel_by_fd(fd_);
+            sched_->cancel_ops({&conn_, &send_, &recv_, &wait_op_});
     }
 
     /// Cancel in-flight ops, close the fd, and reset cached endpoints.
@@ -2192,7 +2181,8 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(
+                fd_, {&conn_, &send_, &recv_, &wait_op_});
             ::close(fd_);
             fd_ = -1;
         }
@@ -2504,10 +2494,7 @@ public:
         // LCOV_EXCL_START: dead — open() guards is_open(), so open_socket
         // never runs against an already-open fd (assign_socket handles that).
         if (sock.fd_ >= 0)
-        {
-            sched_->submit_cancel_by_fd(sock.fd_);
-            ::close(sock.fd_);
-        }
+            sock.close_socket();
         // LCOV_EXCL_STOP
         sock.fd_     = fd;
         sock.family_ = family;
@@ -2817,7 +2804,8 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(
+                fd_, {&conn_, &send_, &recv_, &wait_op_});
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = corosio::local_endpoint{};
@@ -2828,7 +2816,7 @@ public:
     void cancel() noexcept override
     {
         if (fd_ >= 0)
-            sched_->submit_cancel_by_fd(fd_);
+            sched_->cancel_ops({&conn_, &send_, &recv_, &wait_op_});
     }
 
     /// Cancel in-flight ops, close the fd, and reset cached endpoints.
@@ -2841,7 +2829,8 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
+            sched_->flush_after_cancel(
+                fd_, {&conn_, &send_, &recv_, &wait_op_});
             ::close(fd_);
             fd_ = -1;
         }
@@ -3169,10 +3158,7 @@ public:
         // LCOV_EXCL_START: dead — open() guards is_open(), so open_socket
         // never runs against an already-open fd (assign_socket handles that).
         if (sock.fd_ >= 0)
-        {
-            sched_->submit_cancel_by_fd(sock.fd_);
-            ::close(sock.fd_);
-        }
+            sock.close_socket();
         // LCOV_EXCL_STOP
         sock.fd_ = fd;
         return {};
