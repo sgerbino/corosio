@@ -825,12 +825,16 @@ uring_scheduler::interrupt_reactor() const noexcept
     if (!ring_inited_)
         return;
 
-    // Lockless tiers (reactor-I/O locking off): cross-thread post() is
-    // forbidden, so interrupt_reactor is only ever reached from the leader
-    // thread's own coroutines — it is not in kernel wait, nothing to wake.
-    // Under the safe tier (including concurrency_hint == 1) cross-thread
-    // post() is allowed, so the eventfd write below must always fire.
-    if (!reactor_io_locking_)
+    // Only the unsafe tier forbids cross-thread post(); there the caller
+    // is the run thread itself, which is not in a kernel wait. Under
+    // unsafe_io a pool thread (the resolver) may post, and the eventfd
+    // write leaves the single ring submitter untouched.
+    if (scheduler_locking_disabled_)
+        return;
+
+    // Under unsafe_io a single thread runs the ring; when that thread is
+    // the caller it is not in a kernel wait.
+    if (!reactor_io_locking_ && running_scheduler.get() == this)
         return;
 
     // Multi-thread: write the eventfd unconditionally. CAS-coalescing
