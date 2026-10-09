@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <stop_token>
 #include <type_traits>
+#include <utility>
 
 namespace boost::corosio {
 
@@ -99,6 +100,7 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         tcp_socket& peer_;
         mutable io_object::implementation* peer_impl_ = nullptr;
 
+
         accept_awaitable(tcp_acceptor& acc, tcp_socket& peer) noexcept
             : acc_(acc)
             , peer_(peer)
@@ -113,10 +115,18 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         }
 
     public:
+        // A peer accepted for an awaiter that never resumed is closed
+        // here, or nothing would own it.
+        ~accept_awaitable()
+        {
+            if (peer_impl_)
+                discard_peer(acc_, peer_impl_);
+        }
+
         [[nodiscard]] capy::io_result<> await_resume() const noexcept
         {
             if (!this->ec_ && peer_impl_)
-                peer_.h_.reset(peer_impl_);
+                peer_.h_.reset(std::exchange(peer_impl_, nullptr));
             return {this->ec_};
         }
     };
@@ -130,6 +140,7 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         tcp_acceptor& acc_;
         mutable io_object::implementation* peer_impl_ = nullptr;
 
+
         explicit accept_value_awaitable(tcp_acceptor& acc) noexcept : acc_(acc)
         {
         }
@@ -142,6 +153,14 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         }
 
     public:
+        // A peer accepted for an awaiter that never resumed is closed
+        // here, or nothing would own it.
+        ~accept_value_awaitable()
+        {
+            if (peer_impl_)
+                discard_peer(acc_, peer_impl_);
+        }
+
         [[nodiscard]] capy::io_result<tcp_socket> await_resume() noexcept
         {
             // The peer is built only on success: error paths must not
@@ -150,7 +169,7 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
                 return {this->ec_, tcp_socket()};
 
             tcp_socket peer(acc_.context());
-            peer.h_.reset(peer_impl_);
+            peer.h_.reset(std::exchange(peer_impl_, nullptr));
             return {this->ec_, std::move(peer)};
         }
     };
@@ -752,6 +771,10 @@ private:
     {
         return *static_cast<implementation*>(h_.get());
     }
+
+    /// Close and release a non-null accepted peer no socket took over.
+    static void
+    discard_peer(tcp_acceptor& acc, io_object::implementation* impl) noexcept;
 };
 
 } // namespace boost::corosio

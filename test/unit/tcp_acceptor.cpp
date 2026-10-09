@@ -39,6 +39,7 @@
 // netinet/in.h and unistd.h support the raw-socket backlog setup in
 // testAcceptPendingConnection; fcntl.h supports the adoption tests.
 #include <fcntl.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -2012,6 +2013,55 @@ struct tcp_acceptor_test
         close_native_socket(second);
     }
 
+#if BOOST_COROSIO_POSIX
+    // An accept that completed but whose awaiter is destroyed before it
+    // resumes must not strand the accepted connection: the awaiter's
+    // context queues the completion, and its teardown destroys the
+    // frame without resuming it.
+    void testAcceptedPeerClosedWhenAwaiterDestroyed(bool by_value)
+    {
+        io_context a(Backend);
+        tcp_acceptor acc(a);
+        BOOST_TEST(!acc.open());
+        acc.set_option(socket_option::reuse_address(true));
+        BOOST_TEST(!acc.bind(endpoint(ipv4_address::loopback(), 0)));
+        BOOST_TEST(!acc.listen());
+        auto const port = acc.local_endpoint().port();
+
+        tcp_socket peer(a);
+        auto client = make_native_socket(AF_INET, SOCK_STREAM);
+        BOOST_TEST(client != invalid_native_socket);
+        {
+            io_context b(Backend);
+            if (by_value)
+                capy::run_async(b.get_executor())(
+                    [](tcp_acceptor& acc) -> capy::task<> {
+                        std::ignore = co_await acc.accept();
+                    }(acc));
+            else
+                capy::run_async(b.get_executor())(
+                    [](tcp_acceptor& acc, tcp_socket& p) -> capy::task<> {
+                        std::ignore = co_await acc.accept(p);
+                    }(acc, peer));
+            std::ignore = b.poll(); // parks the accept on a's acceptor
+
+            BOOST_TEST(native_connect_loopback(client, port, false));
+            a.run(); // completes the accept into b's queue
+        }
+
+        // With the accepted socket closed, the client reads end of file;
+        // a stranded one never becomes readable. Some stacks deliver the
+        // close asynchronously, so readability is awaited, bounded only
+        // to fail rather than hang.
+        pollfd pfd{client, POLLIN, 0};
+        BOOST_TEST_EQ(::poll(&pfd, 1, 5000), 1);
+        ::fcntl(client, F_SETFL, ::fcntl(client, F_GETFL) | O_NONBLOCK);
+        char c;
+        BOOST_TEST_EQ(::recv(client, &c, 1, 0), 0);
+        close_native_socket(client);
+    }
+#endif
+
     // An accept awaited from a non-io_context executor takes the deferring
     // branch. The queued continuation must survive the next accept reusing
     // the op.
@@ -2097,6 +2147,10 @@ struct tcp_acceptor_test
         testCancelAccept();
         testAcceptAfterCancel();
         testDeferredExecutorCompletion();
+#if BOOST_COROSIO_POSIX
+        testAcceptedPeerClosedWhenAwaiterDestroyed(false);
+        testAcceptedPeerClosedWhenAwaiterDestroyed(true);
+#endif
         testCloseWhilePendingAccept();
 #if !COROSIO_TEST_HAS_ASAN
         // Abandon parked coroutine frames by design; see context.hpp.
