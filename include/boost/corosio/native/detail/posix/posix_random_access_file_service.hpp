@@ -311,6 +311,20 @@ posix_random_access_file::raf_op::do_work(pool_work_item* w) noexcept
         op->errn              = EOVERFLOW;
         op->bytes_transferred = 0;
     }
+    else if (!self->gate_.enter(op->fd))
+    {
+        // Closed or replaced since this was queued.
+        op->errn              = ECANCELED;
+        op->bytes_transferred = 0;
+    }
+    else if (op->cancelled.load(std::memory_order_acquire))
+    {
+        // Closed and reopened onto the same number since the check
+        // above: the gate admits the number, but not this op.
+        self->gate_.leave();
+        op->errn              = ECANCELED;
+        op->bytes_transferred = 0;
+    }
     else
     {
         ssize_t n;
@@ -345,6 +359,7 @@ posix_random_access_file::raf_op::do_work(pool_work_item* w) noexcept
             op->errn              = errno;
             op->bytes_transferred = 0;
         }
+        self->gate_.leave();
     }
 
     self->svc_.post(static_cast<scheduler_op*>(op));
