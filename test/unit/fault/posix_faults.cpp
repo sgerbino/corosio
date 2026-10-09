@@ -28,6 +28,7 @@
 #include <boost/corosio/stream_file.hpp>
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
@@ -673,6 +674,63 @@ struct posix_common_faults
         ::unlink(p2.c_str());
     }
 
+    // A pool worker that has committed to a write must not write
+    // through the descriptor number after close() and an unrelated
+    // open() have given that number to another file.
+    template<class File>
+    void closeDuringPoolWrite(char const* tag)
+    {
+        if constexpr (ring_files)
+            return;
+        if (!hook_is_live(sys::pwritev))
+        {
+            skip_dead_hook("pwritev");
+            return;
+        }
+        auto p1 = temp_path((std::string(tag) + "_a").c_str());
+        auto p2 = temp_path((std::string(tag) + "_b").c_str());
+        std::ofstream(p1).flush();
+        std::ofstream(p2).flush();
+
+        io_context ioc(Backend);
+        File f(ioc);
+        BOOST_TEST(!f.open(p1, file_base::write_only));
+
+        pwritev_hold hold;
+        std::string const payload(4096, 'a');
+        int other   = -1;
+        auto writer = [&]() -> capy::task<> {
+            if constexpr (std::is_same_v<File, stream_file>)
+                std::ignore = co_await f.write_some(
+                    capy::const_buffer(payload.data(), payload.size()));
+            else
+                std::ignore = co_await f.write_some_at(
+                    0, capy::const_buffer(payload.data(), payload.size()));
+        };
+        auto swapper = [&]() -> capy::task<> {
+            hold.wait_held();
+            f.close();
+            other = ::open(p2.c_str(), O_WRONLY | O_CLOEXEC);
+            BOOST_TEST(other >= 0);
+            hold.release();
+            co_return;
+        };
+        capy::run_async(ioc.get_executor())(writer());
+        capy::run_async(ioc.get_executor())(swapper());
+        ioc.run();
+
+        ::close(other);
+        BOOST_TEST_EQ(std::filesystem::file_size(p2), 0u);
+        ::unlink(p1.c_str());
+        ::unlink(p2.c_str());
+    }
+
+    void testCloseDuringPoolWriteSparesReusedDescriptor()
+    {
+        closeDuringPoolWrite<stream_file>("sf_reuse");
+        closeDuringPoolWrite<random_access_file>("raf_reuse");
+    }
+
     void run()
     {
         if (skip_under_valgrind())
@@ -693,6 +751,7 @@ struct posix_common_faults
         testStreamFileSyncOps();
         testStreamFileIoFails();
         testAssignDuringFinishedReadKeepsNewOffset();
+        testCloseDuringPoolWriteSparesReusedDescriptor();
         testRandomAccessFileFails();
         testResolverFails();
         testSignalTeardownWalk();

@@ -27,6 +27,7 @@
 #include <boost/corosio/native/detail/coro_op_complete.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
 #include <boost/corosio/native/detail/posix/large_file.hpp>
+#include <boost/corosio/native/detail/posix/posix_fd_gate.hpp>
 #include <boost/corosio/native/detail/validate_fd.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <boost/capy/error.hpp>
@@ -134,6 +135,7 @@ public:
     void reuse() noexcept
     {
         BOOST_COROSIO_ASSERT(fd_ == -1);
+        BOOST_COROSIO_ASSERT(gate_.idle());
         BOOST_COROSIO_ASSERT(outstanding_ops_.empty());
     }
 
@@ -211,6 +213,8 @@ private:
 
     posix_random_access_file_service& svc_;
     int fd_ = -1;
+    /// Keeps fd_'s number allocated while a pool worker uses it.
+    posix_fd_gate gate_;
     std::mutex ops_mutex_;
     intrusive_list<raf_op> outstanding_ops_;
     intrusive_list<raf_op> free_ops_;
@@ -257,6 +261,7 @@ posix_random_access_file::open_file(
         return make_err(errno);
 
     fd_ = fd;
+    gate_.open(fd);
 
 #ifdef POSIX_FADV_RANDOM
     ::posix_fadvise(fd_, 0, 0, POSIX_FADV_RANDOM);
@@ -268,11 +273,8 @@ posix_random_access_file::open_file(
 inline void
 posix_random_access_file::close_file() noexcept
 {
-    if (fd_ >= 0)
-    {
-        ::close(fd_);
-        fd_ = -1;
-    }
+    gate_.close();
+    fd_ = -1;
 }
 
 inline std::uint64_t
@@ -321,6 +323,10 @@ posix_random_access_file::release()
     // A queued op has already copied the fd number; it must not run
     // after the caller closes it and the number is recycled.
     cancel();
+    if (!gate_.release())
+        throw_system_error(
+            std::make_error_code(std::errc::device_or_resource_busy),
+            "random_access_file::release");
     int fd = fd_;
     fd_    = -1;
     return fd;
@@ -334,6 +340,7 @@ posix_random_access_file::assign(native_handle_type handle) noexcept
         return ec;
 
     fd_ = handle;
+    gate_.open(handle);
     return {};
 }
 
