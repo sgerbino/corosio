@@ -984,11 +984,13 @@ inline constexpr int uring_inline_budget_max     = 16;
 struct uring_run_guard
 {
     uring_scheduler_frame frame_;
+    running_scheduler_guard running_;
 
     explicit uring_run_guard(uring_scheduler const* self) noexcept
         : frame_{
               self, tl_running_scheduler_frame_, uring_inline_budget_initial,
               uring_inline_budget_max}
+        , running_(self)
     {
         tl_running_scheduler_frame_ = &frame_;
     }
