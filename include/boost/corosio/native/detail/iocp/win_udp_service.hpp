@@ -20,6 +20,7 @@
 #include <boost/corosio/detail/udp_service.hpp>
 
 #include <boost/corosio/native/detail/iocp/win_dissociate.hpp>
+#include <boost/corosio/native/detail/iocp/win_validate_handle.hpp>
 #include <boost/corosio/native/detail/iocp/win_udp_socket.hpp>
 #include <boost/corosio/native/detail/iocp/win_scheduler.hpp>
 #include <boost/corosio/native/detail/iocp/win_completion_key.hpp>
@@ -946,6 +947,9 @@ win_udp_service::assign_socket(
         return make_err(WSAEAFNOSUPPORT);
     if (proto_info.iSocketType != SOCK_DGRAM)
         return make_err(WSAEPROTOTYPE);
+
+    if (has_skip_on_success(reinterpret_cast<HANDLE>(s)))
+        return std::make_error_code(std::errc::operation_not_supported);
 
     HANDLE result = ::CreateIoCompletionPort(
         reinterpret_cast<HANDLE>(s), static_cast<HANDLE>(iocp_), key_io, 0);
