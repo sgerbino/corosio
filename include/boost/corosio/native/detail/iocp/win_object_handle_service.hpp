@@ -140,19 +140,25 @@ public:
             }
         }
 
-        state_.store(armed, std::memory_order_release);
-        // May run the rundown synchronously if the token is already
-        // stopped; that claims the op before it is ever armed.
+        // The stop callback is engaged before the wait is published, so
+        // a completion can never find it mid-construction. A stop that
+        // runs before publication finds nothing to claim; the check
+        // below claims for it.
         op_.start(token);
+        state_.store(armed, std::memory_order_release);
         {
-            // A rundown that disarmed this generation first (from a
-            // stop request on another thread) has claimed, or will
-            // claim, the op; arming now would let a later signal be
-            // consumed with nobody left to report it.
+            // A rundown that disarmed this generation first has claimed,
+            // or will claim, the op; arming now would let a later signal
+            // be consumed with nobody left to report it.
             std::lock_guard<win_mutex> lock(arm_mutex_);
             if (state_.load(std::memory_order_acquire) == armed &&
                 disarmed_gen_ != gen)
-                ::SetThreadpoolWait(tp_wait_, handle_, nullptr);
+            {
+                if (!op_.cancelled.load(std::memory_order_acquire))
+                    ::SetThreadpoolWait(tp_wait_, handle_, nullptr);
+                else if (claim(armed))
+                    sched_.on_completion(&op_, ERROR_OPERATION_ABORTED, 0);
+            }
         }
         return std::noop_coroutine();
     }
