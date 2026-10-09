@@ -1006,10 +1006,44 @@ struct delay_test
         BOOST_TEST_EQ(destroyed, 1);
     }
 
+    // A stop requested on another thread can reach a parked delay while
+    // the context tears its timers down; the two must not both claim
+    // the waiter.
+    void testStopRacingTeardown()
+    {
+        for (int round = 0; round < 200; ++round)
+        {
+            std::vector<std::stop_source> stops(8);
+            std::atomic<bool> go{false};
+            std::thread stopper;
+            {
+                io_context ioc(Backend);
+                for (auto& src : stops)
+                    capy::run_async(ioc.get_executor(), src.get_token())(
+                        []() -> capy::task<> {
+                            std::ignore =
+                                co_await corosio::delay(std::chrono::hours(1));
+                        }());
+                std::ignore = ioc.poll(); // parks every delay
+                stopper     = std::thread([&] {
+                    while (!go.load(std::memory_order_acquire))
+                    {
+                    }
+                    for (auto& src : stops)
+                        src.request_stop();
+                });
+                go.store(true, std::memory_order_release);
+            }
+            stopper.join();
+        }
+        BOOST_TEST_PASS();
+    }
+
     void run()
     {
         testDurationCompletes();
         testTeardownDrainsWorkPostedByTimerFrames();
+        testStopRacingTeardown();
         testTimePointCompletes();
         testZeroDurationCompletesImmediately();
         testPastTimePointCompletesImmediately();
