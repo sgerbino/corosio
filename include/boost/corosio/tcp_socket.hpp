@@ -488,6 +488,12 @@ public:
         operations without closing the descriptor. The caller takes
         ownership of the returned handle.
 
+        @note With the IOCP backend, a socket released while operations
+        on it are in flight stays associated with this context's
+        completion port: Windows refuses to unbind a handle with I/O
+        outstanding, so the socket cannot be assigned to another
+        context. Its cancelled operations still complete normally.
+
         @return The native handle.
 
         @throws std::system_error `errc::bad_file_descriptor` if the
