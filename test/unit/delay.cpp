@@ -956,9 +956,60 @@ struct delay_test
         }
     }
 
+    // Context teardown destroys a frame parked on a timer. Work its
+    // destructors post must still reach the scheduler's drain, which
+    // destroys it, rather than be queued after the drain and lost.
+    struct count_on_destroy
+    {
+        int* n;
+        explicit count_on_destroy(int* p) noexcept : n(p) {}
+        count_on_destroy(count_on_destroy&& o) noexcept
+            : n(std::exchange(o.n, nullptr))
+        {
+        }
+        ~count_on_destroy()
+        {
+            if (n)
+                ++*n;
+        }
+    };
+
+    static capy::task<> never_started(count_on_destroy)
+    {
+        co_return;
+    }
+
+    struct post_on_destroy
+    {
+        io_context& ioc;
+        int* destroyed;
+        ~post_on_destroy()
+        {
+            capy::run_async(ioc.get_executor())(
+                never_started(count_on_destroy(destroyed)));
+        }
+    };
+
+    void testTeardownDrainsWorkPostedByTimerFrames()
+    {
+        int destroyed = 0;
+        {
+            io_context ioc(Backend);
+            capy::run_async(ioc.get_executor())(
+                [](io_context& ioc, int* d) -> capy::task<> {
+                    post_on_destroy guard{ioc, d};
+                    std::ignore =
+                        co_await corosio::delay(std::chrono::hours(1));
+                }(ioc, &destroyed));
+            ioc.poll(); // parks on the timer
+        }
+        BOOST_TEST_EQ(destroyed, 1);
+    }
+
     void run()
     {
         testDurationCompletes();
+        testTeardownDrainsWorkPostedByTimerFrames();
         testTimePointCompletes();
         testZeroDurationCompletesImmediately();
         testPastTimePointCompletesImmediately();
