@@ -53,13 +53,6 @@ struct uring_op : coro_op
     /// data-driven (no template instantiation, no allocation).
     using prep_func_type = void (*)(uring_op*, ::io_uring_sqe*) noexcept;
 
-    /// Retired-CQE dispatcher type. Called in place of `cqe_func` once
-    /// the op is retired, so the op type can release whatever `res`
-    /// owns (an accepted descriptor, a registered buffer) that no
-    /// handler will now take delivery of.
-    using retire_func_type =
-        void (*)(uring_op*, int res, unsigned flags) noexcept;
-
     explicit uring_op(
         func_type post_func,
         cqe_func_type cqe_fn,
@@ -84,17 +77,6 @@ struct uring_op : coro_op
 
     /// Scheduler reference for submitting cancel SQEs on stop_token.
     uring_scheduler* sched_ = nullptr;
-
-    /// Set when the op's owner went away while the kernel still held
-    /// its user_data (see `uring_scheduler::retire_op`). A retired
-    /// op belongs to the scheduler: the run loop routes its CQEs to
-    /// `retire_func` instead of `cqe_func` and frees the op on the
-    /// terminal CQE.
-    bool retired = false;
-
-    /// Disposal hook used while `retired` is set. May be null when the
-    /// op's result owns nothing.
-    retire_func_type retire_func = nullptr;
 
     /// Bridge virtual dispatch to func-pointer dispatch. Lets the run
     /// loop dispatch any scheduler_op via `(*op)()` — both reactor-style

@@ -31,7 +31,6 @@
 #include <atomic>
 #include <cstdint>
 #include <coroutine>
-#include <memory>
 #include <mutex>
 #include <stop_token>
 #include <system_error>
@@ -159,7 +158,14 @@ protected:
     /// readiness lives in `ready_fds_`, not in `poll()`; the wait is
     /// completed by the next delivery instead of a kernel poll.
     accept_node* read_wait_ = nullptr;
-    std::unique_ptr<uring_multi_accept_op> multi_op_;
+    /// Ended armings, kept for the next one (guarded by `mutex_`).
+    /// Survives impl recycling like `free_nodes_`; entries hold no
+    /// reference.
+    intrusive_list<uring_multi_accept_op> free_ops_;
+    /// The arming whose deliveries belong to this acceptor (guarded by
+    /// `mutex_`). Identity only: the kernel owns the op and its
+    /// reference. Never set while `closing_` is.
+    uring_multi_accept_op* armed_ = nullptr;
     bool closing_ = false;
     /// Non-zero once an arming failed to reach the kernel (guarded by
     /// `mutex_`). Nothing will ever deliver a connection through an
@@ -167,14 +173,6 @@ protected:
     /// parking on a delivery that cannot come. Cleared by the next
     /// arming that does reach the kernel.
     int arm_err_ = 0;
-    /// Bumped whenever an arming is retired. A re-arm posted for an
-    /// earlier generation must not resubmit: `multi_op_` now names a
-    /// different op, and resubmitting a live one would alias a single
-    /// `user_data` across two kernel armings. The re-arm's check is
-    /// not atomic with its submit — a retirement landing between them
-    /// (concurrent `assign()` on another thread) can still double-arm;
-    /// closing that needs a generation-aware submit.
-    std::atomic<std::uint64_t> arm_generation_{0};
 
 private:
     // CRTP ctor private + Derived friended so the base cannot be
@@ -291,16 +289,11 @@ public:
 
     /** Recycle into the owning service's pool at zero references.
 
-        Parked connections are closed and the multishot op is handed
-        to the scheduler (or freed, if the kernel owes it nothing), so
-        the next `listen()` on the recycled impl arms a fresh op for
-        its own descriptor instead of mistaking the old one for a live
-        arming.
+        No arming can be live here: an armed op holds a reference.
     */
     void retire() noexcept override
     {
         drain_ready_fds();
-        retire_multishot();
         acceptor_svc_->pool_.recycle(static_cast<Derived*>(this));
     }
 
@@ -323,22 +316,18 @@ public:
         // shutdown without ever going through retire() first.
         drain_ready_fds();
 
-        // Break the multi_op_ → object_ref_ (object_ref) cycle and
-        // drain pending CQEs so unique_ptr<multi_op_> can free safely.
-        if (multi_op_)
-        {
-            multi_op_->object_ref_.reset();
-            sched_->drain_cqes_for(multi_op_.get());
-        }
-
         // The recycled-node storage belongs to this impl and is only
         // freed here; in-flight nodes hold an object_ref on this impl,
         // so none can still be parked or posted once the count reached
         // zero (or the pool's force-sweep ran after scheduler drain).
+        // An arming the kernel never returned is not in `free_ops_`
+        // and is deliberately leaked: the ring may still write to it.
         while (auto* n = free_nodes_.pop_front())
             delete n;
         while (auto* r = free_ready_.pop_front())
             delete r;
+        while (auto* op = free_ops_.pop_front())
+            delete op;
     }
 
     Endpoint local_endpoint() const noexcept override
@@ -363,18 +352,12 @@ public:
 
     native_handle_type release_socket() noexcept override
     {
-        // Mirror the service close() path: cancel the multishot SQE and
-        // break the multi_op_ -> object_ref_ (object_ref) cycle that
-        // start_multishot established. Without this, the cycle keeps the
-        // acceptor and its multi_op_ alive after the caller takes the fd,
-        // which LeakSanitizer reports on process exit. Caller still owns
-        // the returned fd, so we do NOT ::close it here.
+        // Mirror the service close() path, except that the caller now
+        // owns the fd.
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
             drain_waiters_only();
-            if (multi_op_)
-                multi_op_->object_ref_.reset();
+            sched_->cancel_and_flush(fd_);
         }
         int fd          = fd_;
         fd_             = -1;
@@ -398,13 +381,9 @@ public:
         by that close path (closing_ is only ever cleared by a re-listen
         on a still-live acceptor, not by close) and must be explicitly
         reset here or the next session would see this impl as still
-        shutting down. `multi_op_` is freed by `retire()` rather
-        than kept, so a fresh one is allocated the next time this impl
-        starts a multishot arming — see its comment for why keeping it
-        across reuse would leave the new session un-armed.
+        shutting down.
 
-        @pre refs_ == 0, fd closed, no op or waiter in flight,
-        multi_op_ already freed.
+        @pre refs_ == 0, fd closed, no op or waiter in flight.
     */
     void reuse() noexcept
     {
@@ -413,21 +392,25 @@ public:
         BOOST_COROSIO_ASSERT(ready_fds_.empty());
         BOOST_COROSIO_ASSERT(waiters_.empty());
         BOOST_COROSIO_ASSERT(read_wait_ == nullptr);
-        BOOST_COROSIO_ASSERT(!multi_op_);
+        BOOST_COROSIO_ASSERT(armed_ == nullptr);
         closing_ = false;
         arm_err_ = 0;
     }
 
-    /// Drain queued waiters with operation_aborted but do NOT submit
-    /// any kernel cancel for the fd. Used by service close() paths
-    /// that have already submitted (or are about to submit) the
-    /// cancel-by-fd themselves via `cancel_and_flush`.
+    /** Disown the arming and drain queued waiters with
+        operation_aborted, without submitting a kernel cancel.
+
+        Runs before the caller's cancel-by-fd: an arming admitted after
+        this sees `closing_` and is refused, and one admitted before it
+        is already in the submission queue ahead of the cancel.
+    */
     void drain_waiters_only() noexcept
     {
         intrusive_list<accept_node> drained;
         {
             std::lock_guard lk(mutex_);
             closing_ = true;
+            armed_   = nullptr;
             // Drain under the lock — the kernel cancel may not produce
             // a !more CQE before the fd is closed, so we can't rely on
             // on_accept_cqe_impl to surface operation_aborted.
@@ -558,60 +541,14 @@ public:
         return {};
     }
 
-    /** Retire the multishot op before the acceptor changes descriptor
-        or is recycled.
-
-        `cancel_and_flush` and `submit_cancel_by_fd` only submit: the
-        terminating CQE for the previous arming is still queued when
-        the caller returns. Left alone, a subsequent `start_multishot`
-        would alias one `user_data` across two kernel ops, and the
-        stale `!more` CQE would observe a cleared `closing_` and take
-        the re-arm branch.
-
-        Ownership therefore moves to the scheduler rather than being
-        drained here. Draining is a teardown-only tool — it consumes
-        CQEs without dispatching them, so on a live context it would
-        swallow unrelated ops' completions and park their coroutines
-        forever. Handing the op over keeps the normal run loop in
-        charge of every CQE, and the op stays allocated (so its
-        `user_data` stays reserved) until the kernel is done with it.
-        An op the kernel owes nothing is freed instead.
-
-        Safe with no op armed, and safe after `release_socket` left
-        `fd_` cleared with the op still in flight.
-    */
-    void retire_multishot() noexcept
-    {
-        // Every field below is read by the leader mid-dispatch, so all
-        // of it is published inside retire_op's ring_mutex_ critical
-        // section — including moving multi_op_ out, since
-        // on_accept_cqe_impl dereferences it for peer_storage. Taking
-        // the acceptor mutex_ too keeps the generation bump ordered
-        // against the re-arm path's check. Lock order is
-        // ring_mutex_ -> mutex_, the same order the dispatch path
-        // acquires them in.
-        sched_->retire_op(
-            multi_op_, [this](uring_multi_accept_op& op) noexcept {
-                std::lock_guard lk(mutex_);
-                op.object_ref_.reset();
-                op.acceptor_impl = nullptr;
-                op.on_cqe        = nullptr;
-                op.retire_func   = &uring_multi_accept_op::do_retired_cqe;
-                arm_generation_.fetch_add(1, std::memory_order_acq_rel);
-                // A failed submission or an already-delivered terminal
-                // CQE leaves the kernel owing nothing.
-                return arm_err_ == 0 && !op.terminated;
-            });
-    }
-
     /** Take over an already-listening descriptor.
 
         Clears the shutdown latch a previous release left behind and
         discards connections parked from the replaced descriptor:
         those belong to the socket the caller is handing away.
 
-        @pre `retire_multishot` has run, so no arming from a previous
-            descriptor is still in flight.
+        @pre No arming is live (`drain_waiters_only` has run if the
+            acceptor had a descriptor).
 
         @param fd The adopted descriptor.
     */
@@ -620,6 +557,7 @@ public:
         intrusive_list<ready_fd_node> stale;
         {
             std::lock_guard lk(mutex_);
+            BOOST_COROSIO_ASSERT(armed_ == nullptr);
             fd_      = fd;
             closing_ = false;
             while (auto* r = ready_fds_.pop_front())
@@ -628,52 +566,22 @@ public:
         discard_ready(stale);
     }
 
-    /** Ready an acceptor whose own descriptor is about to be armed.
-
-        The open/bind/listen path reaches `start_multishot` without
-        going through `adopt_listening_fd`, and a released acceptor may
-        be opened and listened on again. Both of the things that path
-        would otherwise inherit belong to the descriptor the caller
-        already took away: the shutdown latch, which would have every
-        connection the kernel hands back closed on arrival, and the
-        arming still owed a terminal CQE, which a fresh submission
-        would alias by `user_data`.
-    */
     /** Ready the acceptor for a listen-time arming.
 
         Returns `false` when a live arming already covers the
-        descriptor: a re-listen only changes the backlog, and retiring
-        a live arming here would leave it un-cancelled in the kernel —
-        two armings on one listener, with the retired one's deliveries
-        closed on arrival.
-
-        An arming that failed to reach the kernel is not one of those.
-        It covers nothing, so a re-listen is the caller's way back and
-        has to be allowed through.
+        descriptor: a re-listen only changes the backlog. Otherwise
+        clears the shutdown latch a released descriptor left behind and
+        discards the connections it delivered, which belong to the
+        socket the caller took away.
     */
     bool prepare_listen_arm() noexcept
     {
-        bool submitted = true;
-        {
-            std::lock_guard lk(mutex_);
-            if (multi_op_ && !closing_ && arm_err_ == 0)
-                return false;
-            // The op behind a failed arming was never handed to the
-            // ring, so no CQE is owed for it and it is still ours.
-            submitted = (arm_err_ == 0);
-        }
-        // Retiring is for an op the kernel still holds: it parks the op
-        // in the scheduler until a terminal CQE releases it. One that
-        // was never submitted would wait there for a completion that
-        // cannot come, so it is reused in place instead.
-        if (submitted)
-            retire_multishot();
         intrusive_list<ready_fd_node> stale;
         {
             std::lock_guard lk(mutex_);
+            if (armed_)
+                return false;
             closing_ = false;
-            // Deliveries queued by a released descriptor belong to
-            // the socket the caller took away, not to this listener.
             while (auto* r = ready_fds_.pop_front())
                 stale.push_back(r);
         }
@@ -681,46 +589,36 @@ public:
         return true;
     }
 
-    void start_multishot()
-    {
-        if (!multi_op_)
-        {
-            multi_op_            = std::make_unique<uring_multi_accept_op>();
-            multi_op_->listen_fd = fd_;
-            multi_op_->acceptor_impl = this;
-            multi_op_->on_cqe   = &uring_multishot_acceptor_base::on_accept_cqe;
-            multi_op_->object_ref_ = detail::object_ref(this);
-        }
-        else
-        {
-            // Reuse the existing op (re-arm path). Reset peer scratch
-            // so the kernel writes into a clean slot. listen_fd and
-            // object_ref_ are re-seeded so the op can never carry state
-            // from an arming that has since been torn down. `res` is
-            // one of those: an arming that failed to submit left
-            // -EAGAIN there, and the reader of `res` cannot tell a
-            // result the kernel wrote from one it did not.
-            multi_op_->peer_storage = sockaddr_storage{};
-            multi_op_->peer_len     = sizeof(sockaddr_storage);
-            multi_op_->res          = 0;
-            multi_op_->listen_fd    = fd_;
-            multi_op_->terminated   = false;
-            multi_op_->object_ref_  = detail::object_ref(this);
-        }
+    /** Arm a multishot accept on the current descriptor.
 
-        auto* op = multi_op_.get();
-        // Deliberately no work_started(): the multishot SQE is a persistent
-        // internal mechanism. User-visible work is tracked per-accept call.
-        // The try_ spelling is what says so: it keeps a failed submission
-        // off the scheduler's completion queue, which spends a
-        // work_finished() on everything it dispatches.
-        if (uring_try_submit_op(*sched_, op))
+        The op is handed to the kernel with a reference on this
+        acceptor; the caller must hold one. Refused when closing or
+        when an arming is already live.
+    */
+    void start_multishot() noexcept
+    {
+        uring_multi_accept_op* op;
         {
             std::lock_guard lk(mutex_);
-            arm_err_ = 0;
-            return;
+            op = free_ops_.pop_front();
         }
-        fail_arm(EAGAIN);
+        if (!op)
+        {
+            // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) — noexcept initiation path: OOM => std::terminate is the intended behavior
+            op                = new uring_multi_accept_op();
+            op->sched_        = sched_;
+            op->acceptor_impl = this;
+            op->on_cqe        = &uring_multishot_acceptor_base::on_accept_cqe;
+            op->on_end        = &uring_multishot_acceptor_base::on_arming_end;
+        }
+        op->object_ref_ = detail::object_ref(this);
+        submit_arming(op, [this, op]() noexcept {
+            if (closing_ || armed_)
+                return false;
+            armed_        = op;
+            op->listen_fd = fd_;
+            return true;
+        });
     }
 
     /** Report an arming that never reached the kernel.
@@ -920,29 +818,104 @@ public:
     }
 
 private:
-    static void
-    on_accept_cqe(void* self_ptr, int new_fd, int err, bool more) noexcept
+    /** Submit @p op as the live arming, or recycle it.
+
+        @param admit Runs under `mutex_`, itself under the ring mutex;
+            claims `armed_` for @p op and returns true, or returns
+            false to refuse.
+    */
+    template<class Admit>
+    void submit_arming(uring_multi_accept_op* op, Admit admit) noexcept
     {
-        static_cast<Derived*>(self_ptr)->on_accept_cqe_impl(new_fd, err, more);
+        op->peer_storage = sockaddr_storage{};
+        op->peer_len     = sizeof(sockaddr_storage);
+        op->res          = 0;
+        // Deliberately no work_started(): the arming is an internal
+        // mechanism; user-visible work is tracked per accept.
+        auto r = uring_try_submit_op_if(*sched_, op, [&]() noexcept {
+            std::lock_guard lk(mutex_);
+            return admit();
+        });
+        if (r == uring_guarded_submit::submitted)
+        {
+            std::lock_guard lk(mutex_);
+            arm_err_ = 0;
+            return;
+        }
+        if (r == uring_guarded_submit::sq_full)
+        {
+            {
+                std::lock_guard lk(mutex_);
+                if (armed_ == op)
+                    armed_ = nullptr;
+            }
+            fail_arm(EAGAIN);
+        }
+        recycle_arming(op);
+    }
+
+    /// Return an ended arming to `free_ops_`, then drop its reference,
+    /// which may retire this impl, after the lock.
+    void recycle_arming(uring_multi_accept_op* op) noexcept
+    {
+        auto keep = std::move(op->object_ref_);
+        std::lock_guard lk(mutex_);
+        free_ops_.push_front(op);
+    }
+
+    static void on_accept_cqe(
+        void* self_ptr,
+        uring_multi_accept_op* op,
+        int new_fd,
+        int err,
+        bool more) noexcept
+    {
+        static_cast<Derived*>(self_ptr)->on_accept_cqe_impl(
+            op, new_fd, err, more);
+    }
+
+    static void
+    on_arming_end(void* self_ptr, uring_multi_accept_op* op, bool live) noexcept
+    {
+        auto* self = static_cast<Derived*>(self_ptr);
+        if (live)
+        {
+            bool rearm;
+            {
+                std::lock_guard lk(self->mutex_);
+                rearm = self->armed_ == op && !self->closing_;
+            }
+            if (rearm)
+            {
+                // The kernel ended a live arming on its own; keep
+                // accepting with the same op and reference.
+                self->submit_arming(op, [self, op]() noexcept {
+                    return self->armed_ == op && !self->closing_;
+                });
+                return;
+            }
+        }
+        {
+            std::lock_guard lk(self->mutex_);
+            if (self->armed_ == op)
+                self->armed_ = nullptr;
+        }
+        self->recycle_arming(op);
     }
 
 protected:
-    void on_accept_cqe_impl(int new_fd, int err, bool more) noexcept
+    void on_accept_cqe_impl(
+        uring_multi_accept_op* op, int new_fd, int err, bool more) noexcept
     {
-        bool was_closing          = false;
         accept_node* matched      = nullptr;
         accept_node* claimed_peek = nullptr;
         intrusive_list<accept_node> closing_waiters;
-        // Taken while closing_ is seen clear: until a close sets it, the
-        // handle's reference is still held, so this cannot revive an
-        // impl that is already retiring.
-        detail::object_ref rearm_ref;
         {
             std::lock_guard lk(mutex_);
-            was_closing = closing_;
-            if (!more && !was_closing)
-                rearm_ref = detail::object_ref(this);
-            if (!was_closing && new_fd >= 0 && read_wait_ &&
+            // A disowned arming's deliveries belong to a descriptor
+            // this acceptor no longer has.
+            bool const stale = (op != armed_);
+            if (!stale && new_fd >= 0 && read_wait_ &&
                 !read_wait_->cancelled.exchange(
                     true, std::memory_order_acq_rel))
             {
@@ -952,11 +925,11 @@ protected:
                 claimed_peek = read_wait_;
                 read_wait_   = nullptr;
             }
-            if (was_closing)
+            if (stale)
             {
                 if (new_fd >= 0)
                     ::close(new_fd);
-                if (!more)
+                if (!more && closing_)
                 {
                     // Collect waiters to drain after the lock is released.
                     while (auto* w = waiters_.pop_front())
@@ -981,8 +954,8 @@ protected:
                 {
                     auto* node     = acquire_ready_locked();
                     node->fd       = new_fd;
-                    node->peer     = multi_op_->peer_storage;
-                    node->peer_len = multi_op_->peer_len;
+                    node->peer     = op->peer_storage;
+                    node->peer_len = op->peer_len;
                     ready_fds_.push_back(node);
                 }
             }
@@ -990,8 +963,8 @@ protected:
             {
                 auto* node     = acquire_ready_locked();
                 node->fd       = new_fd;
-                node->peer     = multi_op_->peer_storage;
-                node->peer_len = multi_op_->peer_len;
+                node->peer     = op->peer_storage;
+                node->peer_len = op->peer_len;
                 ready_fds_.push_back(node);
             }
         }
@@ -1019,8 +992,8 @@ protected:
             else if (new_fd >= 0)
             {
                 matched->accepted_fd  = new_fd;
-                matched->peer_storage = multi_op_->peer_storage;
-                matched->peer_len     = multi_op_->peer_len;
+                matched->peer_storage = op->peer_storage;
+                matched->peer_len     = op->peer_len;
             }
             matched->cancelled.store(false, std::memory_order_release);
             sched_->post(matched);
@@ -1033,59 +1006,6 @@ protected:
             w->cancelled.store(true, std::memory_order_release);
             sched_->post(w);
             sched_->work_finished(); // balance waiter's work_started
-        }
-
-        if (!more && !was_closing)
-        {
-            // Re-arm: kernel terminated multishot non-fatally.
-            struct rearm_op final : scheduler_op
-            {
-                detail::object_ref self_ref_;
-                Derived* self_;
-                std::uint64_t generation_;
-                rearm_op(
-                    detail::object_ref ref,
-                    Derived* self,
-                    std::uint64_t generation) noexcept
-                    : self_ref_(std::move(ref))
-                    , self_(self)
-                    , generation_(generation)
-                {
-                }
-
-                void operator()() override
-                {
-                    auto self_ref   = std::move(self_ref_);
-                    auto* self      = self_;
-                    auto generation = generation_;
-                    delete this;
-                    {
-                        std::lock_guard lk(self->mutex_);
-                        if (self->closing_)
-                            return;
-                        // The arming this was posted for may have been
-                        // retired by assign() in the meantime. multi_op_
-                        // then names a different, already-armed op, and
-                        // resubmitting it would alias one user_data
-                        // across two kernel armings — a use-after-free
-                        // once the first terminal CQE frees the op.
-                        if (self->arm_generation_.load(
-                                std::memory_order_acquire) != generation)
-                            return;
-                    }
-                    self->start_multishot();
-                }
-
-                void destroy() override
-                {
-                    delete this;
-                }
-            };
-            // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) — CQE handler re-arm: noexcept, OOM => std::terminate is the intended behavior
-            sched_->post(new rearm_op(
-                std::move(rearm_ref),
-                static_cast<Derived*>(this),
-                arm_generation_.load(std::memory_order_acquire)));
         }
     }
 };

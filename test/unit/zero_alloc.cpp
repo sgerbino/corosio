@@ -179,6 +179,52 @@ struct zero_alloc_test
             BOOST_TEST_EQ(alloc_count.load(std::memory_order_relaxed), 0LL);
     }
 
+    // One acceptor reopened and re-listened each cycle. On uring each
+    // listen arms a multishot accept and each close cancels it; the
+    // ended armings recycle through the acceptor once their terminal
+    // completions are reaped.
+    void listenCycle(io_context& ioc, capy::executor_ref ex, tcp_acceptor& acc)
+    {
+        BOOST_TEST(!acc.open());
+        BOOST_TEST(!acc.bind(endpoint(ipv4_address::loopback(), 0)));
+        BOOST_TEST(!acc.listen());
+        acc.close();
+        for (int i = 0; i < 4; ++i)
+        {
+            capy::run_async(ex)([]() -> capy::task<> { co_return; }());
+            ioc.restart();
+            ioc.poll();
+        }
+    }
+
+    void testListenChurnIsZeroAlloc()
+    {
+        io_context ioc(Backend);
+        auto ex = ioc.get_executor();
+        tcp_acceptor acc(ioc);
+
+        for (int i = 0; i < warmup_cycles; ++i)
+            listenCycle(ioc, ex, acc);
+
+        alloc_count.store(0, std::memory_order_relaxed);
+        alloc_armed.store(true, std::memory_order_relaxed);
+        for (int i = 0; i < measured_cycles; ++i)
+            listenCycle(ioc, ex, acc);
+        alloc_armed.store(false, std::memory_order_relaxed);
+
+        // select pays its known map node for the one fd each cycle
+        // registers; see testAcceptEchoCloseIsZeroAlloc.
+#if BOOST_COROSIO_HAS_SELECT
+        if constexpr (
+            std::is_same_v<std::decay_t<decltype(Backend)>, select_t>)
+            BOOST_TEST_EQ(
+                alloc_count.load(std::memory_order_relaxed),
+                static_cast<long long>(measured_cycles));
+        else
+#endif
+            BOOST_TEST_EQ(alloc_count.load(std::memory_order_relaxed), 0LL);
+    }
+
     // Reuse identity at the tcp_socket level: once the pool has one
     // spare impl, a construct()/destroy()/construct() sequence pops
     // and recycles that same impl both times instead of allocating.
@@ -460,6 +506,7 @@ struct zero_alloc_test
 #if BOOST_COROSIO_POSIX
         testDescriptorChurnIsZeroAlloc();
 #endif
+        testListenChurnIsZeroAlloc();
         testDelayChurnIsZeroAlloc();
         testRafChurnIsZeroAlloc();
         testServerChurnIsZeroAlloc();
