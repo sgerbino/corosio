@@ -631,13 +631,12 @@ posix_signal_service::add_signal(
         posix_signal_detail::get_signal_state();
 
     // Ensure the global self-pipe exists and this service's scheduler is
-    // watching its read end, BEFORE taking the registration locks. The
-    // reactor drain path locks the descriptor mutex and then the signal-state
-    // and service mutexes; register_signal_reader locks the descriptor mutex
-    // (via register_descriptor), so it must run holding neither of those or
-    // the lock order would invert (a real deadlock, caught by TSan). call_once
-    // makes the once-per-service registration safe when two signal_sets on
-    // this context race add() from different threads.
+    // watching its read end, BEFORE taking the registration locks:
+    // register_signal_reader takes the descriptor mutex (via
+    // register_descriptor), which no path may take while holding the
+    // signal-state or service mutexes. call_once makes the once-per-service
+    // registration safe when two signal_sets on this context race add()
+    // from different threads.
     {
         std::lock_guard state_lock(state->mutex);
         if (auto ec = posix_signal_detail::open_signal_pipe(state))
