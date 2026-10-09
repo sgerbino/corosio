@@ -18,6 +18,7 @@
 
 #if BOOST_COROSIO_HAS_URING
 
+#include <boost/corosio/delay.hpp>
 #include <boost/corosio/native/native_io_context.hpp>
 #include <boost/corosio/local_stream_socket.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
@@ -32,6 +33,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <stop_token>
 #include <thread>
 
 #include <sys/socket.h>
@@ -101,6 +105,47 @@ struct uring_mt_scheduler_test
         BOOST_TEST(resumed);
     }
 
+    // unsafe_io keeps the scheduler lock, so a foreign thread may post;
+    // the run thread blocked in the kernel must wake for it rather than
+    // sleep until the pending hour-long timer expires.
+    void testForeignPostWakesUnsafeIoRun()
+    {
+        io_context_options opts;
+        opts.locking = locking_mode::unsafe_io;
+        native_io_context<uring> ioc(opts, 1);
+        auto ex = ioc.get_executor();
+
+        std::stop_source keep;
+        capy::run_async(ex, keep.get_token())([]() -> capy::task<> {
+            std::ignore = co_await delay(std::chrono::hours(1));
+        }());
+
+        std::atomic<bool> finished{false};
+        std::thread watchdog([&] {
+            for (int i = 0; i < 300 && !finished.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (!finished.load())
+            {
+                std::fputs("unsafe_io: foreign post never woke run()\n", stderr);
+                std::abort();
+            }
+        });
+        std::thread poster([&] {
+            // Lets run() block in the kernel first; a post that lands
+            // earlier only lets the test pass without exercising the wake.
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            capy::run_async(ex)([](std::stop_source& k) -> capy::task<> {
+                k.request_stop();
+                co_return;
+            }(keep));
+        });
+
+        ioc.run();
+        finished = true;
+        poster.join();
+        watchdog.join();
+    }
+
     // With a kernel thread polling the submission queue, submitting a
     // cancel only hands it over. Closing the descriptor before that
     // thread resolves the number would leave the read armed for good.
@@ -155,6 +200,7 @@ struct uring_mt_scheduler_test
     void run()
     {
         testForeignPostWakesParkedFollower();
+        testForeignPostWakesUnsafeIoRun();
         testSqpollCloseCancelsParkedRead();
     }
 };

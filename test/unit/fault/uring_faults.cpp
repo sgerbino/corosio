@@ -1305,6 +1305,27 @@ struct uring_faults
         });
     }
 
+    // Under unsafe_io one thread runs the ring, and when it arms a timer
+    // itself it is not in a kernel wait: waking it costs a syscall per
+    // arm for nothing.
+    void testUnsafeIoRunThreadArmsWithoutWake()
+    {
+        io_context_options opts;
+        opts.locking = locking_mode::unsafe_io;
+        io_context ioc(uring, opts, 1);
+        constexpr int arms = 200;
+        capy::run_async(ioc.get_executor())([]() -> capy::task<> {
+            for (int i = 0; i < arms; ++i)
+                std::ignore =
+                    co_await corosio::delay(std::chrono::microseconds(1));
+        }());
+        // Counts this thread's writes; the call it would fail is never
+        // reached.
+        fault_scope writes(sys::write, EIO, 1u << 30);
+        ioc.run();
+        BOOST_TEST_LT(writes.count(), unsigned(arms / 10));
+    }
+
     void run()
     {
         testRingInitSqExhaustion();
@@ -1328,6 +1349,7 @@ struct uring_faults
         testErrorWaitAfterCloseSkipsProbe();
         testCloseWithFullQueueStillCancels();
         testReleaseWithFullQueueStillCancels();
+        testUnsafeIoRunThreadArmsWithoutWake();
         testAcceptorArmSqFull();
         testSqFull();
         testConnectCqeRewrite();
