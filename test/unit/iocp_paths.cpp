@@ -238,6 +238,42 @@ struct iocp_paths_test
         BOOST_TEST(lacc.assign(lacc.native_handle()) == error::already_open);
     }
 
+    // A socket in skip-on-success mode queues no packet for a
+    // synchronous success, so every adopting type must refuse it and
+    // leave it with the caller.
+    void testAssignRejectsSkipOnSuccessSockets()
+    {
+        io_context ioc(iocp);
+
+        auto skipping = [](int af, int type, int proto) {
+            SOCKET s = ::WSASocketW(
+                af, type, proto, nullptr, 0, WSA_FLAG_OVERLAPPED);
+            BOOST_TEST(s != INVALID_SOCKET);
+            BOOST_TEST(::SetFileCompletionNotificationModes(
+                reinterpret_cast<HANDLE>(s),
+                FILE_SKIP_COMPLETION_PORT_ON_SUCCESS));
+            return s;
+        };
+        auto refused = [](auto& obj, SOCKET s) {
+            BOOST_TEST(
+                obj.assign(static_cast<native_handle_type>(s)) ==
+                std::errc::operation_not_supported);
+            BOOST_TEST(!obj.is_open());
+            BOOST_TEST(::closesocket(s) == 0);
+        };
+
+        tcp_socket t(ioc);
+        refused(t, skipping(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+        tcp_acceptor ta(ioc);
+        refused(ta, skipping(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+        udp_socket u(ioc);
+        refused(u, skipping(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
+        local_stream_socket l(ioc);
+        refused(l, skipping(AF_UNIX, SOCK_STREAM, 0));
+        local_stream_acceptor la(ioc);
+        refused(la, skipping(AF_UNIX, SOCK_STREAM, 0));
+    }
+
     void testShutdownReceiveVariants()
     {
         io_context ioc(iocp);
@@ -619,6 +655,7 @@ struct iocp_paths_test
         testStopCancelsLocalStreamOps();
         testStopCancelsAcceptorWaits();
         testAssignValidation();
+        testAssignRejectsSkipOnSuccessSockets();
         testShutdownReceiveVariants();
         testZeroLengthUdpReceive();
         testResolverEmptyInputs();
