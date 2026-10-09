@@ -139,7 +139,12 @@ public:
 
         /** Synchronize file data and metadata to stable storage.
 
-            @return The error code, empty on success.
+            @note With the io_uring backend, a release that cannot queue
+        its cancellation right away returns a duplicate of the handle
+        `native_handle()` reported, and closes the original once that
+        cancellation reaches the kernel. Use the returned handle.
+
+        @return The error code, empty on success.
         */
         virtual std::error_code sync_all() noexcept = 0;
 
