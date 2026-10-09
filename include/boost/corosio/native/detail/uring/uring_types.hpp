@@ -413,6 +413,9 @@ public:
         // Flush while the fd is still open so the kernel resolves
         // pending SQEs before the caller can close and recycle the
         // number (same reasoning as close_socket).
+        // A connect completing after this belongs to the descriptor
+        // the caller takes; see close_socket().
+        conn_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
@@ -1380,6 +1383,9 @@ public:
         // Flush while the fd is still open so the kernel resolves
         // pending SQEs before the caller can close and recycle the
         // number (same reasoning as close_socket).
+        // A connect completing after this belongs to the descriptor
+        // the caller takes; see close_socket().
+        conn_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
@@ -2139,6 +2145,9 @@ public:
         // Flush while the fd is still open so the kernel resolves
         // pending SQEs before the caller can close and recycle the
         // number (same reasoning as close_socket).
+        // A connect completing after this belongs to the descriptor
+        // the caller takes; see close_socket().
+        conn_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
@@ -2783,6 +2792,9 @@ public:
         // Flush while the fd is still open so the kernel resolves
         // pending SQEs before the caller can close and recycle the
         // number (same reasoning as close_socket).
+        // A connect completing after this belongs to the descriptor
+        // the caller takes; see close_socket().
+        conn_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
