@@ -533,6 +533,12 @@ win_tcp_socket::connect(
         }
     }
 
+    // A stop before ConnectEx was issued found nothing to cancel. Must
+    // precede on_pending: once it runs another thread may complete the
+    // op and recycle this impl.
+    if (op.cancelled.load(std::memory_order_acquire))
+        ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
+
     svc_.on_pending(&op);
     return std::noop_coroutine();
 }
