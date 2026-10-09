@@ -514,6 +514,12 @@ public:
         operations without closing the descriptor. The caller takes
         ownership of the returned handle.
 
+        @note With the IOCP backend, a socket released while operations
+        on it are in flight stays bound to this context's completion
+        port for good: Windows refuses to unbind a handle with I/O
+        outstanding, so no context, this one included, can assign it
+        afterwards. Its cancelled operations still complete normally.
+
         @note With the io_uring backend, a release that cannot queue
         its cancellation right away returns a duplicate of the handle
         `native_handle()` reported, and closes the original once that
