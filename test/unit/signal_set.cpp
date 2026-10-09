@@ -15,12 +15,15 @@
 #include <boost/corosio/delay.hpp>
 
 #include <boost/capy/cond.hpp>
+#include <boost/capy/ex/io_env.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
 #include <atomic>
 #include <csignal>
 #include <chrono>
+#include <optional>
+#include <stop_token>
 #include <thread>
 #include <tuple>
 
@@ -1406,10 +1409,73 @@ struct signal_set_test
 
 #endif // BOOST_COROSIO_POSIX
 
+    // A wait that completes from an already-queued signal posts its
+    // completion. Destroying the set before that completion runs must
+    // neither lose it nor let it reach a set created afterwards.
+    void testDestroyWithQueuedSignalCompletion()
+    {
+        io_context ioc(Backend);
+        auto ex = ioc.get_executor();
+
+        // Keeps the context from running out of work between polls.
+        std::stop_source keep;
+        capy::run_async(ex, keep.get_token())([]() -> capy::task<> {
+            std::ignore = co_await corosio::delay(std::chrono::hours(1));
+        }());
+
+        int resumed = 0;
+        {
+            signal_set s(ioc, SIGINT);
+            std::raise(SIGINT);
+            ioc.restart();
+            std::ignore = ioc.poll(); // record the signal on the set
+
+            capy::run_async(ex)(
+                [](signal_set& set, int& count) -> capy::task<> {
+                    std::ignore = co_await set.wait();
+                    ++count;
+                }(s, resumed));
+            // Start the coroutine only: its wait finds the recorded
+            // signal and queues the completion.
+            ioc.restart();
+            BOOST_TEST_EQ(ioc.poll_one(), 1u);
+            BOOST_TEST_EQ(resumed, 0); // completion queued, not yet run
+        }
+
+        // A new set whose wait starts before the queued completion runs
+        // must not receive it. The wait is started on this thread, ahead
+        // of that completion in the queue.
+        int resumed2 = 0;
+        signal_set s2(ioc, SIGTERM);
+        auto waiter = [](signal_set& set, int& count) -> capy::task<> {
+            std::ignore = co_await set.wait();
+            ++count;
+        };
+        capy::io_env env{ex, std::stop_token{}, nullptr};
+        std::optional<capy::task<>> parked;
+        parked.emplace(waiter(s2, resumed2));
+        parked->await_suspend(std::noop_coroutine(), &env).resume();
+
+        ioc.restart();
+        std::ignore = ioc.poll();
+        BOOST_TEST_EQ(resumed, 1);
+        BOOST_TEST_EQ(resumed2, 0);
+        s2.cancel();
+
+        // Bounds a hang, not a timing assertion.
+        keep.request_stop();
+        ioc.restart();
+        while (ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST_EQ(resumed2, 1);
+    }
+
     void run()
     {
         // Construction and move semantics
         testConstruction();
+        testDestroyWithQueuedSignalCompletion();
         testConstructWithOneSignal();
         testConstructWithTwoSignals();
         testConstructWithThreeSignals();
