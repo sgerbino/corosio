@@ -22,6 +22,7 @@
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/corosio/detail/intrusive.hpp>
 #include <boost/corosio/native/detail/iocp/win_dissociate.hpp>
+#include <boost/corosio/native/detail/iocp/win_validate_handle.hpp>
 #include <boost/corosio/native/detail/iocp/win_wsa_init.hpp>
 #include <boost/corosio/native/detail/iocp/win_windows.hpp>
 #include <boost/corosio/native/detail/iocp/win_scheduler.hpp>
@@ -998,6 +999,9 @@ win_tcp_service::assign_socket(win_tcp_socket& impl, native_handle_type fd)
     if (proto_info.iSocketType != SOCK_STREAM)
         return make_err(WSAEPROTOTYPE);
 
+    if (has_skip_on_success(reinterpret_cast<HANDLE>(sock)))
+        return std::make_error_code(std::errc::operation_not_supported);
+
     HANDLE result = ::CreateIoCompletionPort(
         reinterpret_cast<HANDLE>(sock), static_cast<HANDLE>(iocp_), key_io, 0);
     if (result == nullptr)
@@ -1170,6 +1174,9 @@ win_tcp_service::assign_acceptor_socket(
         return make_err(WSAEAFNOSUPPORT);
     if (proto_info.iSocketType != SOCK_STREAM)
         return make_err(WSAEPROTOTYPE);
+
+    if (has_skip_on_success(reinterpret_cast<HANDLE>(sock)))
+        return std::make_error_code(std::errc::operation_not_supported);
 
     HANDLE result = ::CreateIoCompletionPort(
         reinterpret_cast<HANDLE>(sock), static_cast<HANDLE>(iocp_), key_io, 0);
