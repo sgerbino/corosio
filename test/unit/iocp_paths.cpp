@@ -41,6 +41,7 @@
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -48,6 +49,7 @@
 #include <stop_token>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include "context.hpp"
@@ -272,6 +274,56 @@ struct iocp_paths_test
         refused(l, skipping(AF_UNIX, SOCK_STREAM, 0));
         local_stream_acceptor la(ioc);
         refused(la, skipping(AF_UNIX, SOCK_STREAM, 0));
+    }
+
+    // A stop that lands while a wait is being registered with the wait
+    // reactor must still end it: the reactor may already have dropped
+    // the cancel as one for an op it never parked.
+    void testStopRacingWaitRegistration()
+    {
+        io_context ioc(iocp, 2);
+        udp_socket u(ioc);
+        BOOST_TEST(!u.open(family::v4));
+        BOOST_TEST(!u.bind(endpoint(ipv4_address::loopback(), 0)));
+
+        std::atomic<bool> quit{false};
+        std::vector<std::thread> runners;
+        for (int i = 0; i < 2; ++i)
+            runners.emplace_back([&] {
+                while (!quit.load())
+                    std::ignore = ioc.run_one_for(std::chrono::milliseconds(5));
+            });
+
+        int lost = 0;
+        for (int i = 0; i < 500; ++i)
+        {
+            std::stop_source ss;
+            std::atomic<bool> done{false};
+            capy::run_async(ioc.get_executor(), ss.get_token())(
+                [](udp_socket& u, std::atomic<bool>& d) -> capy::task<> {
+                    std::ignore = co_await u.wait(wait_type::error);
+                    d = true;
+                }(u, done));
+            ss.request_stop();
+            // Bounded only to fail rather than hang.
+            for (int k = 0; k < 400 && !done.load(); ++k)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (!done.load())
+            {
+                ++lost;
+                // The parked wait still refers to `done`: end it while
+                // this iteration's locals are alive.
+                u.close();
+                for (int k = 0; k < 400 && !done.load(); ++k)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                break;
+            }
+        }
+        BOOST_TEST_EQ(lost, 0);
+        u.close();
+        quit = true;
+        for (auto& t : runners)
+            t.join();
     }
 
     void testShutdownReceiveVariants()
@@ -656,6 +708,7 @@ struct iocp_paths_test
         testStopCancelsAcceptorWaits();
         testAssignValidation();
         testAssignRejectsSkipOnSuccessSockets();
+        testStopRacingWaitRegistration();
         testShutdownReceiveVariants();
         testZeroLengthUdpReceive();
         testResolverEmptyInputs();
