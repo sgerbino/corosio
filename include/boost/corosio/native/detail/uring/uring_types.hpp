@@ -765,6 +765,12 @@ public:
         BOOST_COROSIO_ASSERT(!wait_op_.stop_cb);
     }
 
+    /// Cancel this acceptor's readiness wait, if one is in flight.
+    void cancel_wait_op() noexcept
+    {
+        wait_op_.on_cancel();
+    }
+
     std::coroutine_handle<> accept(
         capy::continuation& cont,
         capy::executor_ref ex,
@@ -894,7 +900,7 @@ public:
             });
         for (auto* a : live)
         {
-            a->cancel();
+            a->abort_all();
             release(a);
         }
     }
@@ -1641,6 +1647,12 @@ public:
         BOOST_COROSIO_ASSERT(!wait_op_.stop_cb);
     }
 
+    /// Cancel this acceptor's readiness wait, if one is in flight.
+    void cancel_wait_op() noexcept
+    {
+        wait_op_.on_cancel();
+    }
+
     std::coroutine_handle<> accept(
         capy::continuation& cont,
         capy::executor_ref ex,
@@ -1768,7 +1780,7 @@ public:
             });
         for (auto* a : live)
         {
-            a->cancel();
+            a->abort_all();
             release(a);
         }
     }
