@@ -326,6 +326,51 @@ struct uring_faults
         BOOST_TEST_GE(waits->count(), 1u);
     }
 
+    // A connect whose success arrives after release() belongs to the
+    // descriptor the caller took away: it must not leave endpoints on
+    // the socket, which may already hold a new descriptor. The kernel's answer is rewritten to success
+    // so it lands after the release whatever the cancel did.
+    void testReleaseDuringConnect()
+    {
+        io_context ioc(uring);
+        auto ex = ioc.get_executor();
+        tcp_acceptor acc(ioc);
+        BOOST_TEST(!acc.open(family::v4));
+        BOOST_TEST(!acc.bind(endpoint(ipv4_address::loopback(), 0)));
+        BOOST_TEST(!acc.listen());
+
+        tcp_socket s(ioc);
+        BOOST_TEST(!s.open(family::v4));
+        cqe_fault_scope q(-1, IORING_OP_CONNECT, 0);
+        bool started = false;
+        bool done    = false;
+        capy::run_async(ex)(
+            [](tcp_socket& s, endpoint ep, bool& started,
+               bool& done) -> capy::task<> {
+                started     = true;
+                std::ignore = co_await s.connect(ep);
+                done        = true;
+            }(s, acc.local_endpoint(), started, done));
+        while (!started && ioc.poll_one() != 0)
+        {
+        }
+        BOOST_TEST(started);
+
+        int released = static_cast<int>(s.release());
+        // The reopened socket must not inherit the old connect's
+        // endpoints when its completion runs.
+        BOOST_TEST(!s.open(family::v4));
+        ioc.restart();
+        while (!done && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(done);
+        BOOST_TEST(q.fired());
+        BOOST_TEST(s.remote_endpoint() == endpoint{});
+        BOOST_TEST(s.local_endpoint() == endpoint{});
+        ::close(released);
+    }
+
     // Closing and destroying a listening acceptor on a live context
     // leaves the arming's terminal completion to the run loop. Waiting
     // on the ring for it instead would swallow other ops' completions;
@@ -1152,6 +1197,7 @@ struct uring_faults
         testAcceptorCloseDoesNotWaitOnRing();
         testShutdownWaitRetriesAfterEintr();
         testShutdownCancelRetriesAfterEintr();
+        testReleaseDuringConnect();
         testAcceptorArmSqFull();
         testSqFull();
         testConnectCqeRewrite();
