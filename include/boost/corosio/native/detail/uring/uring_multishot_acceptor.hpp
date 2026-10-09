@@ -365,11 +365,52 @@ public:
         return fd;
     }
 
-    void cancel() noexcept override
+    /// Abort every operation and stop accepting, for service teardown.
+    void abort_all() noexcept
     {
         drain_waiters_only();
         if (fd_ >= 0)
             sched_->submit_cancel_by_fd(fd_);
+    }
+
+    /** Cancel the pending accepts and waits.
+
+        The arming is left alone: the acceptor keeps listening, and a
+        connection that arrives meanwhile waits for the next accept.
+    */
+    void cancel() noexcept override
+    {
+        intrusive_list<accept_node> claimed;
+        {
+            std::lock_guard lk(mutex_);
+            // A waiter the stop callback already claimed belongs to it;
+            // see fail_arm().
+            intrusive_list<accept_node> keep;
+            while (auto* w = waiters_.pop_front())
+            {
+                if (!w->cancelled.exchange(true, std::memory_order_acq_rel))
+                    claimed.push_back(w);
+                else
+                    keep.push_back(w);
+            }
+            while (auto* w = keep.pop_front())
+                waiters_.push_back(w);
+            if (read_wait_ &&
+                !read_wait_->cancelled.exchange(
+                    true, std::memory_order_acq_rel))
+            {
+                claimed.push_back(read_wait_);
+                read_wait_ = nullptr;
+            }
+        }
+        while (auto* w = claimed.pop_front())
+        {
+            // The claim is also the completion status.
+            w->stop_cb.reset();
+            sched_->post(w);
+            sched_->work_finished();
+        }
+        static_cast<Derived*>(this)->cancel_wait_op();
     }
 
     /** Reset state for recycling.
