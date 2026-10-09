@@ -327,10 +327,10 @@ struct uring_faults
     }
 
     // Closing and destroying a listening acceptor on a live context
-    // hands its multishot op to the scheduler rather than draining the
-    // ring, which would swallow other ops' completions. The drain's
-    // kernel wait is the observable: it must not be reached.
-    void testAcceptorRecycleDoesNotDrain()
+    // leaves the arming's terminal completion to the run loop. Waiting
+    // on the ring for it instead would swallow other ops' completions;
+    // the kernel wait is the observable and must not be reached.
+    void testAcceptorCloseDoesNotWaitOnRing()
     {
         io_context ioc(uring);
         fault_scope f(sys::io_uring_submit_and_wait_timeout, EBADF);
@@ -931,6 +931,63 @@ struct uring_faults
         BOOST_TEST(!peer.is_open());
     }
 
+    // A multishot accept the kernel terminates on its own (F_MORE
+    // cleared, no fatal error) is re-armed, so later connections are
+    // still accepted.
+    void testMultishotRearmKeepsAccepting()
+    {
+        io_context ioc(uring);
+        auto ex = ioc.get_executor();
+
+        tcp_acceptor acc(ioc);
+        BOOST_TEST(!acc.open(family::v4));
+        BOOST_TEST(!acc.bind(endpoint(ipv4_address::loopback(), 0)));
+        cqe_fault_scope q(-1, IORING_OP_ACCEPT, -EAGAIN, IORING_CQE_F_MORE);
+        BOOST_TEST(!acc.listen());
+
+        sockaddr_in sa{};
+        sa.sin_family      = AF_INET;
+        sa.sin_port        = htons(acc.local_endpoint().port());
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        auto connect_raw   = [&] {
+            int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            BOOST_TEST_EQ(
+                ::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)), 0);
+            return fd;
+        };
+
+        // The first connection provokes the rewritten terminal CQE.
+        int c1 = connect_raw();
+        for (int i = 0; i < 10000 && !q.fired(); ++i)
+        {
+            capy::run_async(ex)([]() -> capy::task<> { co_return; }());
+            ioc.restart();
+            ioc.poll();
+        }
+        BOOST_TEST(q.fired());
+
+        int c2 = connect_raw();
+        tcp_socket peer(ioc);
+        bool accepted = false;
+        capy::run_async(ex)(
+            [](tcp_acceptor& a, tcp_socket& p, bool& done) -> capy::task<> {
+                auto [ec] = co_await a.accept(p);
+                done      = !ec;
+            }(acc, peer, accepted));
+        ioc.restart();
+        std::ignore = ioc.run_for(std::chrono::seconds(2));
+        if (!accepted)
+        {
+            acc.close();
+            ioc.restart();
+            ioc.run();
+        }
+        BOOST_TEST(accepted);
+
+        ::close(c1);
+        ::close(c2);
+    }
+
     // A multishot accept the kernel terminates (F_MORE cleared, no
     // fatal error) is re-armed; a re-arm that cannot get an SQE must
     // drain the parked waiters with the error rather than strand them.
@@ -1081,6 +1138,7 @@ struct uring_faults
         testRingInitSqExhaustion();
         testCancelSqFullBestEffort();
         testMultishotArmFailure();
+        testMultishotRearmKeepsAccepting();
         testMultishotRearmFailureWithWaiter();
         testWakeupPollRearm();
         testSignalPipePollRearm();
@@ -1091,7 +1149,7 @@ struct uring_faults
         testAcceptorAssignProbeFails();
         testCancelSqFull();
         testWaitFails();
-        testAcceptorRecycleDoesNotDrain();
+        testAcceptorCloseDoesNotWaitOnRing();
         testShutdownWaitRetriesAfterEintr();
         testShutdownCancelRetriesAfterEintr();
         testAcceptorArmSqFull();
