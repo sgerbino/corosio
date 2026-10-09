@@ -169,7 +169,6 @@ public:
         random_access_file& f_;
         std::uint64_t offset_;
         MutableBufferSequence buffers_;
-        mutable capy::continuation cont_;
 
         read_some_at_awaitable(
             random_access_file& f,
@@ -185,14 +184,13 @@ public:
         }
 
         std::coroutine_handle<>
-        dispatch(std::coroutine_handle<> h, capy::executor_ref ex) const
+        dispatch(capy::continuation& cont, capy::executor_ref ex) const
         {
             // The continuation lives in the awaiting frame, which stays
             // put until resumption -- unlike the per-call op, which is
             // freed before the coroutine runs.
-            cont_.h = h;
             return f_.get().read_some_at(
-                offset_, cont_, ex, buffers_, this->token_, &this->ec_,
+                offset_, cont, ex, buffers_, this->token_, &this->ec_,
                 &this->bytes_);
         }
     };
@@ -210,7 +208,6 @@ public:
         random_access_file& f_;
         std::uint64_t offset_;
         ConstBufferSequence buffers_;
-        mutable capy::continuation cont_;
 
         write_some_at_awaitable(
             random_access_file& f,
@@ -226,11 +223,10 @@ public:
         }
 
         std::coroutine_handle<>
-        dispatch(std::coroutine_handle<> h, capy::executor_ref ex) const
+        dispatch(capy::continuation& cont, capy::executor_ref ex) const
         {
-            cont_.h = h;
             return f_.get().write_some_at(
-                offset_, cont_, ex, buffers_, this->token_, &this->ec_,
+                offset_, cont, ex, buffers_, this->token_, &this->ec_,
                 &this->bytes_);
         }
     };

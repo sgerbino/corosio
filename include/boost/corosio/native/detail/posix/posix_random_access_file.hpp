@@ -105,10 +105,6 @@ public:
         // Raw back-pointer for the typed work; `object_ref_` is the keepalive.
         posix_random_access_file* file_ = nullptr;
 
-        // The awaitable's, not the embedded `cont`: this op is freed
-        // before the coroutine resumes.
-        capy::continuation* awaiting = nullptr;
-
         void operator()() override;
         void destroy() override;
 
@@ -363,7 +359,7 @@ posix_random_access_file::raf_op::operator()()
     // keepalive drops after the push so a final release never runs
     // under ops_mutex_.
     auto keep = std::move(object_ref_);
-    auto* c   = awaiting;
+    auto* c   = cont;
     auto exec = ex;
     {
         std::lock_guard<std::mutex> lock(file_->ops_mutex_);

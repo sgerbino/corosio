@@ -31,6 +31,8 @@
 #include <system_error>
 
 #include <concepts>
+#include <boost/capy/continuation.hpp>
+
 #include <coroutine>
 #include <cstddef>
 #include <stop_token>
@@ -81,9 +83,9 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         wait_type w_;
 
         std::coroutine_handle<>
-        dispatch(std::coroutine_handle<> h, capy::executor_ref ex) const
+        dispatch(capy::continuation& cont, capy::executor_ref ex) const
         {
-            return acc_.get().wait(h, ex, w_, token_, &ec_);
+            return acc_.get().wait(cont, ex, w_, token_, &ec_);
         }
     };
 
@@ -104,10 +106,10 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         }
 
         std::coroutine_handle<>
-        dispatch(std::coroutine_handle<> h, capy::executor_ref ex) const
+        dispatch(capy::continuation& cont, capy::executor_ref ex) const
         {
             return acc_.get().accept(
-                h, ex, this->token_, &this->ec_, &peer_impl_);
+                cont, ex, this->token_, &this->ec_, &peer_impl_);
         }
 
     public:
@@ -133,10 +135,10 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
         }
 
         std::coroutine_handle<>
-        dispatch(std::coroutine_handle<> h, capy::executor_ref ex) const
+        dispatch(capy::continuation& cont, capy::executor_ref ex) const
         {
             return acc_.get().accept(
-                h, ex, this->token_, &this->ec_, &peer_impl_);
+                cont, ex, this->token_, &this->ec_, &peer_impl_);
         }
 
     public:
@@ -608,7 +610,8 @@ public:
     {
         /** Initiate an asynchronous accept operation.
 
-            @param h Coroutine handle to resume on completion.
+            @param cont Continuation to resume on completion; it lives in
+                the awaiting frame until then.
             @param ex Executor for dispatching the completion.
             @param token Stop token for cancellation.
             @param ec Output error code.
@@ -617,7 +620,7 @@ public:
             @return Coroutine handle to resume immediately.
         */
         virtual std::coroutine_handle<> accept(
-            std::coroutine_handle<> h,
+            capy::continuation& cont,
             capy::executor_ref ex,
             std::stop_token token,
             std::error_code* ec,
@@ -630,7 +633,8 @@ public:
             for an incoming connection), or an error condition is
             reported. No connection is consumed.
 
-            @param h Coroutine handle to resume on completion.
+            @param cont Continuation to resume on completion; it lives in
+                the awaiting frame until then.
             @param ex Executor for dispatching the completion.
             @param w The direction to wait on.
             @param token Stop token for cancellation.
@@ -639,7 +643,7 @@ public:
             @return Coroutine handle to resume immediately.
         */
         virtual std::coroutine_handle<> wait(
-            std::coroutine_handle<> h,
+            capy::continuation& cont,
             capy::executor_ref ex,
             wait_type w,
             std::stop_token token,

@@ -187,8 +187,7 @@ posix_random_access_file::read_some_at(
         op->iovecs[i].iov_len  = bufs[i].size();
     }
 
-    op->h           = cont.h;
-    op->awaiting    = &cont;
+    op->cont        = &cont;
     op->ex          = ex;
     op->ec_out      = ec;
     op->bytes_out   = bytes_out;
@@ -260,8 +259,7 @@ posix_random_access_file::write_some_at(
         op->iovecs[i].iov_len  = bufs[i].size();
     }
 
-    op->h           = cont.h;
-    op->awaiting    = &cont;
+    op->cont        = &cont;
     op->ex          = ex;
     op->ec_out      = ec;
     op->bytes_out   = bytes_out;
