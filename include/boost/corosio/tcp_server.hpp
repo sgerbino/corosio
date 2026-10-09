@@ -27,8 +27,10 @@
 #include <boost/capy/ex/io_env.hpp>
 #include <boost/capy/ex/run_async.hpp>
 
+#include <atomic>
 #include <coroutine>
 #include <memory>
+#include <mutex>
 #include <ranges>
 #include <vector>
 
@@ -101,73 +103,161 @@ private:
     struct waiter
     {
         waiter* next;
-        std::coroutine_handle<> h;
         capy::continuation cont;
         worker_base* w;
     };
 
     struct impl;
 
-    static impl* make_impl(capy::execution_context& ctx);
+    /** Everything the server's coroutines reach.
 
-    impl* impl_;
-    capy::any_executor ex_;
-    waiter* waiters_        = nullptr;
-    worker_base* idle_head_ = nullptr; // Forward list: available workers
-    worker_base* active_head_ =
-        nullptr; // Doubly linked: workers handling connections
-    worker_base* active_tail_   = nullptr; // Tail for O(1) push_back
-    std::size_t active_accepts_ = 0; // Number of active do_accept coroutines
-    std::shared_ptr<void> storage_;  // Owns the worker container (type-erased)
-    bool running_ = false;
-
-    // Idle list (forward/singly linked) - push front, pop front
-    void idle_push(worker_base* w) noexcept
+        Accept loops, launch wrappers and launchers each hold a
+        reference, so moving or destroying the server never strands
+        them. The lists are guarded by `mutex`, because workers return
+        from whichever thread their coroutine finished on.
+    */
+    struct state
     {
-        w->next_   = idle_head_;
-        idle_head_ = w;
+        std::atomic<std::size_t> refs{1};
+        impl* impl_;
+        capy::any_executor ex;
+        std::mutex mutex;
+        waiter* waiters         = nullptr;
+        worker_base* idle_head  = nullptr; // forward list
+        worker_base* active_head = nullptr; // doubly linked
+        worker_base* active_tail = nullptr;
+        std::size_t active_accepts = 0; // guarded by the join mutex
+        std::shared_ptr<void> storage;  // owns the worker container
+        bool running = false;
+        // Set once the server object is gone; each accept loop then
+        // closes its own listener as it ends.
+        bool discarded = false; // guarded by mutex
+
+        state(impl* i, capy::any_executor const& e) noexcept
+            : impl_(i)
+            , ex(e)
+        {
+        }
+
+        // The list operations below require `mutex`.
+
+        void idle_push(worker_base* w) noexcept
+        {
+            w->next_  = idle_head;
+            idle_head = w;
+        }
+
+        worker_base* idle_pop() noexcept
+        {
+            auto* w = idle_head;
+            if (w)
+                idle_head = w->next_;
+            return w;
+        }
+
+        void active_push(worker_base* w) noexcept
+        {
+            w->next_ = nullptr;
+            w->prev_ = active_tail;
+            if (active_tail)
+                active_tail->next_ = w;
+            else
+                active_head = w;
+            active_tail = w;
+        }
+
+        void active_remove(worker_base* w) noexcept
+        {
+            // Skip if not in active list (e.g., after failed accept)
+            if (w != active_head && w->prev_ == nullptr)
+                return;
+            if (w->prev_)
+                w->prev_->next_ = w->next_;
+            else
+                active_head = w->next_;
+            if (w->next_)
+                w->next_->prev_ = w->prev_;
+            else
+                active_tail = w->prev_;
+            w->prev_ = nullptr; // Mark as not in active list
+        }
+
+        /// Return @p w to the pool, handing it to a waiting accept loop
+        /// if there is one.
+        void push(worker_base& w) noexcept
+        {
+            waiter* wake = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                active_remove(&w);
+                if (waiters)
+                {
+                    wake    = waiters;
+                    waiters = wake->next;
+                    wake->w = &w;
+                }
+                else
+                {
+                    idle_push(&w);
+                }
+            }
+            if (wake)
+                ex.post(wake->cont);
+        }
+    };
+
+    /// Add a reference to @p s.
+    static void add_ref(state* s) noexcept
+    {
+        s->refs.fetch_add(1, std::memory_order_relaxed);
     }
 
-    worker_base* idle_pop() noexcept
-    {
-        auto* w = idle_head_;
-        if (w)
-            idle_head_ = w->next_;
-        return w;
-    }
+    /// Drop a reference to @p s, freeing it with the last one.
+    static void release(state* s) noexcept;
 
-    bool idle_empty() const noexcept
+    /// An owned reference to the server's state.
+    class state_ref
     {
-        return idle_head_ == nullptr;
-    }
+        state* p_ = nullptr;
 
-    // Active list (doubly linked) - push back, remove anywhere
-    void active_push(worker_base* w) noexcept
-    {
-        w->next_ = nullptr;
-        w->prev_ = active_tail_;
-        if (active_tail_)
-            active_tail_->next_ = w;
-        else
-            active_head_ = w;
-        active_tail_ = w;
-    }
+    public:
+        explicit state_ref(state* p) noexcept : p_(p)
+        {
+            add_ref(p_);
+        }
 
-    void active_remove(worker_base* w) noexcept
-    {
-        // Skip if not in active list (e.g., after failed accept)
-        if (w != active_head_ && w->prev_ == nullptr)
-            return;
-        if (w->prev_)
-            w->prev_->next_ = w->next_;
-        else
-            active_head_ = w->next_;
-        if (w->next_)
-            w->next_->prev_ = w->prev_;
-        else
-            active_tail_ = w->prev_;
-        w->prev_ = nullptr; // Mark as not in active list
-    }
+        state_ref(state_ref const& o) noexcept : p_(o.p_)
+        {
+            if (p_)
+                add_ref(p_);
+        }
+
+        state_ref(state_ref&& o) noexcept : p_(std::exchange(o.p_, nullptr)) {}
+
+        state_ref& operator=(state_ref const&) = delete;
+        state_ref& operator=(state_ref&&)      = delete;
+
+        ~state_ref()
+        {
+            if (p_)
+                release(p_);
+        }
+
+        state* operator->() const noexcept
+        {
+            return p_;
+        }
+
+        state& operator*() const noexcept
+        {
+            return *p_;
+        }
+    };
+
+    static state*
+    make_state(capy::execution_context& ctx, capy::any_executor const& ex);
+
+    state* st_;
 
     template<capy::Executor Ex>
     struct launch_wrapper
@@ -286,25 +376,25 @@ private:
         launch_wrapper<Executor> operator()(
             Executor,
             std::stop_token,
-            tcp_server* self,
+            state_ref st,
             capy::task<void> t,
             worker_base* wp)
         {
             // Executor and stop token stored in promise via constructor
             co_await std::move(t);
-            co_await self->push(*wp); // worker goes back to idle list
+            co_await push_awaitable{*st, *wp}; // worker back to the pool
         }
     };
 
     class push_awaitable
     {
-        tcp_server& self_;
+        state& st_;
         worker_base& w_;
         capy::continuation cont_;
 
     public:
-        push_awaitable(tcp_server& self, worker_base& w) noexcept
-            : self_(self)
+        push_awaitable(state& st, worker_base& w) noexcept
+            : st_(st)
             , w_(w)
         {
         }
@@ -319,92 +409,54 @@ private:
         {
             // Symmetric transfer to server's executor
             cont_.h = h;
-            return self_.ex_.dispatch(cont_);
+            return st_.ex.dispatch(cont_);
         }
 
         void await_resume() noexcept
         {
-            // Running on server executor - safe to modify lists
-            // Remove from active (if present), then wake waiter or add to idle
-            self_.active_remove(&w_);
-            if (self_.waiters_)
-            {
-                auto* wait     = self_.waiters_;
-                self_.waiters_ = wait->next;
-                wait->w        = &w_;
-                wait->cont.h   = wait->h;
-                self_.ex_.post(wait->cont);
-            }
-            else
-            {
-                self_.idle_push(&w_);
-            }
+            st_.push(w_);
         }
     };
 
     class pop_awaitable
     {
-        tcp_server& self_;
+        state& st_;
         waiter wait_;
 
     public:
-        pop_awaitable(tcp_server& self) noexcept : self_(self), wait_{} {}
+        pop_awaitable(state& st) noexcept : st_(st), wait_{} {}
 
         bool await_ready() const noexcept
         {
-            return !self_.idle_empty();
+            return false;
         }
 
         bool
         await_suspend(std::coroutine_handle<> h, capy::io_env const*) noexcept
         {
-            // Running on server executor (do_accept runs there)
-            wait_.h        = h;
-            wait_.w        = nullptr;
-            wait_.next     = self_.waiters_;
-            self_.waiters_ = &wait_;
+            std::lock_guard<std::mutex> lock(st_.mutex);
+            if (auto* w = st_.idle_pop())
+            {
+                wait_.w = w;
+                return false;
+            }
+            wait_.cont.h = h;
+            wait_.w      = nullptr;
+            wait_.next   = st_.waiters;
+            st_.waiters  = &wait_;
             return true;
         }
 
         worker_base& await_resume() noexcept
         {
-            // Running on server executor
-            if (wait_.w)
-                return *wait_.w; // Woken by push_awaitable
-            return *self_.idle_pop();
+            // Set by await_suspend, or by the push that woke us.
+            return *wait_.w;
         }
     };
 
-    push_awaitable push(worker_base& w)
-    {
-        return push_awaitable{*this, w};
-    }
+    static capy::task<void> do_accept(state_ref st, tcp_acceptor& acc);
+    static capy::task<> do_stop(state_ref st);
 
-    // Synchronous version for destructor/guard paths
-    // Must be called from server executor context
-    void push_sync(worker_base& w) noexcept
-    {
-        active_remove(&w);
-        if (waiters_)
-        {
-            auto* wait   = waiters_;
-            waiters_     = wait->next;
-            wait->w      = &w;
-            wait->cont.h = wait->h;
-            ex_.post(wait->cont);
-        }
-        else
-        {
-            idle_push(&w);
-        }
-    }
-
-    pop_awaitable pop()
-    {
-        return pop_awaitable{*this};
-    }
-
-    capy::task<void> do_accept(tcp_acceptor& acc);
 
 public:
     /** Handles one accepted connection using a socket the derived class owns.
@@ -463,13 +515,14 @@ public:
     */
     class BOOST_COROSIO_DECL launcher
     {
-        tcp_server* srv_;
+        state* st_;
         worker_base* w_;
 
         friend class tcp_server;
 
-        launcher(tcp_server& srv, worker_base& w) noexcept : srv_(&srv), w_(&w)
+        launcher(state& st, worker_base& w) noexcept : st_(&st), w_(&w)
         {
+            add_ref(st_);
         }
 
     public:
@@ -477,7 +530,9 @@ public:
         ~launcher()
         {
             if (w_)
-                srv_->push_sync(*w_);
+                st_->push(*w_);
+            if (st_)
+                release(st_);
         }
 
         /** Move construct, transferring the borrowed worker.
@@ -486,7 +541,7 @@ public:
             holding none, so only one of the two returns it.
         */
         launcher(launcher&& o) noexcept
-            : srv_(o.srv_)
+            : st_(std::exchange(o.st_, nullptr))
             , w_(std::exchange(o.w_, nullptr))
         {
         }
@@ -519,19 +574,22 @@ public:
             auto* w = std::exchange(w_, nullptr);
 
             // Worker is being dispatched - add to active list
-            srv_->active_push(w);
+            {
+                std::lock_guard<std::mutex> lock(st_->mutex);
+                st_->active_push(w);
+            }
 
             // Return worker to pool if coroutine setup throws
             struct guard_t
             {
-                tcp_server* srv;
+                state* st;
                 worker_base* w;
                 ~guard_t()
                 {
                     if (w)
-                        srv->push_sync(*w);
+                        st->push(*w);
                 }
-            } guard{srv_, w};
+            } guard{st_, w};
 
             // A stop_source allocates shared state on construction;
             // reuse the worker's across connections and replace it
@@ -541,8 +599,8 @@ public:
                 w->stop_ = {};
             auto st = w->stop_.get_token();
 
-            auto wrapper =
-                launch_coro<Executor>{}(ex, st, srv_, std::move(task), w);
+            auto wrapper = launch_coro<Executor>{}(
+                ex, st, state_ref(st_), std::move(task), w);
 
             // Executor and stop token stored in promise via
             // constructor. Post through the frame-embedded
@@ -568,13 +626,22 @@ public:
         @par !example tcp_server
     */
     template<capy::ExecutionContext Ctx, capy::Executor Ex>
-    tcp_server(Ctx& ctx, Ex ex) : impl_(make_impl(ctx))
-                                , ex_(std::move(ex))
+    tcp_server(Ctx& ctx, Ex ex)
+        : st_(make_state(ctx, capy::any_executor(std::move(ex))))
     {
     }
 
 public:
-    /// Destroy the server, stopping all accept loops.
+    /** Destroy the server, stopping it.
+
+        A running server is stopped and its listeners closed, so its
+        accept loops end. The loops and any active workers finish on
+        the server's executor without reaching the destroyed object;
+        the workers stay alive until they do.
+
+        @par Thread Safety
+        Not thread safe.
+    */
     ~tcp_server();
 
     /// Copy construction is disabled; the server owns its worker storage.
@@ -632,19 +699,21 @@ public:
             worker_base*>
     void set_workers(Range&& workers)
     {
-        // Clear existing state
-        storage_.reset();
-        idle_head_   = nullptr;
-        active_head_ = nullptr;
-        active_tail_ = nullptr;
-
         // Take ownership and populate idle list
         using StorageType = std::decay_t<Range>;
         auto* p           = new StorageType(std::forward<Range>(workers));
-        storage_          = std::shared_ptr<void>(
+        std::shared_ptr<void> storage(
             p, [](void* ptr) { delete static_cast<StorageType*>(ptr); });
-        for (auto&& elem : *static_cast<StorageType*>(p))
-            idle_push(std::to_address(elem));
+
+        // The previous workers are released after the lock.
+        std::shared_ptr<void> previous;
+        std::lock_guard<std::mutex> lock(st_->mutex);
+        st_->idle_head   = nullptr;
+        st_->active_head = nullptr;
+        st_->active_tail = nullptr;
+        previous         = std::exchange(st_->storage, std::move(storage));
+        for (auto&& elem : *p)
+            st_->idle_push(std::to_address(elem));
     }
 
     /** Start accepting connections.
@@ -715,7 +784,8 @@ public:
         After calling `stop()`:
         1. Let `ioc.run()` return (drains pending completions).
         2. Call @ref join to wait for accept loops to finish.
-        3. Only then is it safe to restart or destroy the server.
+        3. Only then may the server be restarted. It may be destroyed at
+           any time; see @ref ~tcp_server.
 
         @par Thread Safety
         Not thread safe.
@@ -754,7 +824,7 @@ public:
     void join();
 
 private:
-    capy::task<> do_stop();
+    void discard() noexcept;
 };
 
 #ifdef _MSC_VER

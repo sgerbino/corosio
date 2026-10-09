@@ -30,49 +30,68 @@ struct tcp_server::impl
     explicit impl(capy::execution_context& c) noexcept : ctx(c) {}
 };
 
-tcp_server::impl*
-tcp_server::make_impl(capy::execution_context& ctx)
+tcp_server::state*
+tcp_server::make_state(capy::execution_context& ctx, capy::any_executor const& ex)
 {
-    return new impl(ctx);
+    auto* i = new impl(ctx);
+    try
+    {
+        return new state(i, ex);
+    }
+    catch (...)
+    {
+        delete i;
+        throw;
+    }
+}
+
+void
+tcp_server::release(state* s) noexcept
+{
+    if (s->refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+    {
+        delete s->impl_;
+        delete s;
+    }
+}
+
+void
+tcp_server::discard() noexcept
+{
+    if (!st_)
+        return;
+    stop();
+    {
+        std::lock_guard<std::mutex> lock(st_->mutex);
+        st_->discarded = true;
+    }
+    release(std::exchange(st_, nullptr));
 }
 
 tcp_server::~tcp_server()
 {
-    delete impl_;
+    discard();
 }
 
 tcp_server::tcp_server(tcp_server&& o) noexcept
-    : impl_(std::exchange(o.impl_, nullptr))
-    , ex_(o.ex_)
-    , waiters_(std::exchange(o.waiters_, nullptr))
-    , idle_head_(std::exchange(o.idle_head_, nullptr))
-    , active_head_(std::exchange(o.active_head_, nullptr))
-    , active_tail_(std::exchange(o.active_tail_, nullptr))
-    , active_accepts_(std::exchange(o.active_accepts_, 0))
-    , storage_(std::move(o.storage_))
-    , running_(std::exchange(o.running_, false))
+    : st_(std::exchange(o.st_, nullptr))
 {
 }
 
 tcp_server&
 tcp_server::operator=(tcp_server&& o) noexcept
 {
-    delete impl_;
-    impl_           = std::exchange(o.impl_, nullptr);
-    ex_             = o.ex_;
-    waiters_        = std::exchange(o.waiters_, nullptr);
-    idle_head_      = std::exchange(o.idle_head_, nullptr);
-    active_head_    = std::exchange(o.active_head_, nullptr);
-    active_tail_    = std::exchange(o.active_tail_, nullptr);
-    active_accepts_ = std::exchange(o.active_accepts_, 0);
-    storage_        = std::move(o.storage_);
-    running_        = std::exchange(o.running_, false);
+    if (this != &o)
+    {
+        discard();
+        st_ = std::exchange(o.st_, nullptr);
+    }
     return *this;
 }
 
 // Accept loop: wait for idle worker, accept connection, dispatch
 capy::task<void>
-tcp_server::do_accept(tcp_acceptor& acc)
+tcp_server::do_accept(state_ref st, tcp_acceptor& acc)
 {
     // Analyzer can't trace value through coroutine await_transform
     // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.UndefReturn)
@@ -80,15 +99,25 @@ tcp_server::do_accept(tcp_acceptor& acc)
     while (!env->stop_token.stop_requested())
     {
         // Wait for an idle worker before blocking on accept
-        auto& w   = co_await pop();
+        auto& w   = co_await pop_awaitable{*st};
         auto [ec] = co_await acc.accept(w.socket());
         if (ec)
         {
-            co_await push(w);
+            co_await push_awaitable{*st, w};
             continue;
         }
-        w.run(launcher{*this, w});
+        w.run(launcher{*st, w});
     }
+
+    // Closed here rather than by the departing server: the loop is the
+    // listener's only user, so the close cannot race its operations.
+    bool discarded = false;
+    {
+        std::lock_guard<std::mutex> lock(st->mutex);
+        discarded = st->discarded;
+    }
+    if (discarded)
+        acc.close();
 }
 
 std::error_code
@@ -96,7 +125,7 @@ tcp_server::bind(endpoint ep)
 {
     try
     {
-        impl_->ports.emplace_back(impl_->ctx, ep);
+        st_->impl_->ports.emplace_back(st_->impl_->ctx, ep);
         return {};
     }
     catch (std::system_error const& e)
@@ -108,68 +137,78 @@ tcp_server::bind(endpoint ep)
 endpoint
 tcp_server::local_endpoint(std::size_t index) const noexcept
 {
-    if (index >= impl_->ports.size())
+    if (!st_ || index >= st_->impl_->ports.size())
         return endpoint{};
-    return impl_->ports[index].local_endpoint();
+    return st_->impl_->ports[index].local_endpoint();
 }
 
 void
 tcp_server::start()
 {
     // Idempotent - only start if not already running
-    if (running_)
+    if (st_->running)
         return;
 
-    // Previous session must be fully stopped before restart
-    if (active_accepts_ != 0)
-        detail::throw_logic_error(
-            "tcp_server::start: previous session not joined");
+    auto& im = *st_->impl_;
+    {
+        // Previous session must be fully stopped before restart
+        std::lock_guard lock(im.join_mutex);
+        if (st_->active_accepts != 0)
+            detail::throw_logic_error(
+                "tcp_server::start: previous session not joined");
+        st_->active_accepts = im.ports.size();
+    }
 
-    running_ = true;
-
-    impl_->stop = {}; // Fresh stop source
-    auto st     = impl_->stop.get_token();
-
-    active_accepts_ = impl_->ports.size();
+    st_->running = true;
+    im.stop      = {}; // Fresh stop source
+    auto token   = im.stop.get_token();
 
     // Launch with completion handler that decrements counter
-    for (auto& t : impl_->ports)
-        capy::run_async(ex_, st, [this]() {
-            std::lock_guard lock(impl_->join_mutex);
-            if (--active_accepts_ == 0)
-                impl_->join_cv.notify_all();
-        })(do_accept(t));
+    for (auto& t : im.ports)
+        capy::run_async(st_->ex, token, [st = state_ref(st_)]() {
+            auto& im = *st->impl_;
+            std::lock_guard lock(im.join_mutex);
+            if (--st->active_accepts == 0)
+                im.join_cv.notify_all();
+        })(do_accept(state_ref(st_), t));
 }
 
 void
 tcp_server::stop()
 {
     // Idempotent - only stop if running
-    if (!running_)
+    if (!st_ || !st_->running)
         return;
-    running_ = false;
+    st_->running = false;
 
     // Stop accept loops
-    impl_->stop.request_stop();
+    st_->impl_->stop.request_stop();
 
     // Launch cancellation coroutine on server executor
-    capy::run_async(ex_, std::stop_token{})(do_stop());
+    capy::run_async(st_->ex, std::stop_token{})(do_stop(state_ref(st_)));
 }
 
 void
 tcp_server::join()
 {
-    std::unique_lock lock(impl_->join_mutex);
-    impl_->join_cv.wait(lock, [this] { return active_accepts_ == 0; });
+    auto& im = *st_->impl_;
+    std::unique_lock lock(im.join_mutex);
+    im.join_cv.wait(lock, [this] { return st_->active_accepts == 0; });
 }
 
 capy::task<>
-tcp_server::do_stop()
+tcp_server::do_stop(state_ref st)
 {
-    // Running on server executor - safe to iterate active list
-    // Just cancel, don't modify list - workers return themselves when done
-    for (auto* w = active_head_; w; w = w->next_)
-        w->stop_.request_stop();
+    // Requested outside the lock: a stop callback may return its worker,
+    // which takes the lock.
+    std::vector<std::stop_source> active;
+    {
+        std::lock_guard<std::mutex> lock(st->mutex);
+        for (auto* w = st->active_head; w; w = w->next_)
+            active.push_back(w->stop_);
+    }
+    for (auto& s : active)
+        s.request_stop();
     co_return;
 }
 
