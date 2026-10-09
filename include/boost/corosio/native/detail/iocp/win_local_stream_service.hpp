@@ -425,11 +425,12 @@ win_local_stream_socket::connect(
         }
     }
 
-    svc_.on_pending(&op);
-
-    // Re-check cancellation after I/O is pending
+    // Must precede on_pending: once it runs another thread may
+    // complete the op and recycle this impl.
     if (op.cancelled.load(std::memory_order_acquire))
         ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
+
+    svc_.on_pending(&op);
 
     return std::noop_coroutine();
 }
@@ -497,10 +498,12 @@ win_local_stream_socket::read_some(
         }
     }
 
-    svc_.on_pending(&op);
-
+    // Must precede on_pending: once it runs another thread may
+    // complete the op and recycle this impl.
     if (op.cancelled.load(std::memory_order_acquire))
         ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
+
+    svc_.on_pending(&op);
 
     return std::noop_coroutine();
 }
@@ -564,10 +567,12 @@ win_local_stream_socket::write_some(
         }
     }
 
-    svc_.on_pending(&op);
-
+    // Must precede on_pending: once it runs another thread may
+    // complete the op and recycle this impl.
     if (op.cancelled.load(std::memory_order_acquire))
         ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
+
+    svc_.on_pending(&op);
 
     return std::noop_coroutine();
 }
@@ -622,10 +627,12 @@ win_local_stream_socket::wait(
             }
         }
 
-        svc_.on_pending(&op);
-
+        // Must precede on_pending: once it runs another thread may
+        // complete the op and recycle this impl.
         if (op.cancelled.load(std::memory_order_acquire))
             ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
+
+        svc_.on_pending(&op);
 
         return std::noop_coroutine();
     }
