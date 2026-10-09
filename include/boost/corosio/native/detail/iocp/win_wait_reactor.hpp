@@ -594,16 +594,25 @@ win_wait_reactor::run()
             // wait, because reading it resets it.
             if (e.w == wait_type::error && (pfd.revents & err_bits))
             {
-                int so_err = 0;
-                int sz     = sizeof(so_err);
-                if (::getsockopt(
-                        e.fd, SOL_SOCKET, SO_ERROR,
-                        reinterpret_cast<char*>(&so_err), &sz) == 0 &&
-                    so_err != 0)
-                    err = static_cast<DWORD>(so_err);
-                else
-                    // The contract is to report a non-zero error_code.
-                    err = WSAECONNABORTED;
+                // close() flags the op and queues its cancel under this
+                // lock before closesocket, so the probe either finishes
+                // first or sees the flag. A flagged op's number may
+                // already name another socket, whose error a probe
+                // would steal; the handler reports the cancel instead.
+                std::lock_guard lock(mutex_);
+                if (!e.op->cancelled.load(std::memory_order_acquire))
+                {
+                    int so_err = 0;
+                    int sz     = sizeof(so_err);
+                    if (::getsockopt(
+                            e.fd, SOL_SOCKET, SO_ERROR,
+                            reinterpret_cast<char*>(&so_err), &sz) == 0 &&
+                        so_err != 0)
+                        err = static_cast<DWORD>(so_err);
+                    else
+                        // The contract is to report a non-zero error_code.
+                        err = WSAECONNABORTED;
+                }
             }
 
             sched_.on_completion(e.op, err, 0);
