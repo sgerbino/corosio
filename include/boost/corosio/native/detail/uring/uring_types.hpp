@@ -418,7 +418,7 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            fd_ = sched_->release_after_cancel(fd_);
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = endpoint{};
@@ -435,7 +435,7 @@ public:
     }
 
     /// Cancel in-flight ops, close the fd, and reset cached endpoints.
-    /// Called by the service on close()/teardown. cancel_and_flush submits
+    /// Called by the service on close()/teardown. close_after_cancel submits
     /// the cancel SQE while the fd is still open so IORING_ASYNC_CANCEL_FD
     /// resolves before the fd number can be recycled.
     void close_socket() noexcept
@@ -446,8 +446,7 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
-            ::close(fd_);
+            sched_->close_after_cancel(fd_);
             fd_ = -1;
         }
         local_endpoint_  = endpoint{};
@@ -931,8 +930,7 @@ public:
             // cancel while the fd still names the listener.
             acc->drain_waiters_only();
             acc->cancel_wait_op();
-            sched_->cancel_and_flush(acc->fd_);
-            ::close(acc->fd_);
+            sched_->close_after_cancel(acc->fd_);
             acc->fd_             = -1;
             acc->local_endpoint_ = endpoint{};
         }
@@ -1397,7 +1395,7 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            fd_ = sched_->release_after_cancel(fd_);
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = corosio::local_endpoint{};
@@ -1421,8 +1419,7 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
-            ::close(fd_);
+            sched_->close_after_cancel(fd_);
             fd_ = -1;
         }
         local_endpoint_  = corosio::local_endpoint{};
@@ -1812,8 +1809,7 @@ public:
             // See uring_tcp_acceptor_service::close.
             acc->drain_waiters_only();
             acc->cancel_wait_op();
-            sched_->cancel_and_flush(acc->fd_);
-            ::close(acc->fd_);
+            sched_->close_after_cancel(acc->fd_);
             acc->fd_             = -1;
             acc->local_endpoint_ = corosio::local_endpoint{};
         }
@@ -2168,7 +2164,7 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            fd_ = sched_->release_after_cancel(fd_);
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = endpoint{};
@@ -2192,8 +2188,7 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
-            ::close(fd_);
+            sched_->close_after_cancel(fd_);
             fd_ = -1;
         }
         local_endpoint_  = endpoint{};
@@ -2817,7 +2812,7 @@ public:
         conn_.request_cancel();
         wait_op_.request_cancel();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            fd_ = sched_->release_after_cancel(fd_);
         int fd           = fd_;
         fd_              = -1;
         local_endpoint_  = corosio::local_endpoint{};
@@ -2841,8 +2836,7 @@ public:
         wait_op_.request_cancel();
         if (fd_ >= 0)
         {
-            sched_->cancel_and_flush(fd_);
-            ::close(fd_);
+            sched_->close_after_cancel(fd_);
             fd_ = -1;
         }
         local_endpoint_  = corosio::local_endpoint{};

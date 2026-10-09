@@ -104,7 +104,12 @@ public:
 
         /** Release ownership of the native handle.
 
-            @return The native handle, which the caller now owns.
+            @note With the io_uring backend, a release that cannot queue
+        its cancellation right away returns a duplicate of the handle
+        `native_handle()` reported, and closes the original once that
+        cancellation reaches the kernel. Use the returned handle.
+
+        @return The native handle, which the caller now owns.
 
             @throws std::system_error if the file is not open.
         */

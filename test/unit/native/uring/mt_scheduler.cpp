@@ -19,18 +19,23 @@
 #if BOOST_COROSIO_HAS_URING
 
 #include <boost/corosio/native/native_io_context.hpp>
+#include <boost/corosio/local_stream_socket.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
 
 #include <boost/corosio/test/socket_pair.hpp>
 
 #include <boost/capy/buffers.hpp>
+#include <boost/capy/cond.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <thread>
+
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace boost::corosio {
 
@@ -96,9 +101,61 @@ struct uring_mt_scheduler_test
         BOOST_TEST(resumed);
     }
 
+    // With a kernel thread polling the submission queue, submitting a
+    // cancel only hands it over. Closing the descriptor before that
+    // thread resolves the number would leave the read armed for good.
+    void testSqpollCloseCancelsParkedRead()
+    {
+        io_context_options opts;
+        opts.enable_sqpoll     = true;
+        opts.sq_thread_idle_ms = 1000;
+        native_io_context<uring> ioc(opts, 1);
+        int stranded = 0;
+        for (int i = 0; i < 50; ++i)
+        {
+            int sv[2];
+            BOOST_TEST(
+                ::socketpair(
+                    AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+                    sv) == 0);
+            local_stream_socket s(ioc);
+            BOOST_TEST(!s.assign(sv[0]));
+            bool done = false;
+            std::error_code rec;
+            char buf[8];
+            capy::run_async(ioc.get_executor())(
+                [](local_stream_socket& s, char* b, bool& done,
+                   std::error_code& ec) -> capy::task<> {
+                    auto [e, n] =
+                        co_await s.read_some(capy::mutable_buffer(b, 8));
+                    std::ignore = n;
+                    ec          = e;
+                    done        = true;
+                }(s, buf, done, rec));
+            ioc.restart();
+            std::ignore = ioc.poll();
+            // Lets the kernel thread take the read, so it is armed.
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            s.close();
+            ioc.restart();
+            // Bounded only to fail rather than hang.
+            for (int k = 0; k < 50 && !done; ++k)
+                std::ignore = ioc.run_one_for(std::chrono::milliseconds(20));
+            if (!done || rec != capy::cond::canceled)
+                ++stranded;
+            ::close(sv[1]);
+            ioc.restart();
+            while (!done && ioc.run_one_for(std::chrono::seconds(1)) != 0)
+            {
+            }
+        }
+        BOOST_TEST_EQ(stranded, 0);
+    }
+
     void run()
     {
         testForeignPostWakesParkedFollower();
+        testSqpollCloseCancelsParkedRead();
     }
 };
 

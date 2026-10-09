@@ -418,7 +418,7 @@ public:
         epoch_.fetch_add(1, std::memory_order_release);
         cancel_waits();
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            fd_ = sched_->release_after_cancel(fd_);
         native_handle_type released = fd_;
         fd_                         = -1;
         return released;
@@ -480,8 +480,7 @@ public:
         // Both kernel entries below can run a queued pipe write as task
         // work; with the reader already gone that raises SIGPIPE.
         scoped_sigpipe_block no_sigpipe;
-        sched_->cancel_and_flush(fd_);
-        ::close(fd_);
+        sched_->close_after_cancel(fd_);
         fd_ = -1;
     }
 

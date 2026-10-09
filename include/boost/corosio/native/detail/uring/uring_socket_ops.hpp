@@ -472,14 +472,7 @@ uring_submit_op(uring_scheduler& sched, uring_op* op) noexcept
     {
         typename uring_scheduler::lock_type ring_lock(sched.ring_mutex());
 
-        ::io_uring_sqe* sqe = ::io_uring_get_sqe(sched.ring());
-        if (!sqe)
-        {
-            // SQ ring full — flush to kernel and retry once.
-            ::io_uring_submit(sched.ring());
-            sqe = ::io_uring_get_sqe(sched.ring());
-        }
-
+        ::io_uring_sqe* sqe = sched.acquire_sqe();
         if (!sqe)
         {
             // SQ stayed full after one flush — synchronous failure path.
@@ -521,7 +514,7 @@ enum class uring_guarded_submit
 /** Submit an uncounted op if @p admit allows it.
 
     `admit` runs under the ring mutex before an SQE is taken. A cancel
-    flushed under that mutex (`cancel_and_flush`) therefore either
+    flushed under that mutex (`release_after_cancel`) therefore either
     runs before the check, which then sees the owner's closing state,
     or follows this op's SQE in the submission queue and cancels it.
 
@@ -551,12 +544,7 @@ uring_try_submit_op_if(
         if (!admit())
             return uring_guarded_submit::refused;
 
-        ::io_uring_sqe* sqe = ::io_uring_get_sqe(sched.ring());
-        if (!sqe)
-        {
-            ::io_uring_submit(sched.ring());
-            sqe = ::io_uring_get_sqe(sched.ring());
-        }
+        ::io_uring_sqe* sqe = sched.acquire_sqe();
         if (!sqe)
         {
             op->res = -EAGAIN;

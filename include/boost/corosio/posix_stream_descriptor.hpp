@@ -301,6 +301,11 @@ public:
         The object becomes not-open and pending operations are
         cancelled. The caller is responsible for closing the result.
 
+        @note With the io_uring backend, a release that cannot queue
+        its cancellation right away returns a duplicate of the handle
+        `native_handle()` reported, and closes the original once that
+        cancellation reaches the kernel. Use the returned handle.
+
         @return The native descriptor.
 
         @throws std::system_error `errc::bad_file_descriptor` if the
