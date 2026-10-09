@@ -385,10 +385,14 @@ struct reactor_thread_context_guard
     /// The context frame managed by this guard.
     reactor_scheduler_context frame_;
 
+    /// Marks the scheduler innermost for the executor's fast check.
+    running_scheduler_guard running_;
+
     /// Construct the guard, pushing a frame for @a sched.
     explicit reactor_thread_context_guard(
         reactor_scheduler const* sched) noexcept
         : frame_(sched, reactor_context_stack.get())
+        , running_(sched)
     {
         reactor_context_stack.set(&frame_);
     }
