@@ -463,7 +463,7 @@ timer_service::insert_waiter(timer::implementation& impl, waiter_node* w)
             impl.waiter_ = nullptr;
             remove_timer_impl(impl);
             impl.might_have_pending_waits_.store(
-                false, std::memory_order_relaxed);
+                false, std::memory_order_release);
             refresh_cached_nearest();
             lost_cancel = true;
             notify      = false; // insertion undone; nearest unchanged
@@ -481,7 +481,10 @@ timer_service::insert_waiter(timer::implementation& impl, waiter_node* w)
 inline void
 timer_service::cancel_timer(timer::implementation& impl)
 {
-    if (!impl.might_have_pending_waits_.load(std::memory_order_relaxed))
+    // Acquire pairs with the drains' release: a caller that skips the
+    // lock may recycle the impl next, so the drain's writes to it must
+    // happen before.
+    if (!impl.might_have_pending_waits_.load(std::memory_order_acquire))
         return;
 
     // No unlocked already-done fast-out here: it would need the
@@ -501,7 +504,7 @@ timer_service::cancel_timer(timer::implementation& impl)
             canceled->impl_ = nullptr;
         // Store false as the final touch of the impl under the lock so
         // a pre-lock false-flag check trusts it unqualified.
-        impl.might_have_pending_waits_.store(false, std::memory_order_relaxed);
+        impl.might_have_pending_waits_.store(false, std::memory_order_release);
         refresh_cached_nearest();
     }
 
@@ -525,7 +528,7 @@ timer_service::cancel_waiter(waiter_node* w)
         w->impl_      = nullptr;
         impl->waiter_ = nullptr;
         remove_timer_impl(*impl);
-        impl->might_have_pending_waits_.store(false, std::memory_order_relaxed);
+        impl->might_have_pending_waits_.store(false, std::memory_order_release);
         refresh_cached_nearest();
     }
 
@@ -553,7 +556,7 @@ timer_service::process_expired()
                 expired.push_back(w);
             }
             t->might_have_pending_waits_.store(
-                false, std::memory_order_relaxed);
+                false, std::memory_order_release);
         }
 
         refresh_cached_nearest();
