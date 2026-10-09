@@ -662,8 +662,12 @@ struct uring_wait_op : uring_op
         {
             ec = make_err(EBADF);
         }
-        else if (!readiness_wait && (self->res & (POLLERR | POLLHUP)))
+        else if (
+            !readiness_wait && (self->res & (POLLERR | POLLHUP)) &&
+            !self->cancelled.load(std::memory_order_acquire))
         {
+            // Not after a close: the number may name another socket now,
+            // and the probe would read and clear its error.
             int so_err    = 0;
             socklen_t len = sizeof(so_err);
             if (::getsockopt(self->fd, SOL_SOCKET, SO_ERROR, &so_err, &len) < 0)

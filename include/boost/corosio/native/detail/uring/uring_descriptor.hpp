@@ -416,6 +416,7 @@ public:
         // before the caller can close and recycle the number. Do NOT
         // close -- the caller takes ownership.
         epoch_.fetch_add(1, std::memory_order_release);
+        cancel_waits();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         native_handle_type released = fd_;
@@ -475,6 +476,7 @@ public:
         // Bump before the flush: an op prepping concurrently must see
         // the change, or its SQE could land on a recycled fd number.
         epoch_.fetch_add(1, std::memory_order_release);
+        cancel_waits();
         // Both kernel entries below can run a queued pipe write as task
         // work; with the reader already gone that raises SIGPIPE.
         scoped_sigpipe_block no_sigpipe;
@@ -484,6 +486,15 @@ public:
     }
 
 private:
+    // A wait completing after a close or release must not probe the
+    // old number for SO_ERROR; see uring_wait_op.
+    void cancel_waits() noexcept
+    {
+        wait_rd_.request_cancel();
+        wait_wr_.request_cancel();
+        wait_er_.request_cancel();
+    }
+
     /** Bind a transfer slot to this descriptor for a fresh submission.
 
         The epoch snapshot taken here is what every later prep compares

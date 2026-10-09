@@ -32,6 +32,8 @@
 #include <boost/capy/task.hpp>
 
 #include <array>
+
+#include <poll.h>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -369,6 +371,45 @@ struct uring_faults
         BOOST_TEST(s.remote_endpoint() == endpoint{});
         BOOST_TEST(s.local_endpoint() == endpoint{});
         ::close(released);
+    }
+
+    // An error wait whose completion runs after the socket was closed
+    // and reopened must not probe SO_ERROR through the old descriptor
+    // number, which may now name another socket. The cancelled poll's
+    // answer is rewritten to an error so it reaches that probe.
+    void testErrorWaitAfterCloseSkipsProbe()
+    {
+        io_context ioc(uring);
+        auto ex = ioc.get_executor();
+        tcp_socket s(ioc);
+        BOOST_TEST(!s.open(family::v4));
+
+        cqe_fault_scope q(-1, IORING_OP_POLL_ADD, POLLERR);
+        bool started = false;
+        bool done    = false;
+        std::error_code wec;
+        capy::run_async(ex)(
+            [](tcp_socket& s, bool& started, bool& done,
+               std::error_code& ec) -> capy::task<> {
+                started  = true;
+                auto [e] = co_await s.wait(wait_type::error);
+                ec       = e;
+                done     = true;
+            }(s, started, done, wec));
+        while (!started && ioc.poll_one() != 0)
+        {
+        }
+        BOOST_TEST(started);
+
+        s.close();
+        BOOST_TEST(!s.open(family::v4));
+        ioc.restart();
+        while (!done && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(done);
+        BOOST_TEST(q.fired());
+        BOOST_TEST(wec == capy::cond::canceled);
     }
 
     // Closing and destroying a listening acceptor on a live context
@@ -1198,6 +1239,7 @@ struct uring_faults
         testShutdownWaitRetriesAfterEintr();
         testShutdownCancelRetriesAfterEintr();
         testReleaseDuringConnect();
+        testErrorWaitAfterCloseSkipsProbe();
         testAcceptorArmSqFull();
         testSqFull();
         testConnectCqeRewrite();

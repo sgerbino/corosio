@@ -416,6 +416,7 @@ public:
         // A connect completing after this belongs to the descriptor
         // the caller takes; see close_socket().
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
@@ -442,6 +443,7 @@ public:
         // A connect completing after this must not write endpoints into
         // a closed impl that may be recycled.
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
         {
             sched_->cancel_and_flush(fd_);
@@ -928,6 +930,7 @@ public:
             // Disown the arming before the cancel, then flush the
             // cancel while the fd still names the listener.
             acc->drain_waiters_only();
+            acc->cancel_wait_op();
             sched_->cancel_and_flush(acc->fd_);
             ::close(acc->fd_);
             acc->fd_             = -1;
@@ -1392,6 +1395,7 @@ public:
         // A connect completing after this belongs to the descriptor
         // the caller takes; see close_socket().
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
@@ -1414,6 +1418,7 @@ public:
         // A connect completing after this must not write endpoints into
         // a closed impl that may be recycled.
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
         {
             sched_->cancel_and_flush(fd_);
@@ -1806,6 +1811,7 @@ public:
         {
             // See uring_tcp_acceptor_service::close.
             acc->drain_waiters_only();
+            acc->cancel_wait_op();
             sched_->cancel_and_flush(acc->fd_);
             ::close(acc->fd_);
             acc->fd_             = -1;
@@ -2160,6 +2166,7 @@ public:
         // A connect completing after this belongs to the descriptor
         // the caller takes; see close_socket().
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
@@ -2182,6 +2189,7 @@ public:
         // A connect completing after this must not write endpoints into
         // a closed impl that may be recycled.
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
         {
             sched_->cancel_and_flush(fd_);
@@ -2807,6 +2815,7 @@ public:
         // A connect completing after this belongs to the descriptor
         // the caller takes; see close_socket().
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
             sched_->cancel_and_flush(fd_);
         int fd           = fd_;
@@ -2829,6 +2838,7 @@ public:
         // A connect completing after this must not write endpoints into
         // a closed impl that may be recycled.
         conn_.request_cancel();
+        wait_op_.request_cancel();
         if (fd_ >= 0)
         {
             sched_->cancel_and_flush(fd_);
