@@ -521,7 +521,7 @@ enum class uring_guarded_submit
 /** Submit an uncounted op if @p admit allows it.
 
     `admit` runs under the ring mutex before an SQE is taken. A cancel
-    flushed under that mutex (`cancel_and_flush`) therefore either
+    flushed under that mutex (`release_after_cancel`) therefore either
     runs before the check, which then sees the owner's closing state,
     or follows this op's SQE in the submission queue and cancels it.
 

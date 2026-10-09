@@ -185,7 +185,7 @@ public:
         // resolves it before the caller can close and recycle the
         // number.
         if (fd_ >= 0)
-            sched_->cancel_and_flush(fd_);
+            fd_ = sched_->release_after_cancel(fd_);
         int fd = fd_;
         fd_    = -1;
         return fd;
@@ -270,8 +270,7 @@ public:
             // either kernel entry below; with the reader already gone
             // that raises SIGPIPE.
             scoped_sigpipe_block no_sigpipe;
-            sched_->cancel_and_flush(fd_);
-            ::close(fd_);
+            sched_->close_after_cancel(fd_);
             fd_ = -1;
         }
     }

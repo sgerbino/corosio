@@ -40,10 +40,12 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <tuple>
 #include <vector>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -286,20 +288,35 @@ public:
     */
     void submit_cancel_by_fd(int fd) noexcept;
 
-    /** Submit `IORING_OP_ASYNC_CANCEL` for `fd` and immediately flush
-        the submission ring to the kernel.
+    /** Cancel all ops on `fd` and return a descriptor for the caller.
 
-        Must be called while `fd` is still open so the kernel can
-        resolve the file from the fd number before it is closed and
-        potentially recycled.
+        Called by release(), which hands the descriptor to a caller who
+        may close it at once. If the cancel reached the kernel, `fd`
+        itself is returned. Otherwise the caller gets a duplicate and
+        `fd` stays open until the cancel can be submitted, so the
+        kernel still resolves it to the file whose ops it cancels and
+        no later cancel by number reaches another file.
 
-        Best-effort: if the SQ is full the function still flushes any
-        earlier pending SQEs to the kernel.
+        A signal or a full completion queue only delays the flush.
 
         @param fd The file descriptor whose in-flight ops should be
             cancelled.
+
+        @return The descriptor the caller now owns: `fd`, a duplicate of
+            it, or, if no duplicate can be made, `fd` with the cancel
+            still pending.
     */
-    void cancel_and_flush(int fd) noexcept;
+    int release_after_cancel(int fd) noexcept;
+
+    /** Cancel every request on `fd`, then close it.
+
+        If the cancel cannot reach the kernel yet, the descriptor stays
+        open, so its number cannot name another file, and the run loop
+        retries the cancel and closes it once that succeeds.
+
+        @param fd The file descriptor to cancel and close.
+    */
+    void close_after_cancel(int fd) noexcept;
 
     /** Queue an already-counted op while the caller holds dispatch_mutex_.
 
@@ -405,6 +422,32 @@ private:
     int sq_thread_cpu_               = -1;
 
     int cancel_sentinel_ = 0;
+
+    /// A descriptor waiting for its cancel before it is closed.
+    struct deferred_close
+    {
+        int fd;
+        bool queued; // its cancel SQE is in the SQ, not yet submitted
+    };
+    std::vector<deferred_close> deferred_closes_; // guarded by ring_mutex_
+    std::atomic<bool> has_deferred_closes_{false};
+
+    /// io_uring_submit, retried while a signal or a full completion
+    /// queue delays it. @pre ring_mutex_ is held.
+    int submit_retrying() noexcept;
+
+    // Submit as submit_retrying() does, and under SQPOLL also wait for
+    // the kernel thread to take every queued entry: a cancel by number
+    // is only resolved once it is issued, so the number must stay open
+    // until then.
+    int submit_issued() noexcept;
+
+    /// Queue a cancel of every request on @p fd. @pre ring_mutex_ is held.
+    bool queue_cancel_fd(int fd) noexcept;
+
+    /// Retry the cancels of deferred closes, closing each descriptor
+    /// whose cancel reached the kernel. @pre ring_mutex_ is held.
+    void retry_deferred_closes() noexcept;
 
     // Signal self-pipe integration. The read end is watched via a multishot
     // POLL SQE tagged with &signal_pipe_sentinel_ (distinct from nullptr =
@@ -535,7 +578,7 @@ uring_scheduler::lazy_init_ring_unlocked() const
         // io_uring_submit_and_wait_timeout always sets
         // IORING_ENTER_GETEVENTS when wait_nr > 0, regardless of
         // ts. Our run loop's only kernel-wait call passes wait_nr=1.
-        // Submit-only paths (cancel_and_flush, etc.) leave their
+        // Submit-only paths (release_after_cancel, etc.) leave their
         // CQEs queued until the leader's next GETEVENTS-bearing
         // wait — benign.
         //
@@ -676,6 +719,12 @@ uring_scheduler::shutdown()
                 break;
             process_completions();
         }
+
+        // Nothing is left in the kernel to need their numbers.
+        for (auto& d : deferred_closes_)
+            ::close(d.fd);
+        deferred_closes_.clear();
+        has_deferred_closes_.store(false, std::memory_order_release);
     }
 
     // Drain posted ops, including the completions reaped above,
@@ -1115,6 +1164,8 @@ uring_scheduler::do_one(long timeout_us)
     if (ring_inited_)
     {
         lock_type ring_lock(ring_mutex_);
+        if (has_deferred_closes_.load(std::memory_order_acquire))
+            retry_deferred_closes();
         if (uring_inflight_.load(std::memory_order_acquire) != 0 ||
             ::io_uring_sq_ready(&ring_) != 0 ||
             ::io_uring_cq_ready(&ring_) != 0)
@@ -1257,6 +1308,8 @@ uring_scheduler::do_one(long timeout_us)
         // Phase 1 — submit any pending SQEs to the kernel.
         {
             lock_type ring_lock(ring_mutex_);
+            if (has_deferred_closes_.load(std::memory_order_acquire))
+                retry_deferred_closes();
             ::io_uring_submit(&ring_);
         }
 
@@ -1465,8 +1518,56 @@ uring_op::on_cancel() noexcept
         sched_->submit_cancel_by_user_data(this);
 }
 
-inline void
-uring_scheduler::cancel_and_flush(int fd) noexcept
+inline int
+uring_scheduler::submit_retrying() noexcept
+{
+    int r;
+    do
+    {
+        r = ::io_uring_submit(&ring_);
+        if (r == -EBUSY)
+            process_completions();
+    }
+    while (r == -EINTR || r == -EAGAIN || r == -EBUSY);
+    return r;
+}
+
+inline int
+uring_scheduler::submit_issued() noexcept
+{
+    int r = submit_retrying();
+    if (r < 0 || !(ring_.flags & IORING_SETUP_SQPOLL))
+        return r;
+    while (::io_uring_sq_ready(&ring_) > 0)
+    {
+        std::this_thread::yield();
+        // Wakes the kernel thread if it went idle.
+        r = submit_retrying();
+        if (r < 0)
+            return r;
+    }
+    return r;
+}
+
+inline bool
+uring_scheduler::queue_cancel_fd(int fd) noexcept
+{
+    io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_);
+    if (!sqe)
+    {
+        submit_retrying();
+        sqe = ::io_uring_get_sqe(&ring_);
+    }
+    if (!sqe)
+        return false;
+    ::io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
+    ::io_uring_sqe_set_data(sqe, &cancel_sentinel_);
+    inflight_inc();
+    return true;
+}
+
+inline int
+uring_scheduler::release_after_cancel(int fd) noexcept
 {
     // The flush can execute a queued write on `fd` inline; when the
     // fd is a pipe whose reader has already closed — service
@@ -1477,21 +1578,61 @@ uring_scheduler::cancel_and_flush(int fd) noexcept
     lazy_init_ring();
     interrupt_reactor();
     lock_type lock(ring_mutex_);
-    io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-    if (!sqe)
-    {
-        io_uring_submit(&ring_);
-        sqe = io_uring_get_sqe(&ring_);
-    }
-    if (sqe)
-    {
-        io_uring_prep_cancel_fd(sqe, fd, IORING_ASYNC_CANCEL_ALL);
-        io_uring_sqe_set_data(sqe, &cancel_sentinel_);
-        inflight_inc();
-    }
     // Flush while fd is still open so the kernel resolves the file
     // from the fd number before the caller closes and recycles it.
-    io_uring_submit(&ring_);
+    bool const queued = queue_cancel_fd(fd);
+    if (queued && submit_issued() >= 0)
+        return fd;
+
+    int const flags = ::fcntl(fd, F_GETFD);
+    int const copy  = ::fcntl(
+        fd, flags >= 0 && (flags & FD_CLOEXEC) ? F_DUPFD_CLOEXEC : F_DUPFD, 0);
+    if (copy < 0)
+        return fd;
+    deferred_closes_.push_back({fd, queued});
+    has_deferred_closes_.store(true, std::memory_order_release);
+    return copy;
+}
+
+inline void
+uring_scheduler::close_after_cancel(int fd) noexcept
+{
+    scoped_sigpipe_block no_sigpipe;
+
+    lazy_init_ring();
+    interrupt_reactor();
+    {
+        lock_type lock(ring_mutex_);
+        bool const queued = queue_cancel_fd(fd);
+        if (!queued || submit_issued() < 0)
+        {
+            deferred_closes_.push_back({fd, queued});
+            has_deferred_closes_.store(true, std::memory_order_release);
+            return;
+        }
+    }
+    ::close(fd);
+}
+
+inline void
+uring_scheduler::retry_deferred_closes() noexcept
+{
+    scoped_sigpipe_block no_sigpipe;
+    for (auto& d : deferred_closes_)
+        if (!d.queued)
+            d.queued = queue_cancel_fd(d.fd);
+    if (submit_issued() < 0)
+        return;
+    std::size_t kept = 0;
+    for (auto& d : deferred_closes_)
+    {
+        if (d.queued)
+            ::close(d.fd);
+        else
+            deferred_closes_[kept++] = d;
+    }
+    deferred_closes_.resize(kept);
+    has_deferred_closes_.store(kept != 0, std::memory_order_release);
 }
 
 } // namespace boost::corosio::detail
