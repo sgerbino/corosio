@@ -14,6 +14,7 @@
 #include <boost/corosio/tcp_socket.hpp>
 #include <boost/corosio/socket_option.hpp>
 #include <boost/corosio/delay.hpp>
+#include <boost/capy/cond.hpp>
 #include <boost/capy/buffers.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
@@ -1077,6 +1078,45 @@ struct tcp_server_test
         return ec;
     }
 
+    // A worker that keeps its launcher instead of starting it, so the
+    // test decides when, or whether, the connection runs.
+    class holding_worker : public tcp_server::worker_base
+    {
+        corosio::tcp_socket sock_;
+        std::optional<tcp_server::launcher>* slot_;
+
+    public:
+        holding_worker(
+            io_context& ctx, std::optional<tcp_server::launcher>* s)
+            : sock_(ctx)
+            , slot_(s)
+        {
+        }
+
+        corosio::tcp_socket& socket() override
+        {
+            return sock_;
+        }
+
+        void run(tcp_server::launcher launch) override
+        {
+            slot_->emplace(std::move(launch));
+        }
+    };
+
+    class holding_server : public tcp_server
+    {
+    public:
+        holding_server(
+            io_context& ctx, std::optional<tcp_server::launcher>* s)
+            : tcp_server(ctx, ctx.get_executor())
+        {
+            std::vector<std::unique_ptr<tcp_server::worker_base>> v;
+            v.push_back(std::make_unique<holding_worker>(ctx, s));
+            set_workers(std::move(v));
+        }
+    };
+
     // An accept loop parked for a worker, because the only worker is
     // still busy, must not keep the listener open once the server is
     // destroyed.
@@ -1084,43 +1124,6 @@ struct tcp_server_test
     {
         io_context ioc(Backend);
         std::optional<tcp_server::launcher> held;
-
-        class holding_worker : public tcp_server::worker_base
-        {
-            corosio::tcp_socket sock_;
-            std::optional<tcp_server::launcher>* slot_;
-
-        public:
-            holding_worker(
-                io_context& ctx, std::optional<tcp_server::launcher>* s)
-                : sock_(ctx)
-                , slot_(s)
-            {
-            }
-
-            corosio::tcp_socket& socket() override
-            {
-                return sock_;
-            }
-
-            void run(tcp_server::launcher launch) override
-            {
-                slot_->emplace(std::move(launch));
-            }
-        };
-
-        class holding_server : public tcp_server
-        {
-        public:
-            holding_server(
-                io_context& ctx, std::optional<tcp_server::launcher>* s)
-                : tcp_server(ctx, ctx.get_executor())
-            {
-                std::vector<std::unique_ptr<tcp_server::worker_base>> v;
-                v.push_back(std::make_unique<holding_worker>(ctx, s));
-                set_workers(std::move(v));
-            }
-        };
 
         auto srv = std::make_unique<holding_server>(ioc, &held);
         BOOST_TEST(!srv->bind(endpoint(ipv4_address::loopback(), 0)));
@@ -1148,6 +1151,50 @@ struct tcp_server_test
         held.reset();
         ioc.restart();
         ioc.run();
+    }
+
+    // A connection dispatched before stop() but launched after it
+    // must still see the stop.
+    void testStopReachesLaunchAfterStop()
+    {
+        io_context ioc(Backend);
+        std::optional<tcp_server::launcher> held;
+        holding_server srv(ioc, &held);
+        BOOST_TEST(!srv.bind(endpoint(ipv4_address::loopback(), 0)));
+        auto ep = srv.local_endpoint();
+        srv.start();
+
+        io_context cctx;
+        BOOST_TEST(!connect_result(cctx, ep));
+        // Bounds a hang, not a timing assertion.
+        while (!held && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(held.has_value());
+
+        srv.stop();
+        while (ioc.poll() != 0)
+        {
+        }
+
+        bool done     = false;
+        bool canceled = false;
+        (*held)(
+            ioc.get_executor(),
+            [](bool& d, bool& c) -> capy::task<> {
+                auto [ec] = co_await corosio::delay(std::chrono::hours(1));
+                c         = ec == capy::cond::canceled;
+                d         = true;
+            }(done, canceled));
+        held.reset();
+        ioc.restart();
+        while (!done && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(done);
+        BOOST_TEST(canceled);
+        ioc.run();
+        srv.join();
     }
 
     // Destroying the server from a thread that is not running its
@@ -1225,6 +1272,7 @@ struct tcp_server_test
         testConcurrentWorkersOnMultithreadedContext();
         testDestroyWhileRunnersAccept();
         testDestroyWithBusyWorkerClosesListener();
+        testStopReachesLaunchAfterStop();
     }
 };
 
