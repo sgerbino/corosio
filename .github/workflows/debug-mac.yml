@@ -45,12 +45,32 @@ jobs:
           cp -r corosio-root boost-root/libs/corosio
           cp -r capy-root boost-root/libs/capy
 
+      - name: Create vcpkg.json
+        shell: bash
+        run: |
+          cat > corosio-root/vcpkg.json << 'EOF2'
+          {
+            "name": "boost-corosio-deps",
+            "version": "1.0.0",
+            "dependencies": ["wolfssl"]
+          }
+          EOF2
+
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ github.workspace }}/vcpkg
+          vcpkgGitCommitId: bd52fac7114fdaa2208de8dd1227212a6683e562
+          vcpkgJsonGlob: '**/corosio-root/vcpkg.json'
+          runVcpkgInstall: true
+
       - name: Build
         shell: bash
         run: |
-          brew install wolfssl || true
+          inst=$(find "$GITHUB_WORKSPACE" -type d -path "*/vcpkg_installed/arm64-osx" | head -1)
+          echo "wolfssl from $inst"
           cmake -S boost-root -B build -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS=--coverage -DCMAKE_C_FLAGS=--coverage \
+            -DWolfSSL_INCLUDE_DIR=$inst/include -DWolfSSL_LIBRARY=$inst/lib/libwolfssl.a \
             -DBOOST_INCLUDE_LIBRARIES=corosio -DBOOST_COROSIO_BUILD_TESTS=ON \
             -DBUILD_TESTING=ON -DBOOST_COROSIO_BUILD_BENCH=OFF
           cmake --build build --target boost_corosio_tests boost_corosio_fault_tests -j 4
@@ -67,7 +87,7 @@ jobs:
             local pid=$!
             for i in $(seq 1 120); do
               if ! kill -0 $pid 2>/dev/null; then
-                wait $pid; echo "rc=$?"; tail -3 out.txt; return
+                wait $pid; rc=$?; echo "rc=$rc"; if [ $rc -ne 0 ]; then tail -60 out.txt; else tail -3 out.txt; fi; return
               fi
               sleep 1
             done
@@ -76,7 +96,8 @@ jobs:
             sudo lldb -p $pid --batch -o "thread backtrace all" 2>&1 | head -600
             kill -9 $pid
           }
-          hung=0
-          for round in $(seq 1 10); do
+          for round in $(seq 1 5); do
             run_with_dump "$tests" boost.corosio.wolfssl_stream
+            run_with_dump "$tests" boost.corosio.zero_alloc.select
+            run_with_dump "$faults" boost.corosio.fault.alloc
           done
