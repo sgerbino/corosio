@@ -208,6 +208,13 @@ private:
                 ex.post(wake->cont);
         }
 
+        /// Drop one hold on @p w, returning it to the pool with the last.
+        void drop_hold(worker_base& w) noexcept
+        {
+            if (w.holds_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                push(w);
+        }
+
         /// Mark the pool as stopping and release every accept loop
         /// waiting for a worker, with none.
         void stop_waiters() noexcept
@@ -431,7 +438,7 @@ private:
 
         void await_resume() noexcept
         {
-            st_.push(w_);
+            st_.drop_hold(w_);
         }
     };
 
@@ -498,6 +505,9 @@ public:
         std::stop_source stop_;       // ~16 bytes
         worker_base* next_ = nullptr; // 8 bytes - used by idle and active lists
         worker_base* prev_ = nullptr; // 8 bytes - used only by active list
+        // One for the accept loop until run() returns, one for the
+        // launcher and its connection; the last one returns the worker.
+        std::atomic<unsigned> holds_{0};
 
         friend class tcp_server;
 
@@ -519,6 +529,9 @@ public:
             worker that cannot start the connection should handle the
             failure here; destroying the launcher without invoking it
             returns the worker to the pool.
+
+            The worker is not given another connection before this
+            returns, even if the connection it launched has finished.
 
             @param launch Handle to start the connection coroutine.
         */
@@ -558,7 +571,7 @@ public:
         ~launcher()
         {
             if (w_)
-                st_->push(*w_);
+                st_->drop_hold(*w_);
             if (st_)
                 release(st_);
         }
@@ -629,7 +642,7 @@ public:
                 ~guard_t()
                 {
                     if (w)
-                        st->push(*w);
+                        st->drop_hold(*w);
                 }
             } guard{st_, w};
 

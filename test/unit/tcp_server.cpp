@@ -1198,6 +1198,113 @@ struct tcp_server_test
         srv.join();
     }
 
+    struct overlap_counts
+    {
+        std::atomic<int> in_run{0};
+        std::atomic<int> max_in_run{0};
+        std::atomic<int> runs{0};
+    };
+
+    // Starts its connection on another context, then lingers in run()
+    // until a second run() begins or a bound passes.
+    class lingering_worker : public tcp_server::worker_base
+    {
+        corosio::tcp_socket sock_;
+        io_context& session_ctx_;
+        overlap_counts& counts_;
+
+    public:
+        lingering_worker(
+            io_context& ctx, io_context& session_ctx, overlap_counts& counts)
+            : sock_(ctx)
+            , session_ctx_(session_ctx)
+            , counts_(counts)
+        {
+        }
+
+        corosio::tcp_socket& socket() override
+        {
+            return sock_;
+        }
+
+        void run(tcp_server::launcher launch) override
+        {
+            int const n = ++counts_.in_run;
+            int seen    = counts_.max_in_run.load();
+            while (n > seen &&
+                   !counts_.max_in_run.compare_exchange_weak(seen, n))
+            {
+            }
+            ++counts_.runs;
+            launch(
+                session_ctx_.get_executor(),
+                [](corosio::tcp_socket* s) -> capy::task<> {
+                    s->close();
+                    co_return;
+                }(&sock_));
+            // Bounds the wait, not a timing assertion.
+            auto const until = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(500);
+            while (counts_.runs.load() < 2 &&
+                   std::chrono::steady_clock::now() < until)
+                std::this_thread::yield();
+            --counts_.in_run;
+        }
+    };
+
+    // A worker is not handed to another connection while its run() is
+    // still executing, even once the connection it launched is done.
+    void testWorkerNotReusedDuringRun()
+    {
+        io_context ioc(Backend);
+        io_context session_ctx(Backend);
+        overlap_counts counts;
+
+        class server : public tcp_server
+        {
+        public:
+            server(io_context& ctx, io_context& sctx, overlap_counts& c)
+                : tcp_server(ctx, ctx.get_executor())
+            {
+                std::vector<std::unique_ptr<tcp_server::worker_base>> v;
+                v.push_back(std::make_unique<lingering_worker>(ctx, sctx, c));
+                set_workers(std::move(v));
+            }
+        };
+
+        server srv(ioc, session_ctx, counts);
+        BOOST_TEST(!srv.bind(endpoint(ipv4_address::loopback(), 0)));
+        BOOST_TEST(!srv.bind(endpoint(ipv4_address::loopback(), 0)));
+        io_context cctx;
+        BOOST_TEST(!connect_result(cctx, srv.local_endpoint(0)));
+        BOOST_TEST(!connect_result(cctx, srv.local_endpoint(1)));
+
+        auto sex = session_ctx.get_executor();
+        sex.on_work_started();
+        std::thread session_thread([&] { session_ctx.run(); });
+
+        srv.start();
+        std::thread t1([&] { ioc.run(); });
+        std::thread t2([&] { ioc.run(); });
+
+        // Bounds a hang, not a timing assertion.
+        auto const until =
+            std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while ((counts.runs.load() < 2 || counts.in_run.load() != 0) &&
+               std::chrono::steady_clock::now() < until)
+            std::this_thread::yield();
+
+        srv.stop();
+        t1.join();
+        t2.join();
+        srv.join();
+        sex.on_work_finished();
+        session_thread.join();
+
+        BOOST_TEST_EQ(counts.runs.load(), 2);
+        BOOST_TEST_EQ(counts.max_in_run.load(), 1);
+    }
+
     // An accept loop holds a worker while it waits for a connection,
     // so replacing the workers then would free one in use.
     void testSetWorkersWhileAcceptingThrows()
@@ -1323,6 +1430,7 @@ struct tcp_server_test
         testDestroyWhileRunnersAccept();
         testDestroyWithBusyWorkerClosesListener();
         testStopReachesLaunchAfterStop();
+        testWorkerNotReusedDuringRun();
         testSetWorkersWhileAcceptingThrows();
         testSetWorkersWithBorrowedWorkerThrows();
     }

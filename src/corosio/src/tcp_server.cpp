@@ -115,13 +115,16 @@ tcp_server::do_accept(state_ref st, tcp_acceptor& acc)
         auto* w = co_await pop_awaitable{*st};
         if (!w)
             break;
+        w->holds_.store(1, std::memory_order_relaxed);
         auto [ec] = co_await acc.accept(w->socket());
         if (ec)
         {
             co_await push_awaitable{*st, *w};
             continue;
         }
+        w->holds_.fetch_add(1, std::memory_order_relaxed);
         w->run(launcher{*st, *w});
+        st->drop_hold(*w);
     }
 }
 
