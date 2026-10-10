@@ -1,0 +1,77 @@
+name: debug-mac
+
+on:
+  push:
+    branches: [debug/macos-hang]
+
+jobs:
+  mac:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: corosio-root
+
+      - id: capy-ref
+        uses: ./corosio-root/.github/actions/resolve-capy
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.capy-ref.outputs.repo }}
+          ref: ${{ steps.capy-ref.outputs.ref }}
+          path: capy-root
+
+      - uses: alandefreitas/cpp-actions/boost-clone@v1.9.0
+        with:
+          branch: develop
+          boost-dir: boost-source
+          modules-exclude-paths: ''
+          scan-modules-dir: corosio-root
+          scan-modules-ignore: corosio, capy
+
+      - name: Patch Boost
+        shell: bash
+        run: |
+          set -xe
+          rm -rf boost-source/libs/corosio boost-source/libs/capy
+          cp -rL boost-source boost-root
+          cp -r corosio-root boost-root/libs/corosio
+          cp -r capy-root boost-root/libs/capy
+
+      - name: Build
+        shell: bash
+        run: |
+          brew install wolfssl || true
+          cmake -S boost-root -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS=--coverage -DCMAKE_C_FLAGS=--coverage \
+            -DBOOST_INCLUDE_LIBRARIES=corosio -DBOOST_COROSIO_BUILD_TESTS=ON \
+            -DBUILD_TESTING=ON -DBOOST_COROSIO_BUILD_BENCH=OFF
+          cmake --build build --target boost_corosio_tests boost_corosio_fault_tests -j 4
+
+      - name: Run suspects with a stack dump on hang
+        shell: bash
+        run: |
+          tests=$(find build -name boost_corosio_tests -type f -perm -u+x | head -1)
+          faults=$(find build -name boost_corosio_fault_tests -type f -perm -u+x | head -1)
+          run_with_dump() {
+            local bin=$1 suite=$2
+            echo "=== $suite"
+            "$bin" "$suite" > out.txt 2>&1 &
+            local pid=$!
+            for i in $(seq 1 120); do
+              if ! kill -0 $pid 2>/dev/null; then
+                wait $pid; echo "rc=$?"; tail -3 out.txt; return
+              fi
+              sleep 1
+            done
+            echo "HUNG: $suite (pid $pid)"
+            tail -20 out.txt
+            sudo lldb -p $pid --batch -o "thread backtrace all" 2>&1 | head -600
+            kill -9 $pid
+          }
+          for round in 1 2; do
+            run_with_dump "$faults" boost.corosio.fault.alloc
+            run_with_dump "$tests" boost.corosio.zero_alloc.select
+            run_with_dump "$tests" boost.corosio.wolfssl_stream
+          done
