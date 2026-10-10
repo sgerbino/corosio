@@ -7,11 +7,17 @@ on:
 jobs:
   mac:
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [fa38b92e917306ff8a882a83d6285f2e7bf23abf, f19b77998ac49e68c593aca941b6027a0b549127]
     steps:
       - uses: actions/checkout@v4
         with:
           path: corosio-root
+          ref: ${{ matrix.ref }}
+          fetch-depth: 0
 
       - id: capy-ref
         uses: ./corosio-root/.github/actions/resolve-capy
@@ -70,8 +76,7 @@ jobs:
             sudo lldb -p $pid --batch -o "thread backtrace all" 2>&1 | head -600
             kill -9 $pid
           }
-          for round in 1 2; do
-            run_with_dump "$faults" boost.corosio.fault.alloc
-            run_with_dump "$tests" boost.corosio.zero_alloc.select
+          hung=0
+          for round in $(seq 1 10); do
             run_with_dump "$tests" boost.corosio.wolfssl_stream
           done
