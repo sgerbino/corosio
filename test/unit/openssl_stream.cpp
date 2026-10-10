@@ -493,6 +493,7 @@ struct openssl_stream_test
         test::testRecordBoundaryTransfer(make_stream);
         test::testShutdownOverRead(make_stream);
         test::testShutdownSimultaneousClose(make_stream);
+        test::testShutdownWithUnreadRecordAhead(make_stream);
         test::testUnawaitedReadOutlivesContext(make_stream);
         test::testCancelPendingRead(make_stream, true);
         test::testCancelPendingRead(make_stream, false);
