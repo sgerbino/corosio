@@ -128,6 +128,7 @@ private:
         worker_base* active_head   = nullptr; // doubly linked
         worker_base* active_tail   = nullptr;
         std::size_t active_accepts = 0; // guarded by the join mutex
+        std::size_t lent           = 0; // borrowed workers, guarded by mutex
         std::shared_ptr<void> storage;  // owns the worker container
         bool running = false;
         // Set by stop(); accept loops waiting for a worker give up.
@@ -149,7 +150,10 @@ private:
         {
             auto* w = idle_head;
             if (w)
+            {
                 idle_head = w->next_;
+                ++lent;
+            }
             return w;
         }
 
@@ -197,6 +201,7 @@ private:
                 else
                 {
                     idle_push(&w);
+                    --lent;
                 }
             }
             if (wake)
@@ -715,6 +720,16 @@ public:
         previous workers are released and the idle/active lists
         are cleared before populating with new workers.
 
+        @pre No worker is waiting on or serving a connection: the
+            server was never started, or it was stopped and joined
+            and every connection has finished.
+
+        @par Exception Safety
+        The server keeps its current workers if this throws.
+
+        @throws std::logic_error If a worker is waiting on or serving
+            a connection.
+
         @tparam Range Forward range of pointer-like objects to worker_base.
 
         @param workers Range of workers to manage. Each element must
@@ -730,15 +745,18 @@ public:
             worker_base*>
     void set_workers(Range&& workers)
     {
-        // Take ownership and populate idle list
+        // The previous workers are released after the lock.
+        std::shared_ptr<void> previous;
+        std::lock_guard<std::mutex> lock(st_->mutex);
+        if (st_->lent != 0)
+            detail::throw_logic_error(
+                "tcp_server::set_workers: a worker is still in use");
+
         using StorageType = std::decay_t<Range>;
         auto* p           = new StorageType(std::forward<Range>(workers));
         std::shared_ptr<void> storage(
             p, [](void* ptr) { delete static_cast<StorageType*>(ptr); });
 
-        // The previous workers are released after the lock.
-        std::shared_ptr<void> previous;
-        std::lock_guard<std::mutex> lock(st_->mutex);
         st_->idle_head   = nullptr;
         st_->active_head = nullptr;
         st_->active_tail = nullptr;

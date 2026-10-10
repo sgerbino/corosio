@@ -22,6 +22,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 #include <chrono>
 #include <vector>
@@ -1197,6 +1198,55 @@ struct tcp_server_test
         srv.join();
     }
 
+    // An accept loop holds a worker while it waits for a connection,
+    // so replacing the workers then would free one in use.
+    void testSetWorkersWhileAcceptingThrows()
+    {
+        io_context ioc(Backend);
+        test_server srv(ioc);
+        BOOST_TEST(!srv.bind(endpoint(ipv4_address::loopback(), 0)));
+        srv.start();
+        while (ioc.poll() != 0)
+        {
+        }
+
+        BOOST_TEST_THROWS(
+            srv.set_workers(make_test_workers(ioc, 1)), std::logic_error);
+
+        srv.stop();
+        ioc.run();
+        srv.join();
+        srv.set_workers(make_test_workers(ioc, 1));
+    }
+
+    // A launcher kept past join still borrows its worker.
+    void testSetWorkersWithBorrowedWorkerThrows()
+    {
+        io_context ioc(Backend);
+        std::optional<tcp_server::launcher> held;
+        holding_server srv(ioc, &held);
+        BOOST_TEST(!srv.bind(endpoint(ipv4_address::loopback(), 0)));
+        auto ep = srv.local_endpoint();
+        srv.start();
+
+        io_context cctx;
+        BOOST_TEST(!connect_result(cctx, ep));
+        // Bounds a hang, not a timing assertion.
+        while (!held && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(held.has_value());
+
+        srv.stop();
+        ioc.run();
+        srv.join();
+        BOOST_TEST_THROWS(
+            srv.set_workers(make_test_workers(ioc, 1)), std::logic_error);
+
+        held.reset();
+        srv.set_workers(make_test_workers(ioc, 1));
+    }
+
     // Destroying the server from a thread that is not running its
     // executor must not race the accept loops still running there.
     void testDestroyWhileRunnersAccept()
@@ -1273,6 +1323,8 @@ struct tcp_server_test
         testDestroyWhileRunnersAccept();
         testDestroyWithBusyWorkerClosesListener();
         testStopReachesLaunchAfterStop();
+        testSetWorkersWhileAcceptingThrows();
+        testSetWorkersWithBorrowedWorkerThrows();
     }
 };
 
