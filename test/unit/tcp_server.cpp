@@ -1045,10 +1045,15 @@ struct tcp_server_test
         ioc.run(); // the destroyed server's loops finish
     }
 
-    // Connects and closes at once, so connections keep arriving.
+    // Connects and closes at once, so connections keep arriving. The
+    // close resets: a graceful one would park each connection's port
+    // in TIME_WAIT, and at this rate that drains the ephemeral range
+    // for every test running alongside.
     static void connect_once(io_context& ioc, endpoint ep)
     {
         tcp_socket c(ioc);
+        BOOST_TEST(!c.open());
+        c.set_option(socket_option::linger(true, 0));
         capy::run_async(ioc.get_executor())(
             [](tcp_socket& c, endpoint ep) -> capy::task<> {
                 std::ignore = co_await c.connect(ep);
