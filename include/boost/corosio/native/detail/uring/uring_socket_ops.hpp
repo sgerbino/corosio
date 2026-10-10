@@ -428,10 +428,13 @@ uring_link_sqe(
     // expects exactly one F_MORE-less CQE per submitted SQE
     // (multishot ops decrement only on the terminal CQE).
     sched.inflight_inc();
-    // Release pairs with the acquire in uring_op::request_cancel:
-    // a stop_token firing after we release the mutex will see
-    // sqe_set==true and submit a cancel-by-user_data SQE.
-    op->sqe_set.store(true, std::memory_order_release);
+    // Paired with uring_op::on_cancel: of a stop and this link, the
+    // later one sees the other and queues the cancel. A stop that came
+    // after the initiator's own check would otherwise find no SQE to
+    // cancel and leave the op armed.
+    op->sqe_set.store(true, std::memory_order_seq_cst);
+    if (op->cancelled.load(std::memory_order_seq_cst))
+        sched.cancel_op_locked(op);
     // First submitter in a batch wins the CAS and will post
     // submit_sqes_op; others piggyback on the same flush.
     return !sched.submit_op_posted_exchange(true);
