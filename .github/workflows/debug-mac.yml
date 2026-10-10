@@ -11,8 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [daf664dbbbe4d52c9f45851700dfce70d6d4f318]
-        attempt: [1, 2, 3, 4, 5, 6]
+        ref: [0ec8b9e9ae7b14e5b6ecb8f56ee8d5b2bb64ff7f]
+        attempt: [1]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,33 +70,25 @@ jobs:
           inst=$(find "$GITHUB_WORKSPACE" -type d -path "*/vcpkg_installed/arm64-osx" | head -1)
           echo "wolfssl from $inst"
           cmake -S boost-root -B build -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS=--coverage -DCMAKE_C_FLAGS=--coverage \
+            \
             -DWolfSSL_INCLUDE_DIR=$inst/include -DWolfSSL_LIBRARY=$inst/lib/libwolfssl.a \
             -DBOOST_INCLUDE_LIBRARIES=corosio -DBOOST_COROSIO_BUILD_TESTS=ON \
             -DBUILD_TESTING=ON -DBOOST_COROSIO_BUILD_BENCH=OFF
           cmake --build build --target boost_corosio_tests boost_corosio_fault_tests -j 4
 
-      - name: Full ctest in parallel with a hang watchdog
+      - name: TIME_WAIT per suite
         shell: bash
         run: |
-          (
-            while true; do
-              sleep 30
-              ps -axo pid=,etime=,command= | grep -E "boost_corosio_(fault_)?tests" | grep -v grep | while read pid et cmd; do
-                # etime is [[dd-]hh:]mm:ss; flag anything past 4 minutes
-                mins=$(echo "$et" | awk -F'[-:]' '{ if (NF==2) print $1; else if (NF==3) print $1*60+$2; else print 9999 }')
-                if [ "$mins" -ge 4 ] && [ ! -e "/tmp/dumped-$pid" ]; then
-                  touch "/tmp/dumped-$pid"
-                  echo "##### HUNG pid=$pid etime=$et cmd=$cmd"
-                  echo "--- lsof $pid"; sudo lsof -nP -a -p $pid -i 2>&1 | head -40
-                  echo "--- netstat loopback"; netstat -anp tcp | grep -E "127\.0\.0\.1|::1" | awk '{print $6}' | sort | uniq -c
-                  netstat -anp tcp | grep -E "SYN_|LISTEN" | head -40
-                  echo "--- tcp stats"; netstat -s -p tcp | grep -iE "drop|listen|syn|overflow" | head -30
-                  sudo lldb -p $pid --batch -o "thread backtrace all" 2>&1 | head -400
-                fi
-              done
-            done
-          ) &
-          wd=$!
-          ctest --test-dir build --parallel 3 -E NOT_BUILT --timeout 300 --output-on-failure 2>&1 | grep -E "PROBE|Start|Test +#|tests passed|socket_pair" || true
-          kill $wd || true
+          sysctl net.inet.ip.portrange.first net.inet.ip.portrange.last net.inet.tcp.msl || true
+          tests=$(find build -name boost_corosio_tests -type f -perm -u+x | head -1)
+          faults=$(find build -name boost_corosio_fault_tests -type f -perm -u+x | head -1)
+          tw() { netstat -an -p tcp | grep -c TIME_WAIT; }
+          ctest --test-dir build -N | grep -oE "boost\.corosio\.[A-Za-z0-9_.]+" | grep -v "\.doc\." | sort -u > suites.txt
+          : > tw.txt
+          while read s; do
+            bin=$tests; case "$s" in boost.corosio.fault*) bin=$faults;; esac
+            b=$(tw); timeout 120 "$bin" "$s" > /dev/null 2>&1; rc=$?; a=$(tw)
+            echo "$((a-b)) $s rc=$rc" >> tw.txt
+          done < suites.txt
+          echo "total: $(awk '{s+=$1} END{print s}' tw.txt)"
+          sort -rn tw.txt | head -30
