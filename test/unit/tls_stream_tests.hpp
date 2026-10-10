@@ -3176,6 +3176,103 @@ testShutdownSimultaneousClose(StreamFactory make_stream)
         m2.close();
 }
 
+/** Shutdown with an unread record queued ahead of the peer's
+    close_notify: the server writes and then shuts down before the
+    client reads anything, so the client's shutdown receives both
+    records in one transport read. The shutdown must complete instead of
+    parking on a transport read for a close_notify that has already
+    arrived; the unread application data is discarded and reported as
+    an error on both engines. */
+template<typename StreamFactory>
+void
+testShutdownWithUnreadRecordAhead(StreamFactory make_stream)
+{
+    io_context ioc;
+    auto [m1, m2] = corosio::test::make_mocket_pair(ioc);
+
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+
+    auto client = make_stream(m1, client_ctx);
+    auto server = make_stream(m2, server_ctx);
+
+    {
+        auto hs_client = [&]() -> capy::task<> {
+            auto [ec] = co_await client.handshake(tls_role::client);
+            BOOST_TEST(!ec);
+        };
+        auto hs_server = [&]() -> capy::task<> {
+            auto [ec] = co_await server.handshake(tls_role::server);
+            BOOST_TEST(!ec);
+        };
+        capy::run_async(ioc.get_executor())(hs_client());
+        capy::run_async(ioc.get_executor())(hs_server());
+        ioc.run();
+        ioc.restart();
+    }
+
+    bool client_sd_done = false;
+    std::error_code client_sd_ec;
+    bool server_sd_ok = false;
+    bool failsafe_hit = false;
+    int remaining     = 2;
+    std::stop_source failsafe_stop;
+    auto finished = [&] {
+        if (--remaining == 0)
+            failsafe_stop.request_stop();
+    };
+
+    // Parks in its shutdown once the data record and its close_notify
+    // are both on the wire.
+    auto server_task = [&]() -> capy::task<> {
+        char const one = 'x';
+        auto [wec, wn] =
+            co_await server.write_some(capy::const_buffer(&one, 1));
+        BOOST_TEST(!wec);
+        BOOST_TEST_EQ(wn, 1u);
+        auto [ec]    = co_await server.shutdown();
+        server_sd_ok = !ec;
+        finished();
+    };
+    capy::run_async(ioc.get_executor())(server_task());
+    while (ioc.poll() > 0)
+    {
+    }
+
+    auto client_task = [&]() -> capy::task<> {
+        auto [ec]      = co_await client.shutdown();
+        client_sd_ec   = ec;
+        client_sd_done = true;
+        finished();
+    };
+    auto failsafe_task = [&]() -> capy::task<> {
+        auto [ec] = co_await corosio::delay(failsafe_timeout);
+        if (!ec)
+        {
+            failsafe_hit = true;
+            if (m1.is_open())
+                m1.close();
+            if (m2.is_open())
+                m2.close();
+        }
+    };
+
+    capy::run_async(ioc.get_executor())(client_task());
+    capy::run_async(
+        ioc.get_executor(), failsafe_stop.get_token())(failsafe_task());
+    ioc.run();
+
+    BOOST_TEST(!failsafe_hit);
+    BOOST_TEST(client_sd_done);
+    BOOST_TEST(!!client_sd_ec);
+    BOOST_TEST(server_sd_ok);
+
+    if (m1.is_open())
+        m1.close();
+    if (m2.is_open())
+        m2.close();
+}
+
 /** Stream wrapper that injects an error alongside a real transport
     read, exercising the ReadStream contract's legal partial-transfer-
     with-error case (IOCP's failed completions carry bytes_transferred;
