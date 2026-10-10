@@ -32,6 +32,8 @@
 #include <fstream>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
+#include <boost/corosio/test/socket_pair.hpp>
+#include <boost/corosio/test/mocket.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
@@ -84,6 +86,56 @@ struct posix_common_faults
         BOOST_TEST(f.fired());
         BOOST_TEST(ec == std::errc::too_many_files_open);
         BOOST_TEST(!s.is_open());
+    }
+
+    // A connect refused outright (an exhausted ephemeral range) must
+    // fail the pair rather than leave it waiting on an accept that can
+    // no longer arrive. io_uring connects through the ring, out of the
+    // hook's reach.
+    void testSocketPairConnectFails()
+    {
+#if BOOST_COROSIO_HAS_URING
+        if constexpr (std::is_same_v<
+                          std::remove_cvref_t<decltype(Backend)>, uring_t>)
+            return;
+#endif
+        io_context ioc(Backend);
+        fault_scope f(sys::connect, EADDRNOTAVAIL);
+        bool threw = false;
+        try
+        {
+            std::ignore =
+                test::make_socket_pair<tcp_socket, tcp_acceptor, false>(ioc);
+        }
+        catch (std::runtime_error const&)
+        {
+            threw = true;
+        }
+        BOOST_TEST(f.fired());
+        BOOST_TEST(threw);
+    }
+
+    // Same for the mocket pair, built the same way over a socket pair.
+    void testMocketPairConnectFails()
+    {
+#if BOOST_COROSIO_HAS_URING
+        if constexpr (std::is_same_v<
+                          std::remove_cvref_t<decltype(Backend)>, uring_t>)
+            return;
+#endif
+        io_context ioc(Backend);
+        fault_scope f(sys::connect, EADDRNOTAVAIL);
+        bool threw = false;
+        try
+        {
+            std::ignore = test::make_mocket_pair(ioc);
+        }
+        catch (std::runtime_error const&)
+        {
+            threw = true;
+        }
+        BOOST_TEST(f.fired());
+        BOOST_TEST(threw);
     }
 
     void testBindFails()
@@ -737,6 +789,8 @@ struct posix_common_faults
             return;
         testSocketOpenFails();
         testBindFails();
+        testSocketPairConnectFails();
+        testMocketPairConnectFails();
         testSetOptionFails();
         testGetOptionFails();
         testAssignValidateFails();
