@@ -1301,6 +1301,8 @@ uring_scheduler::do_one(long timeout_us)
                     .count();
             if (delta_ns < 0)
                 delta_ns = 0;
+            if (timeout_us > 0 && timeout_us < delta_ns / 1000)
+                delta_ns = static_cast<decltype(delta_ns)>(timeout_us) * 1000;
             ts.tv_sec  = delta_ns / 1'000'000'000;
             ts.tv_nsec = delta_ns % 1'000'000'000;
             ts_ptr     = &ts;
