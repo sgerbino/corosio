@@ -59,7 +59,7 @@ jobs:
           Write-Host "exe=$exe cdb=$cdb gflags=$gflags"
           # Full page heap: a write to freed memory faults at the writer.
           & $gflags /p /enable boost_corosio_tests.exe /full
-          for ($i = 0; $i -lt 6; $i++) {
+          for ($i = 0; $i -lt 3; $i++) {
             Write-Host "=== round $i"
-            & $cdb -G -lines -y (Split-Path $exe) -c "sxe av; g; .lastevent; .ecxr; kpn 60; !heap -p -a @rcx; ~*kpn 40; q" $exe boost.corosio.tcp_server.iocp
+            & $cdb -G -lines -y (Split-Path $exe) -c "sxe av; g; .exr -1; kpn 40; !analyze -v; q" $exe boost.corosio.tcp_server.iocp
           }
