@@ -11,8 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [fa38b92e917306ff8a882a83d6285f2e7bf23abf]
-        attempt: [1, 2, 3]
+        ref: [b231dcdf539ead3ed7c9cf37cb94cfbc7b6f367e, 0a387cbd04934006aeb311ab490edcb6fc096168]
+        attempt: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,11 +88,15 @@ jobs:
                 if [ "$mins" -ge 4 ] && [ ! -e "/tmp/dumped-$pid" ]; then
                   touch "/tmp/dumped-$pid"
                   echo "##### HUNG pid=$pid etime=$et cmd=$cmd"
-                  sudo lldb -p $pid --batch -o "thread backtrace all" 2>&1 | head -800
+                  echo "--- lsof $pid"; sudo lsof -nP -a -p $pid -i 2>&1 | head -40
+                  echo "--- netstat loopback"; netstat -anp tcp | grep -E "127\.0\.0\.1|::1" | awk '{print $6}' | sort | uniq -c
+                  netstat -anp tcp | grep -E "SYN_|LISTEN" | head -40
+                  echo "--- tcp stats"; netstat -s -p tcp | grep -iE "drop|listen|syn|overflow" | head -30
+                  sudo lldb -p $pid --batch -o "thread backtrace all" 2>&1 | head -400
                 fi
               done
             done
           ) &
           wd=$!
-          ctest --test-dir build --parallel 3 --timeout 600 --output-on-failure 2>&1 | tail -80 || true
+          ctest --test-dir build --parallel 3 -E NOT_BUILT --timeout 600 --output-on-failure 2>&1 | tail -80 || true
           kill $wd || true
