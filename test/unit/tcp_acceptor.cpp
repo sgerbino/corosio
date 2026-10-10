@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstdint>
 #include <latch>
+#include <memory_resource>
 #include <stdexcept>
 #include <stop_token>
 #include <system_error>
@@ -2014,6 +2015,44 @@ struct tcp_acceptor_test
     }
 
 #if BOOST_COROSIO_POSIX
+    // An accept that took a connection, but was queued to its context
+    // rather than run, must close that connection when the context is
+    // torn down without running it.
+    void testQueuedAcceptClosesPeerOnTeardown()
+    {
+        auto client = make_native_socket(AF_INET, SOCK_STREAM);
+        BOOST_TEST(client != invalid_native_socket);
+        // The drained accept abandons its awaiting frame, as every
+        // drained I/O operation does; the arena reclaims it.
+        std::pmr::monotonic_buffer_resource arena;
+        {
+            io_context a(Backend);
+            tcp_acceptor acc(a);
+            BOOST_TEST(!acc.open());
+            acc.set_option(socket_option::reuse_address(true));
+            BOOST_TEST(!acc.bind(endpoint(ipv4_address::loopback(), 0)));
+            BOOST_TEST(!acc.listen());
+            BOOST_TEST(native_connect_loopback(
+                client, acc.local_endpoint().port(), false));
+
+            io_context b(Backend);
+            capy::run_async(b.get_executor(), &arena)(
+                [](tcp_acceptor& acc) -> capy::task<> {
+                    std::ignore = co_await acc.accept();
+                }(acc));
+            std::ignore = b.poll(); // the accept completes into a's queue
+        }
+
+        pollfd pfd{client, POLLIN, 0};
+        BOOST_TEST_EQ(::poll(&pfd, 1, 5000), 1);
+        ::fcntl(client, F_SETFL, ::fcntl(client, F_GETFL) | O_NONBLOCK);
+        char c;
+        BOOST_TEST_EQ(::recv(client, &c, 1, 0), 0);
+        close_native_socket(client);
+    }
+#endif
+
+#if BOOST_COROSIO_POSIX
     // An accept that completed but whose awaiter is destroyed before it
     // resumes must not strand the accepted connection: the awaiter's
     // context queues the completion, and its teardown destroys the
@@ -2148,6 +2187,7 @@ struct tcp_acceptor_test
         testAcceptAfterCancel();
         testDeferredExecutorCompletion();
 #if BOOST_COROSIO_POSIX
+        testQueuedAcceptClosesPeerOnTeardown();
         testAcceptedPeerClosedWhenAwaiterDestroyed(false);
         testAcceptedPeerClosedWhenAwaiterDestroyed(true);
 #endif
