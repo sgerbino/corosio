@@ -597,13 +597,20 @@ public:
             // listed active, under the lock stop() copies it under, so
             // that copy never races the replacement or misses it.
             std::stop_token st;
+            bool stopped_before = false;
             {
                 std::lock_guard<std::mutex> lock(st_->mutex);
                 if (w->stop_.stop_requested())
                     w->stop_ = {};
                 st = w->stop_.get_token();
                 st_->active_push(w);
+                stopped_before = st_->stopping;
             }
+            // A stop that came before this launch never saw the worker
+            // listed. The token is not handed out yet, so no callback
+            // runs here.
+            if (stopped_before)
+                w->stop_.request_stop();
 
             // Return worker to pool if coroutine setup throws
             struct guard_t
