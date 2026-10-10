@@ -419,6 +419,10 @@ win_wait_reactor::cancel_wait(overlapped_op* op)
         // arrived after them was refused at its caller.
         if (stop_.load(std::memory_order_acquire) || dead_err_)
             return;
+        // No thread yet means nothing was ever parked; every socket's
+        // close asks, and the queue would only grow.
+        if (!thread_.joinable())
+            return;
         pending_cancel_.push_back(op);
     }
     wake_self();
