@@ -509,6 +509,12 @@ public:
             connection. The implementation must invoke the launcher
             exactly once to start the handling coroutine.
 
+            @par Exception Safety
+            An exception escaping this function ends the process. A
+            worker that cannot start the connection should handle the
+            failure here; destroying the launcher without invoking it
+            returns the worker to the pool.
+
             @param launch Handle to start the connection coroutine.
         */
         virtual void run(launcher launch) = 0;
