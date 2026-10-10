@@ -1,0 +1,62 @@
+name: debug-win
+
+on:
+  push:
+    branches: [debug/msvc-tcp-server]
+
+jobs:
+  msvc:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: corosio-root
+
+      - id: capy-ref
+        uses: ./corosio-root/.github/actions/resolve-capy
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.capy-ref.outputs.repo }}
+          ref: ${{ steps.capy-ref.outputs.ref }}
+          path: capy-root
+
+      - uses: alandefreitas/cpp-actions/boost-clone@v1.9.0
+        with:
+          branch: develop
+          boost-dir: boost-source
+          modules-exclude-paths: ''
+          scan-modules-dir: corosio-root
+          scan-modules-ignore: corosio, capy
+
+      - name: Patch Boost
+        shell: bash
+        run: |
+          set -xe
+          rm -rf boost-source/libs/corosio boost-source/libs/capy
+          cp -rL boost-source boost-root
+          cp -r corosio-root boost-root/libs/corosio
+          cp -r capy-root boost-root/libs/capy
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        shell: cmd
+        run: |
+          cl 2>&1 | findstr Version
+          cmake -S boost-root -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBOOST_INCLUDE_LIBRARIES=corosio -DBOOST_COROSIO_BUILD_TESTS=ON -DBUILD_TESTING=ON -DBOOST_COROSIO_BUILD_BENCH=OFF
+          cmake --build build --target boost_corosio_tests
+
+      - name: Run tcp_server under cdb
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem build -Recurse -Filter boost_corosio_tests.exe | Select-Object -First 1).FullName
+          $cdb = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Debuggers" -Recurse -Filter cdb.exe | Where-Object FullName -like "*x64*" | Select-Object -First 1).FullName
+          Write-Host "exe=$exe cdb=$cdb"
+          for ($i = 0; $i -lt 10; $i++) {
+            Write-Host "=== round $i"
+            & $cdb -G -lines -y (Split-Path $exe) -c "sxe av; g; .lastevent; .ecxr; kpn 60; ~*kpn 40; q" $exe boost.corosio.tcp_server.iocp
+          }
