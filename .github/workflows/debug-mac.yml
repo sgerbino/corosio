@@ -11,8 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [b231dcdf539ead3ed7c9cf37cb94cfbc7b6f367e, 0a387cbd04934006aeb311ab490edcb6fc096168]
-        attempt: [1, 2, 3, 4, 5]
+        ref: [daf664dbbbe4d52c9f45851700dfce70d6d4f318]
+        attempt: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,5 +98,5 @@ jobs:
             done
           ) &
           wd=$!
-          ctest --test-dir build --parallel 3 -E NOT_BUILT --timeout 600 --output-on-failure 2>&1 | tail -80 || true
+          ctest --test-dir build --parallel 3 -E NOT_BUILT --timeout 300 --output-on-failure 2>&1 | grep -E "PROBE|Start|Test +#|tests passed|socket_pair" || true
           kill $wd || true
