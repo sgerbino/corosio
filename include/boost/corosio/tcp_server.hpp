@@ -603,6 +603,11 @@ public:
                     w->stop_ = {};
                 st = w->stop_.get_token();
                 st_->active_push(w);
+                // A stop that came before this launch never saw the
+                // worker listed. Nothing is registered on the fresh
+                // token yet, so requesting it under the lock is safe.
+                if (st_->stopping)
+                    w->stop_.request_stop();
             }
 
             // Return worker to pool if coroutine setup throws
