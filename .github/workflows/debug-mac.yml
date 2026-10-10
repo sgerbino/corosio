@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [0ec8b9e9ae7b14e5b6ecb8f56ee8d5b2bb64ff7f]
+        ref: [f599decc72e14ae0a0656ed58c7a1bc822a32b28]
         attempt: [1]
     steps:
       - uses: actions/checkout@v4
