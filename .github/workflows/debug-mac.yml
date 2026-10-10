@@ -79,7 +79,8 @@ jobs:
       - name: TIME_WAIT per suite
         shell: bash
         run: |
-          sysctl net.inet.ip.portrange.first net.inet.ip.portrange.last net.inet.tcp.msl || true
+          set +e
+          sysctl net.inet.ip.portrange.first net.inet.ip.portrange.last net.inet.tcp.msl
           tests=$(find build -name boost_corosio_tests -type f -perm -u+x | head -1)
           faults=$(find build -name boost_corosio_fault_tests -type f -perm -u+x | head -1)
           tw() { netstat -an -p tcp | grep -c TIME_WAIT; }
@@ -87,7 +88,7 @@ jobs:
           : > tw.txt
           while read s; do
             bin=$tests; case "$s" in boost.corosio.fault*) bin=$faults;; esac
-            b=$(tw); timeout 120 "$bin" "$s" > /dev/null 2>&1; rc=$?; a=$(tw)
+            b=$(tw); perl -e 'alarm 120; exec @ARGV' "$bin" "$s" > /dev/null 2>&1; rc=$?; a=$(tw)
             echo "$((a-b)) $s rc=$rc" >> tw.txt
           done < suites.txt
           echo "total: $(awk '{s+=$1} END{print s}' tw.txt)"
