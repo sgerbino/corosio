@@ -1572,11 +1572,11 @@ uring_scheduler::flush_after_cancel(int fd, Cancel&& cancel) noexcept
 inline void
 uring_op::on_cancel() noexcept
 {
-    request_cancel(); // coro_op: records the cancellation (sets the flag)
-    // Skip the cancel SQE if we never linked an SQE to this op — the
-    // bypass path in the caller will see cancelled=true and complete
-    // synchronously without a kernel round-trip.
-    if (sched_ && sqe_set.load(std::memory_order_acquire))
+    // Paired with uring_link_sqe: with no SQE linked yet, the
+    // initiator either sees the flag and completes without the kernel,
+    // or links and queues the cancel itself.
+    cancelled.store(true, std::memory_order_seq_cst);
+    if (sched_ && sqe_set.load(std::memory_order_seq_cst))
         sched_->submit_cancel_by_user_data(this);
 }
 

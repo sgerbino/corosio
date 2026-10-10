@@ -20,6 +20,7 @@
 
 #include <boost/corosio/delay.hpp>
 #include <boost/corosio/native/native_io_context.hpp>
+#include <boost/corosio/native/detail/uring/uring_socket_ops.hpp>
 #include <boost/corosio/local_stream_socket.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
@@ -33,15 +34,64 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <stop_token>
 #include <thread>
 
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 namespace boost::corosio {
+
+// A poll on a pipe that never becomes readable, so only a cancel can
+// complete it.
+struct cancel_probe_op : detail::uring_op
+{
+    int fd = -1;
+    std::atomic<bool> done{false};
+    int result = 0;
+
+    cancel_probe_op() noexcept : uring_op(&on_done, &on_cqe, &prep) {}
+
+    static void prep(detail::uring_op* base, ::io_uring_sqe* sqe) noexcept
+    {
+        ::io_uring_prep_poll_add(
+            sqe, static_cast<cancel_probe_op*>(base)->fd, POLLIN);
+    }
+
+    static void on_cqe(
+        detail::uring_op* base,
+        int res,
+        unsigned /*flags*/,
+        detail::ready_queue& local) noexcept
+    {
+        base->res = res;
+        local.push(base);
+    }
+
+    static void on_done(
+        void* /*owner*/,
+        detail::scheduler_op* base,
+        std::uint32_t /*bytes*/,
+        std::uint32_t /*error*/) noexcept
+    {
+        auto* self   = static_cast<cancel_probe_op*>(base);
+        self->result = self->res;
+        self->done   = true;
+    }
+};
+
+struct uring_probe_context : native_io_context<uring>
+{
+    detail::uring_scheduler& scheduler() noexcept
+    {
+        return *static_cast<detail::uring_scheduler*>(sched_);
+    }
+};
 
 struct uring_mt_scheduler_test
 {
@@ -197,8 +247,46 @@ struct uring_mt_scheduler_test
         BOOST_TEST_EQ(stranded, 0);
     }
 
+    // A stop that lands after an initiator found the op uncancelled,
+    // but before its SQE is linked, finds nothing to cancel yet; the
+    // link must cancel the op itself.
+    void testStopBeforeLinkCancelsOp()
+    {
+        uring_probe_context ctx;
+        auto& sched = ctx.scheduler();
+        int p[2];
+        BOOST_TEST_EQ(::pipe2(p, O_NONBLOCK | O_CLOEXEC), 0);
+
+        cancel_probe_op op;
+        op.fd     = p[0];
+        op.sched_ = &sched;
+        std::stop_source src;
+        op.start(src.get_token());
+        sched.work_started();
+
+        src.request_stop();
+        detail::uring_submit_op(sched, &op);
+
+        // Bounds a hang, not a timing assertion.
+        while (!op.done && ctx.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(op.done);
+        BOOST_TEST_EQ(op.result, -ECANCELED);
+
+        if (!op.done)
+        {
+            std::ignore = ::write(p[1], "x", 1);
+            ctx.restart();
+            ctx.run();
+        }
+        ::close(p[0]);
+        ::close(p[1]);
+    }
+
     void run()
     {
+        testStopBeforeLinkCancelsOp();
         testForeignPostWakesParkedFollower();
         testForeignPostWakesUnsafeIoRun();
         testSqpollCloseCancelsParkedRead();
