@@ -74,12 +74,20 @@ public:
         std::filesystem::path const& path,
         file_base::flags mode) override
     {
-        // Unavailable in the unsafe tier: the file thread pool completes
-        // cross-thread, which the lockless scheduler cannot accept.
-        if (sched_->scheduler_locking_disabled())
+        if (pool_unavailable())
             return std::make_error_code(std::errc::operation_not_supported);
         return static_cast<posix_random_access_file&>(impl).open_file(
             path, mode);
+    }
+
+    /** Check whether file I/O is unavailable on this context.
+
+        The file thread pool completes cross-thread, which the
+        lockless scheduler of the unsafe tier cannot accept.
+    */
+    bool pool_unavailable() const noexcept
+    {
+        return sched_->scheduler_locking_disabled();
     }
 
     void shutdown() override
@@ -363,6 +371,20 @@ posix_random_access_file::raf_op::do_work(pool_work_item* w) noexcept
     }
 
     self->svc_.post(static_cast<scheduler_op*>(op));
+}
+
+inline std::error_code
+posix_random_access_file::assign(native_handle_type handle) noexcept
+{
+    // The public assign() guarantees the object is closed.
+    if (svc_.pool_unavailable())
+        return std::make_error_code(std::errc::operation_not_supported);
+    if (auto ec = validate_file_fd(handle))
+        return ec;
+
+    fd_ = handle;
+    gate_.open(handle);
+    return {};
 }
 
 inline void
