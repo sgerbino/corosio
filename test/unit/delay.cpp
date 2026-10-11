@@ -11,6 +11,7 @@
 #include <boost/corosio/delay.hpp>
 
 #include <boost/corosio/timeout.hpp>
+#include <boost/corosio/detail/timer.hpp>
 #include <boost/capy/cond.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/ex/thread_pool.hpp>
@@ -24,6 +25,7 @@
 #include <ratio>
 #include <stdexcept>
 #include <stop_token>
+#include <tuple>
 #include <thread>
 #include <vector>
 
@@ -637,6 +639,85 @@ struct delay_test
         BOOST_TEST_PASS();
     }
 
+    struct count_on_exit
+    {
+        int& c_;
+        ~count_on_exit()
+        {
+            ++c_;
+        }
+    };
+
+    static capy::task<capy::io_result<>> parked_child(int& down)
+    {
+        count_on_exit g{down};
+        co_return co_await delay(std::chrono::hours(1));
+    }
+
+    static capy::task<capy::io_result<>>
+    queued_child(io_context& ioc, int& down)
+    {
+        count_on_exit g{down};
+        detail::timer t(ioc);
+        t.expires_after(std::chrono::nanoseconds(0));
+        auto [ec] = co_await t.wait();
+        co_return capy::io_result<>{ec};
+    }
+
+    // Teardown destroys a frame a parent task is awaiting; the whole
+    // chain must go, each frame once.
+    void testTeardownNestedTaskOnTimer()
+    {
+        int child = 0, parent = 0;
+        {
+            io_context ioc(Backend);
+            capy::run_async(ioc.get_executor())(
+                [](int& child, int& parent) -> capy::task<> {
+                    count_on_exit g{parent};
+                    std::ignore = co_await parked_child(child);
+                }(child, parent));
+            ioc.poll();
+        }
+        BOOST_TEST_EQ(child, 1);
+        BOOST_TEST_EQ(parent, 1);
+    }
+
+    // The same with timeout() owning the awaited task.
+    void testTeardownTimeoutOfTask()
+    {
+        int child = 0, parent = 0;
+        {
+            io_context ioc(Backend);
+            capy::run_async(ioc.get_executor())(
+                [](int& child, int& parent) -> capy::task<> {
+                    count_on_exit g{parent};
+                    std::ignore = co_await timeout(
+                        parked_child(child), std::chrono::hours(2));
+                }(child, parent));
+            ioc.poll();
+        }
+        BOOST_TEST_EQ(child, 1);
+        BOOST_TEST_EQ(parent, 1);
+    }
+
+    // The same when the child's completion is already queued, so the
+    // scheduler's drain destroys it rather than the timer service.
+    void testTeardownQueuedNestedContinuation()
+    {
+        int child = 0, parent = 0;
+        {
+            io_context ioc(Backend);
+            capy::run_async(ioc.get_executor())(
+                [](io_context& ioc, int& child, int& parent) -> capy::task<> {
+                    count_on_exit g{parent};
+                    std::ignore = co_await queued_child(ioc, child);
+                }(ioc, child, parent));
+            std::ignore = ioc.poll_one();
+        }
+        BOOST_TEST_EQ(child, 1);
+        BOOST_TEST_EQ(parent, 1);
+    }
+
     void testShutdownReentrantThreeFrames()
     {
         // Three suspended delay()/timeout() frames each own a timer that
@@ -1067,6 +1148,9 @@ struct delay_test
         testMultiTimerExpiryOrder();
         testAbruptStopWithPendingDelays();
         testShutdownReentrantThreeFrames();
+        testTeardownNestedTaskOnTimer();
+        testTeardownTimeoutOfTask();
+        testTeardownQueuedNestedContinuation();
         testInitiationStopRace();
         testClockDeadlineCompletes();
         testClockPastDeadlineCompletesImmediately();
