@@ -750,6 +750,9 @@ public:
         Multiple endpoints can be bound by calling this method
         multiple times before @ref start.
 
+        @pre No session is active: the server was never started, or
+            it was stopped and joined.
+
         @param ep The local endpoint to bind to.
 
         @return An error code indicating success, or the reason binding
