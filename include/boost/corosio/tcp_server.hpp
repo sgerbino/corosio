@@ -25,11 +25,13 @@
 #include <boost/capy/ex/frame_alloc_mixin.hpp>
 #include <boost/capy/ex/frame_allocator.hpp>
 #include <boost/capy/ex/io_env.hpp>
+#include <boost/capy/ex/recycling_memory_resource.hpp>
 #include <boost/capy/ex/run_async.hpp>
 
 #include <atomic>
 #include <coroutine>
 #include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <ranges>
 #include <utility>
@@ -599,6 +601,14 @@ public:
             the coroutine completes, the worker is automatically returned
             to the idle pool.
 
+            @pre @p task was created on a chain whose frame allocator
+                outlives the connection: the task's frame is allocated
+                where it is created, and it lives until the connection
+                ends. Inside @ref worker_base::run that allocator is the
+                accept loop's, the frame allocator of the server's
+                execution context. By default that is the process-wide
+                recycling resource, so a task created there meets this.
+
             @tparam Executor Executor type satisfying capy::Executor.
 
             @param ex The executor to run the coroutine on.
@@ -648,8 +658,28 @@ public:
                 }
             } guard{st_, w};
 
-            auto wrapper = launch_coro<Executor>{}(
-                ex, st, state_ref(st_), std::move(task), w);
+            // The connection can outlive whatever chain invoked this
+            // launcher, so its frame comes from the process-wide
+            // recycling resource rather than that chain's allocator.
+            struct allocator_scope
+            {
+                std::pmr::memory_resource* prev =
+                    capy::get_current_frame_allocator();
+                allocator_scope() noexcept
+                {
+                    capy::set_current_frame_allocator(
+                        capy::get_recycling_memory_resource());
+                }
+                ~allocator_scope()
+                {
+                    capy::set_current_frame_allocator(prev);
+                }
+            };
+            launch_wrapper<Executor> wrapper = [&] {
+                allocator_scope scope;
+                return launch_coro<Executor>{}(
+                    ex, st, state_ref(st_), std::move(task), w);
+            }();
 
             // Executor and stop token stored in promise via
             // constructor. Post through the frame-embedded

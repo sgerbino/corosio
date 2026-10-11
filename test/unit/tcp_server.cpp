@@ -20,7 +20,9 @@
 #include <boost/capy/task.hpp>
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
+#include <memory_resource>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
@@ -78,6 +80,29 @@ public:
     test_server(io_context& ctx) : tcp_server(ctx, ctx.get_executor())
     {
         set_workers(make_test_workers(ctx, 4));
+    }
+};
+
+// Counts the blocks it hands out that are still live.
+struct counting_resource : std::pmr::memory_resource
+{
+    int live = 0;
+
+    void* do_allocate(std::size_t n, std::size_t align) override
+    {
+        ++live;
+        return std::pmr::new_delete_resource()->allocate(n, align);
+    }
+
+    void do_deallocate(void* p, std::size_t n, std::size_t align) override
+    {
+        --live;
+        std::pmr::new_delete_resource()->deallocate(p, n, align);
+    }
+
+    bool do_is_equal(std::pmr::memory_resource const& o) const noexcept override
+    {
+        return this == &o;
     }
 };
 
@@ -1198,6 +1223,46 @@ struct tcp_server_test
         srv.join();
     }
 
+    // The connection a launcher starts outlives the chain that invoked
+    // it, so it must not be allocated from that chain's allocator.
+    void testLateLaunchOutlivesInvokingChain()
+    {
+        io_context ioc(Backend);
+        std::optional<tcp_server::launcher> held;
+        holding_server srv(ioc, &held);
+        BOOST_TEST(!srv.bind(endpoint(ipv4_address::loopback(), 0)));
+        auto ep = srv.local_endpoint();
+        srv.start();
+
+        io_context cctx;
+        BOOST_TEST(!connect_result(cctx, ep));
+        // Bounds a hang, not a timing assertion.
+        while (!held && ioc.run_one_for(std::chrono::seconds(5)) != 0)
+        {
+        }
+        BOOST_TEST(held.has_value());
+
+        counting_resource mr;
+        bool done    = false;
+        auto session = []() -> capy::task<> { co_return; }();
+        capy::run_async(ioc.get_executor(), &mr, [&]() { done = true; })(
+            [](tcp_server::launcher& l, capy::task<> t,
+               io_context::executor_type ex) -> capy::task<> {
+                l(ex, std::move(t));
+                co_return;
+            }(*held, std::move(session), ioc.get_executor()));
+        while (!done && ioc.run_one() != 0)
+        {
+        }
+        BOOST_TEST(done);
+        BOOST_TEST_EQ(mr.live, 0);
+
+        held.reset();
+        srv.stop();
+        ioc.run();
+        srv.join();
+    }
+
     struct overlap_counts
     {
         std::atomic<int> in_run{0};
@@ -1430,6 +1495,7 @@ struct tcp_server_test
         testDestroyWhileRunnersAccept();
         testDestroyWithBusyWorkerClosesListener();
         testStopReachesLaunchAfterStop();
+        testLateLaunchOutlivesInvokingChain();
         testWorkerNotReusedDuringRun();
         testSetWorkersWhileAcceptingThrows();
         testSetWorkersWithBorrowedWorkerThrows();
