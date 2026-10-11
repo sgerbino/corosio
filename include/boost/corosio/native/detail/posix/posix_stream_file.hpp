@@ -381,19 +381,6 @@ posix_stream_file::release()
     return fd;
 }
 
-inline std::error_code
-posix_stream_file::assign(native_handle_type handle) noexcept
-{
-    // The public assign() guarantees the object is closed.
-    if (auto ec = validate_file_fd(handle))
-        return ec;
-
-    fd_     = handle;
-    offset_ = 0;
-    gate_.open(handle);
-    return {};
-}
-
 inline capy::io_result<std::uint64_t>
 posix_stream_file::seek(
     std::int64_t offset, file_base::seek_basis origin) noexcept

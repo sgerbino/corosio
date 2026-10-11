@@ -332,18 +332,6 @@ posix_random_access_file::release()
     return fd;
 }
 
-inline std::error_code
-posix_random_access_file::assign(native_handle_type handle) noexcept
-{
-    // The public assign() guarantees the object is closed.
-    if (auto ec = validate_file_fd(handle))
-        return ec;
-
-    fd_ = handle;
-    gate_.open(handle);
-    return {};
-}
-
 // read_some_at, write_some_at are defined in
 // posix_random_access_file_service.hpp after the service.
 
