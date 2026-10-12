@@ -2022,9 +2022,6 @@ struct tcp_acceptor_test
     {
         auto client = make_native_socket(AF_INET, SOCK_STREAM);
         BOOST_TEST(client != invalid_native_socket);
-        // The uring backend still abandons its drained frames; the
-        // arena reclaims them.
-        std::pmr::monotonic_buffer_resource arena;
         {
             // Outlives `a`: the drained accept destroys its awaiting
             // frame, whose work guard still refers to this context.
@@ -2038,7 +2035,7 @@ struct tcp_acceptor_test
             BOOST_TEST(native_connect_loopback(
                 client, acc.local_endpoint().port(), false));
 
-            capy::run_async(b.get_executor(), &arena)(
+            capy::run_async(b.get_executor())(
                 [](tcp_acceptor& acc) -> capy::task<> {
                     std::ignore = co_await acc.accept();
                 }(acc));
