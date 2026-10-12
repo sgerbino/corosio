@@ -279,11 +279,10 @@ posix_resolver::resolve_op::operator()()
 inline void
 posix_resolver::resolve_op::destroy()
 {
-    stop_cb.reset();
-    auto local_ex = ex;
-    // May destroy the implementation, and with it this op.
-    object_ref_.reset();
-    local_ex.on_work_finished();
+    // Released first: the executor lives in the frame destroyed next,
+    // which may also destroy the implementation and with it this op.
+    ex.on_work_finished();
+    destroy_awaiting();
 }
 
 // posix_resolver::reverse_resolve_op implementation
@@ -335,11 +334,10 @@ posix_resolver::reverse_resolve_op::operator()()
 inline void
 posix_resolver::reverse_resolve_op::destroy()
 {
-    stop_cb.reset();
-    auto local_ex = ex;
-    // May destroy the implementation, and with it this op.
-    object_ref_.reset();
-    local_ex.on_work_finished();
+    // Released first: the executor lives in the frame destroyed next,
+    // which may also destroy the implementation and with it this op.
+    ex.on_work_finished();
+    destroy_awaiting();
 }
 
 // posix_resolver implementation
@@ -379,6 +377,7 @@ posix_resolver::resolve(
     resolve_pool_op_.resolver_ = this;
     resolve_pool_op_.ref_      = detail::object_ref(this);
     resolve_pool_op_.func_     = &posix_resolver::do_resolve_work;
+    resolve_pool_op_.destroy_  = &posix_resolver::destroy_resolve_work;
     if (auto pec = svc_.pool().post(&resolve_pool_op_))
     {
         // The pool is shutting down, or the system refused it a thread.
@@ -427,6 +426,7 @@ posix_resolver::reverse_resolve(
     reverse_pool_op_.resolver_ = this;
     reverse_pool_op_.ref_      = detail::object_ref(this);
     reverse_pool_op_.func_     = &posix_resolver::do_reverse_resolve_work;
+    reverse_pool_op_.destroy_  = &posix_resolver::destroy_reverse_resolve_work;
     if (auto pec = svc_.pool().post(&reverse_pool_op_))
     {
         // The pool is shutting down, or the system refused it a thread.
@@ -539,6 +539,24 @@ posix_resolver::do_reverse_resolve_work(pool_work_item* w) noexcept
     // outlive that wait. Nothing may touch *self after the post.
     self->reverse_op_.object_ref_ = std::move(pw->ref_);
     self->svc_.post(&self->reverse_op_);
+}
+
+inline void
+posix_resolver::destroy_resolve_work(pool_work_item* w) noexcept
+{
+    auto* pw              = static_cast<pool_op*>(w);
+    auto* self            = pw->resolver_;
+    self->op_.object_ref_ = std::move(pw->ref_);
+    self->op_.destroy();
+}
+
+inline void
+posix_resolver::destroy_reverse_resolve_work(pool_work_item* w) noexcept
+{
+    auto* pw                      = static_cast<pool_op*>(w);
+    auto* self                    = pw->resolver_;
+    self->reverse_op_.object_ref_ = std::move(pw->ref_);
+    self->reverse_op_.destroy();
 }
 
 // posix_resolver_service implementation

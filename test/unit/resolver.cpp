@@ -1226,9 +1226,10 @@ struct resolver_test
     // drains, or the completion the worker posts on its way out is
     // neither run nor destroyed and the operation's keepalive leaks.
     //
-    // The task is started by hand and owned by the test, so the frame
-    // the library abandons at teardown is destroyed here rather than
-    // leaked: what LeakSanitizer sees left over is the defect alone.
+    // The task is started by hand and owned by the test. Teardown
+    // destroys its frame wherever the work then sits, on the pool queue
+    // or the scheduler's, which releases the task before it goes out of
+    // scope here.
     //
     // Forward resolution reaches the pool on POSIX only; IOCP resolves
     // through GetAddrInfoExW and the completion port.
@@ -1304,10 +1305,10 @@ struct resolver_test
     // file synchronously, so GetAddrInfoExW posts the op inline and it is
     // reliably queued when the resolver is freed.
     //
-    // The task is started by hand and owned by the test, so the frame the
-    // library abandons at teardown is destroyed here rather than leaked:
-    // what a sanitizer reports is the defect alone. The bug is observable
-    // only under ASan; without a sanitizer the freed read is silent.
+    // The task is started by hand and owned by the test; teardown
+    // destroys its frame, which releases the task before it goes out of
+    // scope here. The bug is observable only under ASan; without a
+    // sanitizer the freed read is silent.
     //
     // Contrast the reverse path, which holds the keepalive on
     // reverse_op_.object_ref_ across the queued completion

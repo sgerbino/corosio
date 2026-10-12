@@ -204,9 +204,10 @@ posix_stream_file::read_some(
 
     op.ex.on_work_started();
 
-    read_pool_op_.file_ = this;
-    read_pool_op_.ref_  = detail::object_ref(this);
-    read_pool_op_.func_ = &posix_stream_file::do_read_work;
+    read_pool_op_.file_    = this;
+    read_pool_op_.ref_     = detail::object_ref(this);
+    read_pool_op_.func_    = &posix_stream_file::do_read_work;
+    read_pool_op_.destroy_ = &posix_stream_file::destroy_read_work;
     if (auto pec = svc_.pool().post(&read_pool_op_))
     {
         // The pool is shutting down, or the system refused it a thread.
@@ -327,9 +328,10 @@ posix_stream_file::write_some(
 
     op.ex.on_work_started();
 
-    write_pool_op_.file_ = this;
-    write_pool_op_.ref_  = detail::object_ref(this);
-    write_pool_op_.func_ = &posix_stream_file::do_write_work;
+    write_pool_op_.file_    = this;
+    write_pool_op_.ref_     = detail::object_ref(this);
+    write_pool_op_.func_    = &posix_stream_file::do_write_work;
+    write_pool_op_.destroy_ = &posix_stream_file::destroy_write_work;
     if (auto pec = svc_.pool().post(&write_pool_op_))
     {
         // The pool is shutting down, or the system refused it a thread.
@@ -399,6 +401,24 @@ posix_stream_file::do_write_work(pool_work_item* w) noexcept
 
     op.object_ref_ = std::move(pw->ref_);
     self->svc_.post(&op);
+}
+
+inline void
+posix_stream_file::destroy_read_work(pool_work_item* w) noexcept
+{
+    auto* pw                   = static_cast<pool_op*>(w);
+    auto* self                 = pw->file_;
+    self->read_op_.object_ref_ = std::move(pw->ref_);
+    self->read_op_.destroy();
+}
+
+inline void
+posix_stream_file::destroy_write_work(pool_work_item* w) noexcept
+{
+    auto* pw                    = static_cast<pool_op*>(w);
+    auto* self                  = pw->file_;
+    self->write_op_.object_ref_ = std::move(pw->ref_);
+    self->write_op_.destroy();
 }
 
 inline std::error_code

@@ -7,8 +7,12 @@
 // Official repository: https://github.com/cppalliance/corosio
 //
 
+#include <boost/corosio/detail/platform.hpp>
 #include <boost/corosio/io_context.hpp>
+#include <boost/corosio/random_access_file.hpp>
+#include <boost/corosio/resolver.hpp>
 #include <boost/corosio/signal_set.hpp>
+#include <boost/corosio/stream_file.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
 #include <boost/corosio/test/socket_pair.hpp>
@@ -17,10 +21,15 @@
 #include <boost/capy/task.hpp>
 
 #include <csignal>
+#include <cstddef>
+#include <memory>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 
 #include "context.hpp"
+#include "pool_teardown.hpp"
+#include "temp_path.hpp"
 #include "test_suite.hpp"
 
 namespace boost::corosio {
@@ -30,6 +39,14 @@ namespace boost::corosio {
 template<auto Backend>
 struct teardown_destroy_test
 {
+    // Frames from the recycling allocator are never really freed, which
+    // hides a use-after-free from ASan; these go through operator new.
+    static auto spawn(io_context& ioc)
+    {
+        return capy::run_async(
+            ioc.get_executor(), std::allocator<std::byte>{});
+    }
+
     struct destroy_count_t
     {
         int* n;
@@ -56,7 +73,7 @@ struct teardown_destroy_test
             auto parent = [&](tcp_socket& s, destroy_count_t) -> capy::task<> {
                 co_await child(s, destroy_count_t(child_down));
             };
-            capy::run_async(ioc.get_executor())(
+            spawn(ioc)(
                 parent(a, destroy_count_t(parent_down)));
             std::ignore = ioc.poll();
             BOOST_TEST_EQ(child_down, 0);
@@ -79,7 +96,7 @@ struct teardown_destroy_test
                 char c;
                 std::ignore = co_await s.read_some(capy::mutable_buffer(&c, 1));
             };
-            capy::run_async(ioc.get_executor())(
+            spawn(ioc)(
                 owner(std::move(a), destroy_count_t(down)));
             std::ignore = ioc.poll();
             BOOST_TEST_EQ(down, 0);
@@ -100,7 +117,7 @@ struct teardown_destroy_test
             auto parent = [](tcp_acceptor& a, destroy_count_t) -> capy::task<> {
                 std::ignore = co_await a.accept();
             };
-            capy::run_async(ioc.get_executor())(
+            spawn(ioc)(
                 parent(acc, destroy_count_t(parent_down)));
             std::ignore = ioc.poll();
             BOOST_TEST_EQ(parent_down, 0);
@@ -117,7 +134,7 @@ struct teardown_destroy_test
             auto parent = [](signal_set& s, destroy_count_t) -> capy::task<> {
                 std::ignore = co_await s.wait();
             };
-            capy::run_async(ioc.get_executor())(
+            spawn(ioc)(
                 parent(sigs, destroy_count_t(parent_down)));
             std::ignore = ioc.poll();
             BOOST_TEST_EQ(parent_down, 0);
@@ -134,12 +151,120 @@ struct teardown_destroy_test
             auto owner = [](signal_set s, destroy_count_t) -> capy::task<> {
                 std::ignore = co_await s.wait();
             };
-            capy::run_async(ioc.get_executor())(
+            spawn(ioc)(
                 owner(signal_set(ioc, SIGINT), destroy_count_t(down)));
             std::ignore = ioc.poll();
             BOOST_TEST_EQ(down, 0);
         }
         BOOST_TEST_EQ(down, 1);
+    }
+
+#if BOOST_COROSIO_POSIX
+    // The read waits behind a parked worker, so at teardown it is still
+    // queued on the blocking pool or its completion is still queued on
+    // the scheduler; either way its frame is destroyed.
+    void testQueuedFileReadDestroysChain()
+    {
+        int parent_down = 0;
+        test::temp_file tmp("teardown_destroy_", "hello world");
+        test::pool_blocker blocker;
+        {
+            io_context ioc(Backend);
+            BOOST_TEST(test::park_pool_worker(ioc, blocker));
+            random_access_file f(ioc);
+            BOOST_TEST(!f.open(tmp.path, file_base::read_only));
+            auto parent = [](random_access_file& rf,
+                             destroy_count_t) -> capy::task<> {
+                char c;
+                std::ignore =
+                    co_await rf.read_some_at(0, capy::mutable_buffer(&c, 1));
+            };
+            spawn(ioc)(
+                parent(f, destroy_count_t(parent_down)));
+            std::ignore = ioc.poll();
+        }
+        BOOST_TEST_EQ(parent_down, 1);
+    }
+#endif
+
+    // Each operation still queued on the pool when it shuts down is
+    // destroyed there, before the context goes, and its blocking call
+    // never runs.
+    template<class Start>
+    void checkPoolShutdownDestroys(Start start)
+    {
+        int parent_down = 0;
+        test::pool_blocker blocker;
+        io_context ioc(Backend);
+        BOOST_TEST(test::park_pool_worker(ioc, blocker));
+        start(ioc, destroy_count_t(parent_down));
+        std::ignore = ioc.poll();
+        BOOST_TEST_EQ(parent_down, 0);
+        test::shutdown_pool_behind(ioc, blocker);
+        BOOST_TEST_EQ(parent_down, 1);
+    }
+
+    void testPoolShutdownDestroysQueuedOps()
+    {
+        // IOCP reads files and resolves names without the pool; only
+        // its reverse resolve uses it.
+#if BOOST_COROSIO_POSIX
+        test::temp_file tmp("teardown_destroy_", "hello world");
+
+#if BOOST_COROSIO_HAS_URING
+        constexpr bool on_ring =
+            std::is_same_v<std::remove_const_t<decltype(Backend)>, uring_t>;
+#else
+        constexpr bool on_ring = false;
+#endif
+        // io_uring reads files through the ring, not the pool.
+        if constexpr (!on_ring)
+        {
+            checkPoolShutdownDestroys([&](io_context& ioc, destroy_count_t d) {
+                auto op = [](random_access_file f,
+                             destroy_count_t) -> capy::task<> {
+                    char c;
+                    std::ignore =
+                        co_await f.read_some_at(0, capy::mutable_buffer(&c, 1));
+                };
+                random_access_file f(ioc);
+                BOOST_TEST(!f.open(tmp.path, file_base::read_only));
+                spawn(ioc)(
+                    op(std::move(f), std::move(d)));
+            });
+            checkPoolShutdownDestroys([&](io_context& ioc, destroy_count_t d) {
+                auto op = [](stream_file f, destroy_count_t) -> capy::task<> {
+                    char c;
+                    std::ignore =
+                        co_await f.read_some(capy::mutable_buffer(&c, 1));
+                };
+                stream_file f(ioc);
+                BOOST_TEST(!f.open(tmp.path, file_base::read_only));
+                spawn(ioc)(
+                    op(std::move(f), std::move(d)));
+            });
+        }
+        checkPoolShutdownDestroys([](io_context& ioc, destroy_count_t d) {
+            auto op = [](resolver r, destroy_count_t) -> capy::task<> {
+                std::ignore = co_await r.resolve(
+                    "127.0.0.1", "80",
+                    resolve_flags::numeric_host |
+                        resolve_flags::numeric_service);
+            };
+            spawn(ioc)(
+                op(resolver(ioc), std::move(d)));
+        });
+#endif
+        checkPoolShutdownDestroys([](io_context& ioc, destroy_count_t d) {
+            auto op = [](resolver r, destroy_count_t) -> capy::task<> {
+                std::ignore = co_await r.resolve(
+                    endpoint(ipv4_address::loopback(), 80),
+                    reverse_flags::numeric_host |
+                        reverse_flags::numeric_service);
+            };
+            spawn(ioc)(
+                op(resolver(ioc), std::move(d)));
+        });
     }
 
     void run()
@@ -149,6 +274,10 @@ struct teardown_destroy_test
         testParkedAcceptDestroysChain();
         testParkedSignalWaitDestroysChain();
         testParkedSignalWaitOwningSetDestroysChain();
+#if BOOST_COROSIO_POSIX
+        testQueuedFileReadDestroysChain();
+#endif
+        testPoolShutdownDestroysQueuedOps();
     }
 };
 

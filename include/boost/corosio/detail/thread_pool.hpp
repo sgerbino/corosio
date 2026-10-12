@@ -58,6 +58,15 @@ struct pool_work_item : intrusive_queue<pool_work_item>::node
 
     /// Completion handler invoked by the worker thread.
     func_type func_ = nullptr;
+
+    /** Teardown for an item the pool shuts down before running.
+
+        An operation that owns a suspended coroutine sets this, so the
+        coroutine is destroyed at shutdown instead of the pool making
+        the blocking call nobody is left to wait for. When null, the
+        item is run by `func_` instead.
+    */
+    func_type destroy_ = nullptr;
 };
 
 /** Shared thread pool for dispatching blocking operations.
@@ -78,7 +87,9 @@ struct pool_work_item : intrusive_queue<pool_work_item>::node
     @par Shutdown
     Sets a shutdown flag, notifies all threads, and joins them.
     In-flight blocking calls complete naturally before the thread
-    exits.
+    exits. Items still queued are not run: each is handed to its
+    `destroy_`, or run by `func_` on the shutting-down thread when it
+    has none.
 
     @note Create this service after the scheduler its work items post
     completions to. Services shut down newest first, so a pool created
@@ -160,7 +171,7 @@ public:
         Safe. Racing first posts start the workers once.
 
         @param w The work item to execute. Must remain valid until
-                 its `func_` has been called.
+                 its `func_` or `destroy_` has been called.
 
         @return An empty code if the item was enqueued;
                 `capy::error::canceled` if the pool has already shut
@@ -185,8 +196,9 @@ public:
 
     /** Shut down the thread pool.
 
-        Signals all threads to exit after draining any
-        remaining queued work, then joins them.
+        Signals all threads to exit once their current item is done,
+        joins them, then disposes of every item still queued without
+        running its blocking work where the item says how.
     */
     void shutdown() override;
 };
@@ -208,13 +220,11 @@ thread_pool::worker_loop(unsigned index)
             cv_.wait(
                 lock, [this] { return shutdown_ || !work_queue_.empty(); });
 
+            // What is still queued is left to shutdown(), which does not
+            // make blocking calls whose results nobody will read.
+            if (shutdown_)
+                return;
             w = work_queue_.pop();
-            if (!w)
-            {
-                if (shutdown_)
-                    return;
-                continue;
-            }
         }
         w->func_(w);
     }
@@ -294,10 +304,19 @@ thread_pool::shutdown()
     }
     threads_.clear();
 
+    intrusive_queue<pool_work_item> leftover;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        while (work_queue_.pop())
-            ;
+        leftover.splice(work_queue_);
+    }
+    // Unlocked: destroying a coroutine can reach post() through the
+    // objects its frame owned.
+    while (auto* w = leftover.pop())
+    {
+        if (w->destroy_)
+            w->destroy_(w);
+        else
+            w->func_(w);
     }
 }
 

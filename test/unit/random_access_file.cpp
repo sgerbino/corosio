@@ -693,9 +693,10 @@ struct random_access_file_test
     // the completion the worker posts on its way out is neither run nor
     // destroyed and the operation's keepalive leaks.
     //
-    // The task is started by hand and owned by the test, so the frame
-    // the library abandons at teardown is destroyed here rather than
-    // leaked: what LeakSanitizer sees left over is the defect alone.
+    // The task is started by hand and owned by the test. Teardown
+    // destroys its frame wherever the work then sits, on the pool queue
+    // or the scheduler's, which releases the task before it goes out of
+    // scope here.
     void testDestroyWithPoolWorkQueued()
     {
 #if BOOST_COROSIO_HAS_URING

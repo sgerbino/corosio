@@ -238,6 +238,8 @@ private:
 
     static void do_read_work(pool_work_item*) noexcept;
     static void do_write_work(pool_work_item*) noexcept;
+    static void destroy_read_work(pool_work_item*) noexcept;
+    static void destroy_write_work(pool_work_item*) noexcept;
 };
 
 // ---------------------------------------------------------------------------
@@ -443,10 +445,10 @@ posix_stream_file::file_op::operator()()
 inline void
 posix_stream_file::file_op::destroy()
 {
-    stop_cb.reset();
-    auto local_ex = ex;
-    object_ref_.reset();
-    local_ex.on_work_finished();
+    // Released first: the executor lives in the frame destroyed next,
+    // which may also destroy the implementation and with it this op.
+    ex.on_work_finished();
+    destroy_awaiting();
 }
 
 } // namespace boost::corosio::detail

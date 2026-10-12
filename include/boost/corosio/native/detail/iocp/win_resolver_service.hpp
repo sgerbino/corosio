@@ -516,6 +516,7 @@ win_resolver::reverse_resolve(
     reverse_pool_op_.resolver_ = this;
     reverse_pool_op_.ref_      = detail::object_ref(this);
     reverse_pool_op_.func_     = &win_resolver::do_reverse_resolve_work;
+    reverse_pool_op_.destroy_  = &win_resolver::destroy_reverse_resolve_work;
     if (auto pec = svc_.pool().post(&reverse_pool_op_))
     {
         // The pool is shutting down, or the system refused it a thread.
@@ -613,6 +614,15 @@ win_resolver::do_reverse_resolve_work(pool_work_item* w) noexcept
     // Post only; the initiation credit is released where the op is
     // consumed.
     self->svc_.post(&self->reverse_op_);
+}
+
+inline void
+win_resolver::destroy_reverse_resolve_work(pool_work_item* w) noexcept
+{
+    auto* pw                      = static_cast<pool_op*>(w);
+    auto* self                    = pw->resolver_;
+    self->reverse_op_.object_ref_ = std::move(pw->ref_);
+    self->reverse_op_.destroy();
 }
 
 // win_resolver_service

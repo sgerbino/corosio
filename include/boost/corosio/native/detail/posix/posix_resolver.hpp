@@ -281,6 +281,12 @@ public:
     /// Execute blocking `getnameinfo()` on a pool thread.
     static void do_reverse_resolve_work(pool_work_item*) noexcept;
 
+    /// Destroy a forward resolution the pool shut down before running.
+    static void destroy_resolve_work(pool_work_item*) noexcept;
+
+    /// Destroy a reverse resolution the pool shut down before running.
+    static void destroy_reverse_resolve_work(pool_work_item*) noexcept;
+
 private:
     posix_resolver_service& svc_;
 };

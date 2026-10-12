@@ -310,6 +310,9 @@ public:
     /// Execute blocking `GetNameInfoW()` on a pool thread.
     static void do_reverse_resolve_work(pool_work_item*) noexcept;
 
+    /// Destroy a reverse resolution the pool shut down before running.
+    static void destroy_reverse_resolve_work(pool_work_item*) noexcept;
+
 private:
     /// Cancel the in-flight forward lookup, if any.
     void cancel_lookup() noexcept;
