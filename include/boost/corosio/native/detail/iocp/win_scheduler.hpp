@@ -24,6 +24,7 @@
 
 #include <boost/corosio/detail/scheduler_op.hpp>
 #include <boost/capy/continuation.hpp>
+#include <boost/capy/ex/destroy.hpp>
 #include <boost/corosio/native/detail/iocp/win_completion_key.hpp>
 #include <boost/corosio/native/detail/iocp/win_mutex.hpp>
 
@@ -229,28 +230,11 @@ win_scheduler::post(std::coroutine_handle<> h) const
             auto* self = static_cast<post_handler*>(base);
             if (!owner)
             {
-                // Shutdown path: destroy the coroutine frame synchronously.
-                //
-                // Bounded destruction invariant: the chain triggered by
-                // coro.destroy() is at most two levels deep:
-                //   1. task frame destroyed → ~io_awaitable_promise_base()
-                //      destroys stored continuation (if != noop_coroutine)
-                //   2. continuation (trampoline) destroyed → final_suspend
-                //      returns suspend_never, no further continuation
-                //
-                // If a future refactor adds deeper continuation chains,
-                // this would reintroduce re-entrant stack overflow risk.
-#ifndef NDEBUG
-                static thread_local int destroy_depth = 0;
-                ++destroy_depth;
-                BOOST_COROSIO_ASSERT(destroy_depth <= 2);
-#endif
+                // capy::destroy frees nested frames before the parents
+                // they release, which may hold an allocator by value.
                 auto coro = self->h_;
                 delete self;
-                coro.destroy();
-#ifndef NDEBUG
-                --destroy_depth;
-#endif
+                capy::destroy(coro);
                 return;
             }
             auto coro = self->h_;
@@ -811,7 +795,7 @@ win_scheduler::shutdown()
                 // Drain without resuming: destroy the parked frame.
                 auto* c = reinterpret_cast<capy::continuation*>(overlapped);
                 if (c->h)
-                    c->h.destroy();
+                    capy::destroy(c->h);
             }
             else
             {
@@ -858,7 +842,7 @@ win_scheduler::shutdown()
         {
             auto* c = reinterpret_cast<capy::continuation*>(overlapped);
             if (c->h)
-                c->h.destroy();
+                capy::destroy(c->h);
         }
         else
         {

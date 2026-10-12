@@ -31,6 +31,7 @@
 #include <boost/corosio/native/detail/make_err.hpp>
 #include <boost/corosio/native/detail/posix/posix_signal_service.hpp>
 #include <boost/capy/ex/execution_context.hpp>
+#include <boost/capy/ex/destroy.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -764,7 +765,7 @@ uring_scheduler::shutdown()
         {
             lock.unlock();
             if (auto h = ready_as_cont(e)->h)
-                h.destroy();
+                capy::destroy(h);
             lock.lock();
         }
         else
@@ -932,7 +933,7 @@ uring_scheduler::post(std::coroutine_handle<> h) const
             auto saved = h_;
             delete this;
             if (saved)
-                saved.destroy();
+                capy::destroy(saved);
         }
     };
 

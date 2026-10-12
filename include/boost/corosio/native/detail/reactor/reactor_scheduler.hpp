@@ -13,6 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/object_ref.hpp>
 #include <boost/capy/ex/execution_context.hpp>
+#include <boost/capy/ex/destroy.hpp>
 
 #include <boost/corosio/detail/ready_queue.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
@@ -519,7 +520,7 @@ reactor_scheduler::post(std::coroutine_handle<> h) const
         {
             auto saved = h_;
             delete this;
-            saved.destroy();
+            capy::destroy(saved);
         }
     };
 
@@ -805,7 +806,7 @@ reactor_scheduler::shutdown_drain()
         {
             lock.unlock();
             if (auto h = ready_as_cont(e)->h)
-                h.destroy();
+                capy::destroy(h);
             lock.lock();
         }
         else

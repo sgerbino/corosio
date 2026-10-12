@@ -10,6 +10,7 @@
 
 #include <boost/corosio/detail/timer.hpp>
 #include <boost/corosio/detail/timer_service.hpp>
+#include <boost/capy/ex/destroy.hpp>
 
 namespace boost::corosio::detail {
 
@@ -185,7 +186,7 @@ waiter_node::completion_op::destroy()
     auto& sched = w->svc_->get_scheduler();
     sched.work_finished();
     if (h)
-        h.destroy();
+        capy::destroy(h);
 }
 
 } // namespace boost::corosio::detail

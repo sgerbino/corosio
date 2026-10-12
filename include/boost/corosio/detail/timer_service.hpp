@@ -20,6 +20,7 @@
 #include <boost/corosio/detail/thread_local_ptr.hpp>
 #include <boost/capy/error.hpp>
 #include <boost/capy/ex/execution_context.hpp>
+#include <boost/capy/ex/destroy.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <system_error>
 
@@ -373,7 +374,7 @@ timer_service::shutdown()
         sched_->work_finished();
         // Destroying the frame also ends the node's storage
         if (h)
-            h.destroy();
+            capy::destroy(h);
     }
 
     for (auto* impl : impls)
