@@ -213,7 +213,9 @@ effective_concurrency_hint(
         outstanding work remains. Finally join the threads that ran the
         loop. Only then destroy the context. Work started with
         `capy::run` / `capy::run_async` is work-tracked, so a normal
-        `run()` completion already waits for it.
+        `run()` completion already waits for it. Destroying the context
+        destroys every coroutine still suspended in it, which orders it
+        against other execution contexts (see @ref ~io_context).
 
     @par Exception Safety
     A context that constructs is usable. The infrastructure its backend
@@ -381,7 +383,34 @@ public:
         apply_options_post_(opts, eff);
     }
 
-    /// Destroy the context; stops the loop and destroys every service.
+    /** Destroy the context, its services and the coroutines it holds.
+
+        The destructor stops the loop and destroys every service. Each
+        coroutine suspended in an operation of this context is destroyed
+        with its whole chain. This includes a coroutine posted to the
+        context and not yet resumed. It also includes a chain started on
+        another execution context. The destructors of those frames run on
+        the destroying thread.
+
+        @pre No thread is executing a run variant.
+
+        @pre Every other execution context that holds work for a chain
+            held here is destroyed after this context. A chain started
+            with `capy::run_async`, or awaited through `capy::run`, holds
+            work on the execution context it was started from. The same
+            holds for every execution context whose I/O objects the
+            chain's frames own. Destroying those frames uses those
+            execution contexts.
+
+        @pre Every other execution context that a waiter of an
+            `async_event`, `async_mutex` or `async_waker` owned by a
+            frame held here runs on is destroyed after this context.
+            Destroying the primitive posts that waiter, canceled, to its
+            own executor.
+            When such a waiter's frames also own I/O objects of this
+            context, no order of destruction is safe: stop that waiter
+            before destroying either context.
+    */
     ~io_context();
 
     /// Copy construction is disabled; the context owns its services.

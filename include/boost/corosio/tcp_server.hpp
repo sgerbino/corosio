@@ -645,6 +645,14 @@ public:
                 the coroutine holds the worker, whose socket belongs to
                 that execution context.
 
+            @pre The execution context of @p ex, when it is another one,
+                is destroyed before the server's execution context. The
+                coroutine holds no work on it, so the server's execution
+                context can then destroy a coroutine still suspended on
+                the worker's socket. Its frames must own no I/O object of
+                the execution context of @p ex, and destroying `Executor`
+                must not use its execution context.
+
             @pre @p task was created on a chain whose frame allocator
                 outlives the connection: the task's frame is allocated
                 where it is created, and it lives until the connection

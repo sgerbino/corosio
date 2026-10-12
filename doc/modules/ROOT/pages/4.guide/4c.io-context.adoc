@@ -243,6 +243,21 @@ WARNING: `stop()` abandons pending work rather than draining it. Destroying the
 context after `stop()` while other threads may still post to it is undefined
 behavior — join those threads first.
 
+Destroying the cpp:io_context[] destroys every coroutine still suspended in its
+operations. This includes a chain started on another execution context. The
+destructors of those frames run on the thread that destroys the context. A
+chain started with `capy::run_async`, or awaited through `capy::run`, holds work
+on the execution context it was started from, and destroying the chain releases
+that work. So destroy that execution context after every execution context whose
+teardown can destroy the chain. The same applies to an execution context whose
+I/O objects the chain's frames own.
+
+A destroyed frame can also own an `async_event`, `async_mutex` or `async_waker`.
+Destroying it posts each of its waiters, canceled, to the waiter's own executor.
+Destroy the execution context such a waiter runs on after this one. If that
+waiter's frames also own I/O objects of this context, no order is safe: stop the
+waiter before destroying either context.
+
 == Inheritance from execution_context
 
 cpp:io_context[] inherits from `capy::execution_context`, providing service
