@@ -8,6 +8,7 @@
 //
 
 #include <boost/corosio/io_context.hpp>
+#include <boost/corosio/signal_set.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/tcp_socket.hpp>
 #include <boost/corosio/test/socket_pair.hpp>
@@ -15,6 +16,7 @@
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
+#include <csignal>
 #include <tuple>
 #include <utility>
 
@@ -106,11 +108,47 @@ struct teardown_destroy_test
         BOOST_TEST_EQ(parent_down, 1);
     }
 
+    void testParkedSignalWaitDestroysChain()
+    {
+        int parent_down = 0;
+        {
+            io_context ioc(Backend);
+            signal_set sigs(ioc, SIGINT);
+            auto parent = [](signal_set& s, destroy_count_t) -> capy::task<> {
+                std::ignore = co_await s.wait();
+            };
+            capy::run_async(ioc.get_executor())(
+                parent(sigs, destroy_count_t(parent_down)));
+            std::ignore = ioc.poll();
+            BOOST_TEST_EQ(parent_down, 0);
+        }
+        BOOST_TEST_EQ(parent_down, 1);
+    }
+
+    // The frame owns the set whose impl stores the parked wait.
+    void testParkedSignalWaitOwningSetDestroysChain()
+    {
+        int down = 0;
+        {
+            io_context ioc(Backend);
+            auto owner = [](signal_set s, destroy_count_t) -> capy::task<> {
+                std::ignore = co_await s.wait();
+            };
+            capy::run_async(ioc.get_executor())(
+                owner(signal_set(ioc, SIGINT), destroy_count_t(down)));
+            std::ignore = ioc.poll();
+            BOOST_TEST_EQ(down, 0);
+        }
+        BOOST_TEST_EQ(down, 1);
+    }
+
     void run()
     {
         testParkedReadDestroysChain();
         testParkedReadOwningSocketDestroysChain();
         testParkedAcceptDestroysChain();
+        testParkedSignalWaitDestroysChain();
+        testParkedSignalWaitOwningSetDestroysChain();
     }
 };
 

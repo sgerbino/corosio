@@ -22,6 +22,7 @@
 #include <boost/corosio/detail/object_pool.hpp>
 #include <boost/corosio/detail/object_ref.hpp>
 #include <boost/capy/continuation.hpp>
+#include <boost/capy/ex/destroy.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/corosio/native/detail/iocp/win_mutex.hpp>
 #include <boost/corosio/native/detail/iocp/win_scheduler.hpp>
@@ -29,8 +30,10 @@
 #include <boost/capy/error.hpp>
 
 #include <csignal>
+#include <coroutine>
 #include <mutex>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <signal.h>
@@ -339,7 +342,14 @@ signal_op::do_complete(
     auto keep = std::move(op->keep);
 
     if (!owner)
+    {
+        // The held reference outlives the destroy: the coroutine may
+        // own the set this op is embedded in.
+        auto* dc = std::exchange(op->cont, nullptr);
+        if (dc && dc->h)
+            capy::destroy(dc->h);
         return;
+    }
 
     if (op->ec_out)
         *op->ec_out = {};
@@ -462,6 +472,7 @@ win_signals::shutdown()
     // ~win_signal destroys an armed stop_cb_ whose ~stop_callback
     // waits on a token_canceller that takes mutex_.
     std::vector<win_signal*> doomed;
+    std::vector<std::coroutine_handle<>> parked;
 
     {
         signal_detail::signal_state* state = signal_detail::get_signal_state();
@@ -476,9 +487,16 @@ win_signals::shutdown()
             });
         for (auto* impl : doomed)
         {
-            // A parked wait is abandoned like every other op at
-            // teardown; a later destroy() must not resume it mid-drain.
-            impl->waiting_ = false;
+            // The parked wait's coroutine is destroyed once the locks
+            // drop: destroying it can destroy the set, which takes them.
+            if (std::exchange(impl->waiting_, false))
+            {
+                if (auto* c = std::exchange(impl->pending_op_.cont, nullptr))
+                {
+                    if (c->h)
+                        parked.push_back(c->h);
+                }
+            }
 
             while (auto* reg = impl->signals_)
             {
@@ -508,6 +526,9 @@ win_signals::shutdown()
         for (int i = 0; i < max_signal_number; ++i)
             registrations_[i] = nullptr;
     }
+
+    for (auto h : parked)
+        capy::destroy(h);
 
     for (auto* impl : doomed)
         release(impl);

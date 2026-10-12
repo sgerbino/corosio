@@ -21,13 +21,16 @@
 #include <boost/corosio/detail/object_pool.hpp>
 #include <boost/corosio/detail/object_ref.hpp>
 #include <boost/capy/continuation.hpp>
+#include <boost/capy/ex/destroy.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
 #include <boost/capy/error.hpp>
 
+#include <coroutine>
 #include <mutex>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <errno.h>
@@ -433,9 +436,12 @@ signal_op::operator()()
 inline void
 signal_op::destroy()
 {
-    // Embedded in posix_signal: dropping the queued reference is the
-    // only cleanup, and nothing touches this op afterwards.
-    auto k = std::move(keep);
+    // Embedded in posix_signal: the queued reference keeps it alive
+    // while the awaiting coroutine, which may own the set, is destroyed.
+    auto* c = std::exchange(cont, nullptr);
+    auto k  = std::move(keep);
+    if (c && c->h)
+        capy::destroy(c->h);
 }
 
 // posix_signal implementation
@@ -543,6 +549,7 @@ posix_signal_service::shutdown()
     // ~posix_signal destroys an armed stop_cb_ whose ~stop_callback
     // waits on a token_canceller that takes mutex_.
     std::vector<posix_signal*> doomed;
+    std::vector<std::coroutine_handle<>> parked;
 
     {
         posix_signal_detail::signal_state* state =
@@ -558,9 +565,16 @@ posix_signal_service::shutdown()
             });
         for (auto* impl : doomed)
         {
-            // A parked wait is abandoned like every other op at
-            // teardown; a later destroy() must not resume it mid-drain.
-            impl->waiting_ = false;
+            // The parked wait's coroutine is destroyed once the locks
+            // drop: destroying it can destroy the set, which takes them.
+            if (std::exchange(impl->waiting_, false))
+            {
+                if (auto* c = std::exchange(impl->pending_op_.cont, nullptr))
+                {
+                    if (c->h)
+                        parked.push_back(c->h);
+                }
+            }
 
             while (auto* reg = impl->signals_)
             {
@@ -598,6 +612,9 @@ posix_signal_service::shutdown()
         for (int i = 0; i < max_signal_number; ++i)
             registrations_[i] = nullptr;
     }
+
+    for (auto h : parked)
+        capy::destroy(h);
 
     for (auto* impl : doomed)
         release(impl);
