@@ -288,16 +288,14 @@ resolve_op::do_complete(
 
     if (!owner)
     {
-        // Destroy path
-        op->stop_cb.reset();
         if (op->results)
         {
             ::FreeAddrInfoExW(op->results);
             op->results = nullptr;
         }
-        // Dropping the keepalive may destroy the implementation this op
+        // Destroying the frame may destroy the implementation this op
         // is embedded in, so nothing may touch it afterwards.
-        op->object_ref_.reset();
+        op->destroy_awaiting();
         svc.work_finished();
         return;
     }
@@ -354,10 +352,9 @@ reverse_resolve_op::do_complete(
 
     if (!owner)
     {
-        op->stop_cb.reset();
-        // Dropping the keepalive may destroy the implementation this
-        // op is embedded in, so nothing may touch it afterwards.
-        op->object_ref_.reset();
+        // Destroying the frame may destroy the implementation this op
+        // is embedded in, so nothing may touch it afterwards.
+        op->destroy_awaiting();
         svc.work_finished();
         return;
     }

@@ -241,7 +241,7 @@ private:
             if (!owner)
             {
                 self->set_idle();
-                op->cleanup_only();
+                op->destroy_awaiting();
                 return;
             }
 

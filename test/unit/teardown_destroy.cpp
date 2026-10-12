@@ -114,6 +114,6 @@ struct teardown_destroy_test
     }
 };
 
-COROSIO_NON_IOCP_BACKEND_TESTS(teardown_destroy_test, "boost.corosio.teardown_destroy")
+COROSIO_BACKEND_TESTS(teardown_destroy_test, "boost.corosio.teardown_destroy")
 
 } // namespace boost::corosio
