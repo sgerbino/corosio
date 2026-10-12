@@ -385,6 +385,8 @@ private:
 
         ~launch_wrapper()
         {
+            // An unstarted root: no parent awaits it, so no chain to
+            // hand to capy::destroy.
             if (h)
                 h.destroy();
         }
@@ -399,31 +401,70 @@ private:
         launch_wrapper& operator=(launch_wrapper&&)      = delete;
     };
 
+    /// One hold on a worker, dropped when this is destroyed.
+    class worker_hold
+    {
+        state_ref st_;
+        worker_base* w_;
+
+    public:
+        worker_hold(state& st, worker_base& w) noexcept : st_(&st), w_(&w) {}
+
+        worker_hold(worker_hold&& o) noexcept
+            : st_(std::move(o.st_))
+            , w_(std::exchange(o.w_, nullptr))
+        {
+        }
+
+        worker_hold(worker_hold const&)            = delete;
+        worker_hold& operator=(worker_hold const&) = delete;
+        worker_hold& operator=(worker_hold&&)      = delete;
+
+        ~worker_hold()
+        {
+            if (w_)
+                st_->drop_hold(*w_);
+        }
+
+        state& server() const noexcept
+        {
+            return *st_;
+        }
+    };
+
+    // The hold travels in the frame so that it also returns the worker
+    // when the frame is destroyed before it starts or finishes. One
+    // parameter, not two: compilers disagree on the order parameter
+    // copies are destroyed, but members always go in reverse, so the
+    // task, whose parameters may still use the worker, goes first.
+    struct session
+    {
+        worker_hold hold;
+        capy::task<void> t;
+    };
+
     // Named functor to avoid incomplete lambda type in coroutine promise
     template<class Executor>
     struct launch_coro
     {
-        launch_wrapper<Executor> operator()(
-            Executor,
-            std::stop_token,
-            state_ref st,
-            capy::task<void> t,
-            worker_base* wp)
+        launch_wrapper<Executor>
+        operator()(Executor, std::stop_token, session s)
         {
             // Executor and stop token stored in promise via constructor
-            co_await std::move(t);
-            co_await push_awaitable{*st, *wp}; // worker back to the pool
+            co_await std::move(s.t);
+            // The hold returns the worker from the server's executor.
+            co_await hop_awaitable{s.hold.server()};
         }
     };
 
-    class push_awaitable
+    /// Resume on the server's executor.
+    class hop_awaitable
     {
         state& st_;
-        worker_base& w_;
         capy::continuation cont_;
 
     public:
-        push_awaitable(state& st, worker_base& w) noexcept : st_(st), w_(w) {}
+        explicit hop_awaitable(state& st) noexcept : st_(st) {}
 
         bool await_ready() const noexcept
         {
@@ -438,10 +479,7 @@ private:
             return st_.ex.dispatch(cont_);
         }
 
-        void await_resume() noexcept
-        {
-            st_.drop_hold(w_);
-        }
+        void await_resume() noexcept {}
     };
 
     class pop_awaitable
@@ -552,7 +590,9 @@ public:
 
         The launcher must be invoked exactly once via `operator()`.
         If destroyed without invoking, the worker is returned to the
-        idle pool automatically.
+        idle pool automatically. So is the worker of a coroutine
+        destroyed before it completes, as when the execution context
+        running it is destroyed.
 
         @see worker_base::run
     */
@@ -598,8 +638,12 @@ public:
         /** Start the connection-handling coroutine.
 
             Starts the given coroutine on the specified executor. When
-            the coroutine completes, the worker is automatically returned
-            to the idle pool.
+            the coroutine completes, or is destroyed before completing,
+            the worker is automatically returned to the idle pool.
+
+            @pre The server's execution context outlives the coroutine:
+                the coroutine holds the worker, whose socket belongs to
+                that execution context.
 
             @pre @p task was created on a chain whose frame allocator
                 outlives the connection: the task's frame is allocated
@@ -646,17 +690,7 @@ public:
             if (stopped_before)
                 w->stop_.request_stop();
 
-            // Return worker to pool if coroutine setup throws
-            struct guard_t
-            {
-                state* st;
-                worker_base* w;
-                ~guard_t()
-                {
-                    if (w)
-                        st->drop_hold(*w);
-                }
-            } guard{st_, w};
+            worker_hold hold(*st_, *w);
 
             // The connection can outlive whatever chain invoked this
             // launcher, so its frame comes from the process-wide
@@ -678,7 +712,7 @@ public:
             launch_wrapper<Executor> wrapper = [&] {
                 allocator_scope scope;
                 return launch_coro<Executor>{}(
-                    ex, st, state_ref(st_), std::move(task), w);
+                    ex, st, session{std::move(hold), std::move(task)});
             }();
 
             // Executor and stop token stored in promise via
@@ -689,7 +723,6 @@ public:
             auto h = std::exchange(wrapper.h, nullptr); // Release before post
             h.promise().cont_.h = h;
             ex.post(h.promise().cont_);
-            guard.w = nullptr; // Success - dismiss guard
         }
     };
 
