@@ -1163,10 +1163,7 @@ struct random_access_file_test
         testReleaseCancelsQueuedWrite();
 #endif
 
-#if !COROSIO_TEST_HAS_ASAN
-        // Abandon parked coroutine frames by design; see context.hpp.
         testDestroyWithLiveFile();
-#endif
     }
 
     // Operations on closed file

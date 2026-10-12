@@ -125,7 +125,7 @@ private:
     // overlapped-op memory: kernel completions owed after a pending
     // submission, plus successful stored-result posts. Shutdown reaps
     // until this is zero before the services free op storage. The
-    // run-loop counter cannot serve that role: frames abandoned at
+    // run-loop counter cannot serve that role: frames destroyed at
     // teardown never return their work-guard credits.
     mutable long pending_io_ = 0;
     mutable long stopped_;

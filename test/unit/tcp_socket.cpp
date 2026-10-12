@@ -2016,12 +2016,9 @@ struct tcp_socket_test
         testReleaseClosedThrows();
         testAssignV6();
 
-#if !COROSIO_TEST_HAS_ASAN
-        // Abandon parked coroutine frames by design; see context.hpp.
         testDestroyWithQueuedWrite();
         testDestroyWithQueuedConnect();
         testDestroyWithQueuedWait();
-#endif
     }
 
     void testConnectV6()

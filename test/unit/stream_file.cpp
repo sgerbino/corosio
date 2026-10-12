@@ -1523,10 +1523,7 @@ struct stream_file_test
 #endif
         testReassignDuringInFlightReadKeepsNewOffset();
 
-#if !COROSIO_TEST_HAS_ASAN
-        // Abandon parked coroutine frames by design; see context.hpp.
         testDestroyWithLiveFile();
-#endif
     }
 
     // Cancellation

@@ -752,7 +752,7 @@ struct signal_set_test
         BOOST_TEST_PASS();
     }
 
-    // A wait still parked when its context is torn down is abandoned,
+    // A wait still parked when its context is torn down is destroyed,
     // not resumed, even when a frame destroyed during the teardown owns
     // the set and its destructor cancels the wait. Only IOCP can fail
     // this: it resumes a cancelled wait inline, where POSIX posts it to a
@@ -779,10 +779,10 @@ struct signal_set_test
     }
 
     // The process signal table outlives every io_context, so a set still
-    // registered when its context shuts down -- which an abandoned frame
-    // is the only way to arrange -- has to hand the registration back
-    // there: a stale entry keeps the signal installed with the old flags
-    // and refuses the next add() of it.
+    // registered when its context shuts down -- which a frame parked in
+    // wait() is the only way to arrange -- has to hand the registration
+    // back there: a stale entry keeps the signal installed with the old
+    // flags and refuses the next add() of it.
     void testShutdownReleasesRegistration()
     {
 #if BOOST_COROSIO_POSIX
@@ -1633,12 +1633,9 @@ struct signal_set_test
         testFlagsNotSupportedOnWindows();
 #endif
 
-#if !COROSIO_TEST_HAS_ASAN
-        // Abandon parked coroutine frames by design; see context.hpp.
         testShutdownReleasesRegistration();
         testTeardownDoesNotResumeParkedWait();
         testShutdownKeepsOtherContextRegistered();
-#endif
     }
 };
 

@@ -152,9 +152,8 @@ native_connect_loopback(native_handle_type h, std::uint16_t port, bool v6)
 }
 
 // Write one byte without the io_context, so the peer's completion is
-// already waiting when the next run starts. Unused when the tests that
-// abandon parked frames are compiled out.
-[[maybe_unused]] bool
+// already waiting when the next run starts.
+bool
 native_send_byte(native_handle_type h)
 {
     char const b = 'x';
@@ -487,7 +486,7 @@ struct tcp_acceptor_test
     }
 
     // Destroy the io_context with a read still parked on a connected
-    // socket; service shutdown must drain the abandoned operation
+    // socket; service shutdown must drain the parked operation
     // without resuming it.
     void testDestroyWithParkedRead()
     {
@@ -2191,15 +2190,12 @@ struct tcp_acceptor_test
         testAcceptedPeerClosedWhenAwaiterDestroyed(true);
 #endif
         testCloseWhilePendingAccept();
-#if !COROSIO_TEST_HAS_ASAN
-        // Abandon parked coroutine frames by design; see context.hpp.
         testDestroyWithParkedAccept();
         testDestroyWithParkedRead();
         testInlineAcceptUnderStopTokenRecycles();
         testDestroyListeningAcceptorKeepsOtherOps();
         testDestroyWithQueuedAccept();
         testDestroyWithQueuedAcceptorWait();
-#endif
 
         // IPv6
         testListenV6();

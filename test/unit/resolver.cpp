@@ -1488,10 +1488,7 @@ struct resolver_test
         testDestroyWithForwardResolvePending();
 #endif
 
-#if !COROSIO_TEST_HAS_ASAN
-        // Abandon parked coroutine frames by design; see context.hpp.
         testDestroyWithLiveResolver();
-#endif
     }
 };
 
