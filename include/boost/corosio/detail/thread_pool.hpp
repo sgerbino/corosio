@@ -95,7 +95,8 @@ struct pool_work_item : intrusive_queue<pool_work_item>::node
     completions to. Services shut down newest first, so a pool created
     earlier joins its workers only after the scheduler has drained its
     completion queue, and the completion the last worker posts is then
-    neither run nor destroyed.
+    destroyed only when the scheduler is deleted, after every other
+    service.
 
     @note The type is symbol-visible because services are keyed by type
     identity: with RTTI, hidden behind a shared library boundary, a

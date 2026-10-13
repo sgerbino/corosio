@@ -289,6 +289,9 @@ protected:
 
     reactor_scheduler() = default;
 
+    /// Destroy, destroying whatever was posted after the drain.
+    ~reactor_scheduler() override;
+
     /** Drain completed_ops during shutdown.
 
         Pops all operations from the global queue and destroys them,
@@ -297,6 +300,9 @@ protected:
         before performing platform-specific cleanup.
     */
     void shutdown_drain();
+
+    /// Destroy every queued operation without running it.
+    void destroy_queued(lock_type& lock) noexcept;
 
     /// RAII guard that re-inserts the task sentinel after `run_task`.
     struct task_cleanup
@@ -799,7 +805,20 @@ reactor_scheduler::shutdown_drain()
 
     lock_type lock(mutex_);
     settle_retired(lock);
+    destroy_queued(lock);
+    signal_all(lock);
+}
 
+inline reactor_scheduler::~reactor_scheduler()
+{
+    // Service destructors run after the drain and may still post.
+    lock_type lock(mutex_);
+    destroy_queued(lock);
+}
+
+inline void
+reactor_scheduler::destroy_queued(lock_type& lock) noexcept
+{
     while (auto e = completed_ops_.pop())
     {
         if (ready_is_continuation(e))
@@ -819,8 +838,6 @@ reactor_scheduler::shutdown_drain()
             lock.lock();
         }
     }
-
-    signal_all(lock);
 }
 
 inline void

@@ -267,6 +267,45 @@ struct teardown_destroy_test
         });
     }
 
+    // Posts from a service's destructor, after the teardown drain.
+    struct late_poster : capy::execution_context::service
+    {
+        io_context::executor_type ex;
+        capy::continuation* c;
+
+        late_poster(
+            capy::execution_context&,
+            io_context::executor_type e,
+            capy::continuation& cc)
+            : ex(e)
+            , c(&cc)
+        {
+        }
+
+        ~late_poster()
+        {
+            ex.post(*c);
+        }
+
+        void shutdown() override {}
+    };
+
+    // Work posted after the drain is destroyed with the context, not
+    // left queued.
+    void testPostAfterDrainDestroyed()
+    {
+        int down = 0;
+        auto probe = [](destroy_count_t) -> capy::task<> { co_return; };
+        auto t = probe(destroy_count_t(down));
+        capy::continuation c{t.handle()};
+        t.release();
+        {
+            io_context ioc(Backend);
+            ioc.make_service<late_poster>(ioc.get_executor(), c);
+        }
+        BOOST_TEST_EQ(down, 1);
+    }
+
     void run()
     {
         testParkedReadDestroysChain();
@@ -278,6 +317,7 @@ struct teardown_destroy_test
         testQueuedFileReadDestroysChain();
 #endif
         testPoolShutdownDestroysQueuedOps();
+        testPostAfterDrainDestroyed();
     }
 };
 

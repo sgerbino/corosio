@@ -410,6 +410,10 @@ public:
             When such a waiter's frames also own I/O objects of this
             context, no order of destruction is safe: stop that waiter
             before destroying either context.
+
+        @note Work posted after the services have shut down, for example
+            from a service's destructor, is destroyed after every other
+            service, so its destructors must not use them.
     */
     ~io_context();
 

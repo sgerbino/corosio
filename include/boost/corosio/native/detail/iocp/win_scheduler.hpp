@@ -113,6 +113,10 @@ public:
     void update_timeout();
 
 private:
+    /// Destroy every packet and deferred entry still queued, without
+    /// running them; stops once the port is empty.
+    void sweep_port() noexcept;
+
     static void on_timer_changed(void* ctx);
     void post_deferred_completions(op_queue& ops);
     std::size_t do_one(unsigned long timeout_ms);
@@ -810,6 +814,12 @@ win_scheduler::shutdown()
     // without a pending_io_ count (posted directly against the
     // handle). Destroy them so service teardown does not free state
     // they still reference.
+    sweep_port();
+}
+
+inline void
+win_scheduler::sweep_port() noexcept
+{
     for (;;)
     {
         op_queue ops;
@@ -857,7 +867,11 @@ inline win_scheduler::~win_scheduler()
     wait_reactor_.reset();
 
     if (iocp_ != nullptr)
+    {
+        // Service destructors run after the drain and may still post.
+        sweep_port();
         ::CloseHandle(iocp_);
+    }
 }
 
 inline win_wait_reactor&

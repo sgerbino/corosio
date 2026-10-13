@@ -256,7 +256,9 @@ A destroyed frame can also own an `async_event`, `async_mutex` or `async_waker`.
 Destroying it posts each of its waiters, canceled, to the waiter's own executor.
 Destroy the execution context such a waiter runs on after this one. If that
 waiter's frames also own I/O objects of this context, no order is safe: stop the
-waiter before destroying either context.
+waiter before destroying either context. Work posted after the services shut
+down, for example from a service's destructor, is destroyed after every other
+service, so its destructors must not use them.
 
 == Inheritance from execution_context
 

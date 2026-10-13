@@ -406,6 +406,9 @@ public:
     }
 
 private:
+    /// Destroy every queued operation without running it.
+    void destroy_queued(lock_type& lock) noexcept;
+
     // ring_ + wakeup_eventfd_ are mutable so lazy_init_ring() (called
     // from const contexts like post()) can populate them on first use.
     mutable struct ::io_uring ring_{};
@@ -572,6 +575,11 @@ inline uring_scheduler::uring_scheduler(
 
 inline uring_scheduler::~uring_scheduler()
 {
+    // Service destructors run after the drain and may still post.
+    {
+        lock_type lock(dispatch_mutex_);
+        destroy_queued(lock);
+    }
     if (ring_inited_)
     {
         // Ring teardown can still run a doomed pipe write as task
@@ -759,6 +767,13 @@ uring_scheduler::shutdown()
     // error_code outputs) get torn down rather than leaked. Mirrors
     // reactor_scheduler::shutdown_drain.
     lock_type lock(dispatch_mutex_);
+    destroy_queued(lock);
+    cond_.notify_all();
+}
+
+inline void
+uring_scheduler::destroy_queued(lock_type& lock) noexcept
+{
     while (auto e = completed_ops_.pop())
     {
         if (ready_is_continuation(e))
@@ -775,7 +790,6 @@ uring_scheduler::shutdown()
             lock.lock();
         }
     }
-    cond_.notify_all();
 }
 
 inline void
