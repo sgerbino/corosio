@@ -12,6 +12,7 @@
 #include <boost/corosio/delay.hpp>
 
 #include <boost/capy/ex/async_event.hpp>
+#include <boost/capy/ex/frame_allocator.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 #include <boost/capy/when_all.hpp>
@@ -19,6 +20,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <memory>
 #include <mutex>
 #include <stop_token>
 #include <sstream>
@@ -1000,12 +1003,40 @@ struct io_context_test
     }
 #endif
 
+    // A run call leaves the thread's frame allocator as it found it, so a
+    // coroutine created afterwards never uses a resource that died with
+    // the frames it ran.
+    template<class Drive>
+    void checkFrameAllocatorRestored(Drive drive)
+    {
+        io_context ioc(Backend);
+        auto* before = capy::get_current_frame_allocator();
+        auto t       = []() -> capy::task<> { co_return; };
+        capy::run_async(ioc.get_executor(), std::allocator<std::byte>{})(t());
+        drive(ioc);
+        BOOST_TEST(capy::get_current_frame_allocator() == before);
+    }
+
+    void testRunRestoresFrameAllocator()
+    {
+        checkFrameAllocatorRestored([](io_context& c) { std::ignore = c.run(); });
+        checkFrameAllocatorRestored(
+            [](io_context& c) { std::ignore = c.run_one(); });
+        checkFrameAllocatorRestored([](io_context& c) { std::ignore = c.poll(); });
+        checkFrameAllocatorRestored(
+            [](io_context& c) { std::ignore = c.poll_one(); });
+        checkFrameAllocatorRestored([](io_context& c) {
+            std::ignore = c.run_for(std::chrono::seconds(5));
+        });
+    }
+
     void run()
     {
 #if BOOST_COROSIO_POSIX
         testZeroThreadPoolSizeThrows();
 #endif
         testConstruction();
+        testRunRestoresFrameAllocator();
         testConstructionWithOptions();
         testConstructionWithThreadPoolSize();
         testConstructionSingleThreaded();

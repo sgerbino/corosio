@@ -17,6 +17,7 @@
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/capy/continuation.hpp>
 #include <boost/capy/ex/execution_context.hpp>
+#include <boost/capy/ex/frame_allocator.hpp>
 
 #include <chrono>
 #include <coroutine>
@@ -253,6 +254,25 @@ class BOOST_COROSIO_DECL io_context : public capy::execution_context
 protected:
     detail::scheduler* sched_;
 
+    // Resuming a chain installs its frame allocator on the running
+    // thread; a run call puts back what it found, so a coroutine created
+    // afterwards never reaches a resource that died with those frames.
+    struct frame_allocator_restore
+    {
+        std::pmr::memory_resource* saved =
+            capy::get_current_frame_allocator();
+
+        frame_allocator_restore() = default;
+        frame_allocator_restore(frame_allocator_restore const&) = delete;
+        frame_allocator_restore&
+        operator=(frame_allocator_restore const&) = delete;
+
+        ~frame_allocator_restore()
+        {
+            capy::set_current_frame_allocator(saved);
+        }
+    };
+
 public:
     /** Dispatches and posts work to this context; see the
         executor_type definition below. */
@@ -421,6 +441,7 @@ public:
     */
     std::size_t run()
     {
+        frame_allocator_restore restore;
         return sched_->run();
     }
 
@@ -437,6 +458,7 @@ public:
     */
     std::size_t run_one()
     {
+        frame_allocator_restore restore;
         return sched_->run_one();
     }
 
@@ -519,6 +541,7 @@ public:
     std::size_t
     run_one_until(std::chrono::time_point<Clock, Duration> const& abs_time)
     {
+        frame_allocator_restore restore;
         typename Clock::time_point now = Clock::now();
         for (;;)
         {
@@ -557,6 +580,7 @@ public:
     */
     std::size_t poll()
     {
+        frame_allocator_restore restore;
         return sched_->poll();
     }
 
@@ -573,6 +597,7 @@ public:
     */
     std::size_t poll_one()
     {
+        frame_allocator_restore restore;
         return sched_->poll_one();
     }
 };
