@@ -201,8 +201,9 @@ posix_stream_file::read_some(
     op.fd         = fd_;
     op.offset     = offset_;
     op.generation = generation_;
+    op.svc        = &svc_;
 
-    op.ex.on_work_started();
+    svc_.work_started();
 
     read_pool_op_.file_    = this;
     read_pool_op_.ref_     = detail::object_ref(this);
@@ -216,7 +217,7 @@ posix_stream_file::read_some(
         // than through a completion the scheduler has to carry back.
         read_pool_op_.ref_.reset();
         op.stop_cb.reset();
-        op.ex.on_work_finished();
+        svc_.work_finished();
         *ec        = pec;
         *bytes_out = 0;
         return dispatch_coro(ex, cont);
@@ -325,8 +326,9 @@ posix_stream_file::write_some(
     op.fd         = fd_;
     op.offset     = offset_;
     op.generation = generation_;
+    op.svc        = &svc_;
 
-    op.ex.on_work_started();
+    svc_.work_started();
 
     write_pool_op_.file_    = this;
     write_pool_op_.ref_     = detail::object_ref(this);
@@ -340,7 +342,7 @@ posix_stream_file::write_some(
         // than through a completion the scheduler has to carry back.
         write_pool_op_.ref_.reset();
         op.stop_cb.reset();
-        op.ex.on_work_finished();
+        svc_.work_finished();
         *ec        = pec;
         *bytes_out = 0;
         return dispatch_coro(ex, cont);
@@ -440,6 +442,12 @@ inline void
 posix_stream_file::retire() noexcept
 {
     svc_.object_pool_.recycle(this);
+}
+
+inline void
+posix_stream_file::release_work(posix_stream_file_service& svc) noexcept
+{
+    svc.work_finished();
 }
 
 } // namespace boost::corosio::detail

@@ -171,6 +171,9 @@ public:
         /// Where the endpoints are handed back.
         std::vector<endpoint>* out = nullptr;
 
+        /// The service whose context counts this op as work.
+        posix_resolver_service* svc = nullptr;
+
         // Input parameters (owned copies for thread safety)
         std::string host;
         std::string service;
@@ -193,6 +196,9 @@ public:
     {
         /// Where the name is handed back.
         endpoint_name* result_out = nullptr;
+
+        /// The service whose context counts this op as work.
+        posix_resolver_service* svc = nullptr;
 
         // Input parameters
         endpoint ep;

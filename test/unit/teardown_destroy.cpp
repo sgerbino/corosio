@@ -8,24 +8,31 @@
 //
 
 #include <boost/corosio/detail/platform.hpp>
+#include <boost/corosio/detail/thread_pool.hpp>
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/random_access_file.hpp>
 #include <boost/corosio/resolver.hpp>
 #include <boost/corosio/signal_set.hpp>
 #include <boost/corosio/stream_file.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
+#include <boost/corosio/tcp_server.hpp>
 #include <boost/corosio/tcp_socket.hpp>
 #include <boost/corosio/test/socket_pair.hpp>
 #include <boost/capy/buffers.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
+#include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstddef>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "context.hpp"
 #include "pool_teardown.hpp"
@@ -267,6 +274,238 @@ struct teardown_destroy_test
         });
     }
 
+#if BOOST_COROSIO_POSIX
+    // A blocking-pool operation is work on the context that owns it,
+    // whichever context the awaiting coroutine runs on.
+    void testPoolOpIsWorkOnItsOwnContext()
+    {
+        test::pool_blocker blocker;
+        io_context a(Backend);
+        io_context b(Backend);
+        BOOST_TEST(test::park_pool_worker(a, blocker));
+        resolver r(a);
+        bool done = false;
+        auto op = [](resolver& rs, bool& d) -> capy::task<> {
+            std::ignore = co_await rs.resolve(
+                "127.0.0.1", "80",
+                resolve_flags::numeric_host |
+                    resolve_flags::numeric_service);
+            d = true;
+        };
+        spawn(b)(op(r, done));
+        std::ignore = b.poll();
+        std::ignore = a.poll();
+        BOOST_TEST(!a.stopped());
+        if (a.stopped())
+            a.restart();
+        blocker.release();
+        std::ignore = a.run();
+        std::ignore = b.run();
+        BOOST_TEST(done);
+    }
+#endif
+
+#if BOOST_COROSIO_POSIX
+    // A session runs on another context, as the launcher allows, and
+    // awaits a blocking-pool operation of the server's context. The
+    // launcher's order destroys the session's context first; the
+    // operation must not reach it afterwards.
+    struct pool_session_worker : tcp_server::worker_base
+    {
+        tcp_socket sock_;
+        io_context& session_ctx_;
+        bool use_file_;
+        random_access_file* file_;
+        resolver* resolver_;
+        int& down_;
+        bool& launched_;
+
+        pool_session_worker(
+            io_context& server_ctx,
+            io_context& session_ctx,
+            bool use_file,
+            random_access_file* file,
+            resolver* r,
+            int& down,
+            bool& launched)
+            : sock_(server_ctx)
+            , session_ctx_(session_ctx)
+            , use_file_(use_file)
+            , file_(file)
+            , resolver_(r)
+            , down_(down)
+            , launched_(launched)
+        {
+        }
+
+        tcp_socket& socket() override
+        {
+            return sock_;
+        }
+
+        void run(tcp_server::launcher launch) override
+        {
+            launched_ = true;
+            if (use_file_)
+                launch(
+                    session_ctx_.get_executor(),
+                    [](random_access_file f, destroy_count_t) -> capy::task<> {
+                        char c;
+                        std::ignore = co_await f.read_some_at(
+                            0, capy::mutable_buffer(&c, 1));
+                    }(std::move(*file_), destroy_count_t(down_)));
+            else
+                launch(
+                    session_ctx_.get_executor(),
+                    [](resolver r, destroy_count_t) -> capy::task<> {
+                        std::ignore = co_await r.resolve(
+                            "127.0.0.1", "80",
+                            resolve_flags::numeric_host |
+                                resolve_flags::numeric_service);
+                    }(std::move(*resolver_), destroy_count_t(down_)));
+        }
+    };
+
+    struct pool_session_server : tcp_server
+    {
+        pool_session_server(
+            io_context& server_ctx,
+            io_context& session_ctx,
+            bool use_file,
+            random_access_file* file,
+            resolver* r,
+            int& down,
+            bool& launched)
+            : tcp_server(server_ctx, server_ctx.get_executor())
+        {
+            std::vector<std::unique_ptr<tcp_server::worker_base>> v;
+            v.push_back(std::make_unique<pool_session_worker>(
+                server_ctx, session_ctx, use_file, file, r, down, launched));
+            set_workers(std::move(v));
+        }
+    };
+
+    // Occupies a pool worker and reports when it has done so.
+    struct entry_blocker : detail::pool_work_item
+    {
+        std::mutex m;
+        std::condition_variable cv;
+        bool entered  = false;
+        bool released = false;
+
+        static void run(detail::pool_work_item* w) noexcept
+        {
+            auto* self = static_cast<entry_blocker*>(w);
+            std::unique_lock<std::mutex> lk(self->m);
+            self->entered = true;
+            self->cv.notify_all();
+            self->cv.wait(lk, [self] { return self->released; });
+        }
+
+        entry_blocker() noexcept
+        {
+            func_ = &entry_blocker::run;
+        }
+
+        void wait_entered()
+        {
+            std::unique_lock<std::mutex> lk(m);
+            cv.wait(lk, [this] { return entered; });
+        }
+
+        void release()
+        {
+            std::lock_guard<std::mutex> lk(m);
+            released = true;
+            cv.notify_all();
+        }
+    };
+
+    // Releases an entry_blocker when its context shuts down.
+    struct entry_gate final : capy::execution_context::service
+    {
+        using key_type = entry_gate;
+        entry_blocker* blocker = nullptr;
+
+        explicit entry_gate(capy::execution_context&) noexcept {}
+
+        void shutdown() override
+        {
+            if (blocker)
+                blocker->release();
+        }
+    };
+
+    // queued_completion: the operation already ran and its completion
+    // waits in the server context's queue, rather than in the pool.
+    void checkSessionContextDestroyedFirst(
+        bool use_file, bool queued_completion)
+    {
+        int down      = 0;
+        bool launched = false;
+        test::temp_file tmp("teardown_destroy_", "hello world");
+        test::pool_blocker blocker;
+        entry_blocker held;
+        auto a = std::make_unique<io_context>(Backend);
+        auto b = std::make_unique<io_context>(Backend);
+        BOOST_TEST(test::park_pool_worker(*a, blocker));
+        std::optional<random_access_file> f(std::in_place, *a);
+        BOOST_TEST(!f->open(tmp.path, file_base::read_only));
+        std::optional<resolver> r(std::in_place, *a);
+        {
+            pool_session_server srv(*a, *b, use_file, &*f, &*r, down, launched);
+            BOOST_TEST(!srv.bind(endpoint(ipv4_address::loopback(), 0)));
+            auto ep = srv.local_endpoint();
+            srv.start();
+            tcp_socket c(*a);
+            spawn(*a)([](tcp_socket& s, endpoint e) -> capy::task<> {
+                std::ignore = co_await s.connect(e);
+            }(c, ep));
+            while (!launched && a->run_one_for(std::chrono::seconds(5)) != 0)
+            {
+            }
+            BOOST_TEST(launched);
+            std::ignore = b->poll();
+            std::ignore = a->poll();
+            BOOST_TEST_EQ(down, 0);
+            if (queued_completion)
+            {
+                a->template use_service<entry_gate>().blocker = &held;
+                BOOST_TEST(!a->template find_service<detail::thread_pool>()
+                                ->post(&held));
+                blocker.release();
+                held.wait_entered();
+            }
+            srv.stop();
+            if (!queued_completion)
+                std::ignore = a->poll();
+        }
+        f.reset();
+        r.reset();
+        b.reset();
+        a.reset();
+        BOOST_TEST_EQ(down, 1);
+    }
+
+    void testSessionContextDestroyedFirst()
+    {
+#if BOOST_COROSIO_HAS_URING
+        constexpr bool on_ring =
+            std::is_same_v<std::remove_const_t<decltype(Backend)>, uring_t>;
+#else
+        constexpr bool on_ring = false;
+#endif
+        // io_uring reads files through the ring, not the pool.
+        if constexpr (!on_ring)
+        {
+            checkSessionContextDestroyedFirst(true, false);
+            checkSessionContextDestroyedFirst(true, true);
+        }
+        checkSessionContextDestroyedFirst(false, false);
+        checkSessionContextDestroyedFirst(false, true);
+    }
+#endif
+
     // Posts from a service's destructor, after the teardown drain.
     struct late_poster : capy::execution_context::service
     {
@@ -317,6 +556,10 @@ struct teardown_destroy_test
         testQueuedFileReadDestroysChain();
 #endif
         testPoolShutdownDestroysQueuedOps();
+#if BOOST_COROSIO_POSIX
+        testPoolOpIsWorkOnItsOwnContext();
+        testSessionContextDestroyedFirst();
+#endif
         testPostAfterDrainDestroyed();
     }
 };

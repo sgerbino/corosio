@@ -125,6 +125,10 @@ public:
         void recycle() noexcept;
     };
 
+    /// Release the work an op holds on its service's context.
+    static void
+    release_work(posix_random_access_file_service& svc) noexcept;
+
     explicit posix_random_access_file(
         posix_random_access_file_service& svc) noexcept;
 
@@ -368,13 +372,14 @@ posix_random_access_file::raf_op::operator()()
     auto keep = std::move(object_ref_);
     auto* c   = cont;
     auto exec = ex;
+    auto& svc = file_->svc_;
     {
         std::lock_guard<std::mutex> lock(file_->ops_mutex_);
         file_->outstanding_ops_.remove(this);
         file_->free_ops_.push_front(this);
     }
     keep.reset();
-    exec.on_work_finished();
+    release_work(svc);
     dispatch_coro(exec, *c).resume();
 }
 
@@ -393,15 +398,15 @@ posix_random_access_file::raf_op::destroy()
 {
     stop_cb.reset();
     auto keep = std::move(object_ref_);
-    // Released before the frame goes: the executor lives in it.
-    ex.on_work_finished();
-    auto* c = std::exchange(cont, nullptr);
+    auto& svc = file_->svc_;
+    auto* c   = std::exchange(cont, nullptr);
     recycle();
     // The frame may own the file, so it goes while the keepalive
     // still holds the implementation the op was recycled into.
     if (c && c->h)
         capy::destroy(c->h);
     keep.reset();
+    release_work(svc);
 }
 
 inline void
@@ -409,10 +414,10 @@ posix_random_access_file::raf_op::discard() noexcept
 {
     stop_cb.reset();
     auto keep = std::move(object_ref_);
-    auto exec = ex;
+    auto& svc = file_->svc_;
     recycle();
     keep.reset();
-    exec.on_work_finished();
+    release_work(svc);
 }
 
 inline void

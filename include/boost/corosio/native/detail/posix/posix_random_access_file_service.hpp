@@ -203,7 +203,7 @@ posix_random_access_file::read_some_at(
     op->object_ref_ = detail::object_ref(this);
     op->start(token);
 
-    op->ex.on_work_started();
+    svc_.work_started();
 
     {
         std::lock_guard<std::mutex> lock(ops_mutex_);
@@ -276,7 +276,7 @@ posix_random_access_file::write_some_at(
     op->object_ref_ = detail::object_ref(this);
     op->start(token);
 
-    op->ex.on_work_started();
+    svc_.work_started();
 
     {
         std::lock_guard<std::mutex> lock(ops_mutex_);
@@ -393,6 +393,13 @@ inline void
 posix_random_access_file::retire() noexcept
 {
     svc_.object_pool_.recycle(this);
+}
+
+inline void
+posix_random_access_file::release_work(
+    posix_random_access_file_service& svc) noexcept
+{
+    svc.work_finished();
 }
 
 } // namespace boost::corosio::detail
