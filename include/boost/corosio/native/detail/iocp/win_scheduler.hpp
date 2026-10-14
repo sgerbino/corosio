@@ -331,26 +331,24 @@ win_scheduler::on_pending(overlapped_op* op) const
     // skip (uncounted) and the re-post is the dispatching packet. A
     // failed re-post falls back to the deferred queue, which holds the
     // op memory itself — no packet, no count.
+    //
+    // Counted before the packet can be consumed: once it can, a context
+    // whose thread runs it may finish and be destroyed, so this call
+    // touches nothing of the scheduler afterwards.
+    ::InterlockedIncrement(&pending_io_);
     long expected = 0;
     if (op->ready_.compare_exchange_strong(
             expected, 1, std::memory_order_acq_rel, std::memory_order_acquire))
-    {
-        ::InterlockedIncrement(&pending_io_);
-    }
-    else
-    {
-        if (::PostQueuedCompletionStatus(
-                iocp_, 0, key_result_stored, static_cast<LPOVERLAPPED>(op)))
-        {
-            ::InterlockedIncrement(&pending_io_);
-        }
-        else
-        {
-            std::lock_guard<win_mutex> lock(dispatch_mutex_);
-            completed_ops_.push(op);
-            ::InterlockedExchange(&dispatch_required_, 1);
-        }
-    }
+        return;
+    if (::PostQueuedCompletionStatus(
+            iocp_, 0, key_result_stored, static_cast<LPOVERLAPPED>(op)))
+        return;
+    std::lock_guard<win_mutex> lock(dispatch_mutex_);
+    completed_ops_.push(op);
+    ::InterlockedExchange(&dispatch_required_, 1);
+    // Uncounted only once queued, so a shutdown that sees no packet
+    // left finds the op in the queue.
+    ::InterlockedDecrement(&pending_io_);
 }
 
 inline void
@@ -363,17 +361,17 @@ win_scheduler::on_completion(overlapped_op* op, DWORD error, DWORD bytes) const
     op->bytes_transferred = bytes;
     op->ready_.store(1, std::memory_order_release);
 
+    // Counted before the packet can be consumed, as in on_pending.
+    ::InterlockedIncrement(&pending_io_);
     if (::PostQueuedCompletionStatus(
             iocp_, 0, key_result_stored, static_cast<LPOVERLAPPED>(op)))
-    {
-        ::InterlockedIncrement(&pending_io_);
-    }
-    else
-    {
-        std::lock_guard<win_mutex> lock(dispatch_mutex_);
-        completed_ops_.push(op);
-        ::InterlockedExchange(&dispatch_required_, 1);
-    }
+        return;
+    std::lock_guard<win_mutex> lock(dispatch_mutex_);
+    completed_ops_.push(op);
+    ::InterlockedExchange(&dispatch_required_, 1);
+    // Uncounted only once queued, so a shutdown that sees no packet
+    // left finds the op in the queue.
+    ::InterlockedDecrement(&pending_io_);
 }
 
 inline void

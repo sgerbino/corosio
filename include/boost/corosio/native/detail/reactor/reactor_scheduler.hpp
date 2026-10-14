@@ -853,8 +853,11 @@ reactor_scheduler::maybe_unlock_and_signal_one(lock_type& lock) const
     state_ |= signaled_bit;
     if (state_ > signaled_bit)
     {
-        lock.unlock();
+        // Signalled before unlocking: a post from another context's
+        // thread may be the last touch of this scheduler before the
+        // posted work runs, finishes and lets it be destroyed.
         cond_.notify_one();
+        lock.unlock();
         return true;
     }
     return false;
@@ -908,8 +911,9 @@ reactor_scheduler::wake_one_thread_and_unlock(lock_type& lock) const
     if (task_running_.load(std::memory_order_relaxed) && !task_interrupted_)
     {
         task_interrupted_ = true;
-        lock.unlock();
+        // Under the lock, for the same reason as the signal above.
         interrupt_reactor();
+        lock.unlock();
     }
     else
     {

@@ -34,11 +34,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <stop_token>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <tuple>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #if BOOST_COROSIO_POSIX
 #include <unistd.h> // getpid()
@@ -2012,6 +2016,7 @@ struct tcp_socket_test
         testAssignFailureKeepsSocket();
         testAssignOverOpenKeepsPending();
         testCompletionResumesOnAwaitersContext();
+        testCrossContextCompletionOutlivesItsTarget();
         testRelease();
         testReleaseClosedThrows();
         testAssignV6();
@@ -2583,6 +2588,48 @@ struct tcp_socket_test
         std::ignore = b.poll();
         BOOST_TEST(resumed);
         BOOST_TEST(on_b);
+    }
+
+    // An operation of a long-lived context completes into a short-lived
+    // one, which finishes the chain and is destroyed at once: the
+    // completing thread must be done with the short-lived context's
+    // scheduler before that can happen.
+    void testCrossContextCompletionOutlivesItsTarget()
+    {
+        io_context a(Backend);
+        std::vector<std::pair<tcp_socket, tcp_socket>> pairs;
+        for (int i = 0; i < 100; ++i)
+        {
+            pairs.push_back(
+                test::make_socket_pair<tcp_socket, tcp_acceptor, false>(a));
+            a.restart();
+        }
+        auto aex = a.get_executor();
+        aex.on_work_started();
+        std::thread ta([&] { a.run(); });
+
+        char const c = 'x';
+        for (auto& [s1, s2] : pairs)
+        {
+            auto b = std::make_unique<io_context>(Backend, 2);
+            char buf[1];
+            capy::run_async(b->get_executor())(
+                [](tcp_socket& s, char* p) -> capy::task<> {
+                    std::ignore =
+                        co_await s.read_some(capy::mutable_buffer(p, 1));
+                }(s1, buf));
+            std::thread b2([&] { b->run(); });
+            capy::run_async(aex)(
+                [](tcp_socket& s, char const* p) -> capy::task<> {
+                    std::ignore =
+                        co_await s.write_some(capy::const_buffer(p, 1));
+                }(s2, &c));
+            b->run();
+            b2.join();
+            b.reset();
+        }
+        aex.on_work_finished();
+        ta.join();
     }
 
     // release() hands ownership to the caller only after pending

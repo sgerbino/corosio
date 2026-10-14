@@ -959,11 +959,14 @@ uring_scheduler::post(std::coroutine_handle<> h) const
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
         wake_leader = task_running_;
+        // Woken under the lock: a post from another context's thread may
+        // be the last touch of this scheduler before the posted work
+        // runs, finishes and lets it be destroyed.
         if (!wake_leader)
             cond_.notify_one();
+        else
+            interrupt_reactor();
     }
-    if (wake_leader)
-        interrupt_reactor();
 }
 
 inline void
@@ -976,11 +979,14 @@ uring_scheduler::post(scheduler_op* op) const
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
         wake_leader = task_running_;
+        // Woken under the lock: a post from another context's thread may
+        // be the last touch of this scheduler before the posted work
+        // runs, finishes and lets it be destroyed.
         if (!wake_leader)
             cond_.notify_one();
+        else
+            interrupt_reactor();
     }
-    if (wake_leader)
-        interrupt_reactor();
 }
 
 inline void
@@ -993,11 +999,14 @@ uring_scheduler::post(capy::continuation& c) const
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(c);
         wake_leader = task_running_;
+        // Woken under the lock: a post from another context's thread may
+        // be the last touch of this scheduler before the posted work
+        // runs, finishes and lets it be destroyed.
         if (!wake_leader)
             cond_.notify_one();
+        else
+            interrupt_reactor();
     }
-    if (wake_leader)
-        interrupt_reactor();
 }
 
 // Thread-local stack of frames for io_uring schedulers being run on the
