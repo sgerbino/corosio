@@ -199,7 +199,7 @@ public:
 
     std::error_code clear_signals(posix_signal& impl);
 
-    void cancel_wait(posix_signal& impl);
+    void cancel_wait(posix_signal& impl) noexcept;
     void start_wait(posix_signal& impl, signal_op* op);
 
     /** Cancel an in-flight wait on behalf of a stop token.
@@ -843,7 +843,7 @@ posix_signal_service::clear_signals(posix_signal& impl)
 }
 
 inline void
-posix_signal_service::cancel_wait(posix_signal& impl)
+posix_signal_service::cancel_wait(posix_signal& impl) noexcept
 {
     bool was_waiting = false;
     signal_op* op    = nullptr;
@@ -856,6 +856,7 @@ posix_signal_service::cancel_wait(posix_signal& impl)
             was_waiting   = true;
             impl.waiting_ = false;
             op            = &impl.pending_op_;
+            sched_->cancel_posting_begin();
         }
     }
 
@@ -867,6 +868,7 @@ posix_signal_service::cancel_wait(posix_signal& impl)
             *op->signal_out = 0;
         op->d.post(*op->cont);
         sched_->work_finished();
+        sched_->cancel_posting_end();
     }
 }
 
@@ -887,6 +889,7 @@ posix_signal_service::cancel_wait_token(posix_signal& impl) noexcept
             was_waiting   = true;
             impl.waiting_ = false;
             op            = &impl.pending_op_;
+            sched_->cancel_posting_begin();
         }
     }
 
@@ -898,6 +901,7 @@ posix_signal_service::cancel_wait_token(posix_signal& impl) noexcept
             *op->signal_out = 0;
         op->d.post(*op->cont);
         sched_->work_finished();
+        sched_->cancel_posting_end();
     }
 }
 

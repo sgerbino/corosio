@@ -67,7 +67,7 @@
 
 namespace boost::corosio::detail {
 
-struct scheduler;
+class scheduler;
 class posix_random_access_file_service;
 
 /** Random-access file implementation for POSIX backends. */

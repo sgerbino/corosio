@@ -80,7 +80,10 @@ public:
         {
             std::lock_guard lock(desc_state_.mutex);
             if (*desc_op_ptr == &op)
+            {
                 claimed = std::exchange(*desc_op_ptr, nullptr);
+                svc_.scheduler().cancel_posting_begin();
+            }
             // Not in the slot: request_cancel() above already set
             // op.cancelled, which register_op consults before parking
             // and the completion decode consults on delivery. Latching
@@ -92,6 +95,7 @@ public:
             op.object_ref_ = detail::object_ref(self_ptr());
             svc_.post(&op);
             svc_.work_finished();
+            svc_.scheduler().cancel_posting_end();
         }
     }
 

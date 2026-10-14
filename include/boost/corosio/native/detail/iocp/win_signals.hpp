@@ -228,7 +228,7 @@ public:
 
         @param impl The signal implementation to cancel.
     */
-    void cancel_wait(win_signal& impl);
+    void cancel_wait(win_signal& impl) noexcept;
 
     /** Cancel an in-flight wait on behalf of a stop token.
 
@@ -695,7 +695,7 @@ win_signals::clear_signals(win_signal& impl)
 }
 
 inline void
-win_signals::cancel_wait(win_signal& impl)
+win_signals::cancel_wait(win_signal& impl) noexcept
 {
     bool was_waiting = false;
     signal_op* op    = nullptr;
@@ -708,6 +708,7 @@ win_signals::cancel_wait(win_signal& impl)
             was_waiting   = true;
             impl.waiting_ = false;
             op            = &impl.pending_op_;
+            sched_.cancel_posting_begin();
         }
     }
 
@@ -719,6 +720,7 @@ win_signals::cancel_wait(win_signal& impl)
             *op->signal_out = 0;
         op->d.post(*op->cont);
         sched_.work_finished();
+        sched_.cancel_posting_end();
     }
 }
 
@@ -738,6 +740,7 @@ win_signals::cancel_wait_token(win_signal& impl) noexcept
             was_waiting   = true;
             impl.waiting_ = false;
             op            = &impl.pending_op_;
+            sched_.cancel_posting_begin();
         }
     }
 
@@ -749,6 +752,7 @@ win_signals::cancel_wait_token(win_signal& impl) noexcept
             *op->signal_out = 0;
         op->d.post(*op->cont);
         sched_.work_finished();
+        sched_.cancel_posting_end();
     }
 }
 

@@ -762,6 +762,8 @@ uring_scheduler::shutdown()
         has_deferred_cancels_.store(false, std::memory_order_release);
     }
 
+    wait_cancels_posting();
+
     // Drain posted ops, including the completions reaped above,
     // calling destroy() on each so embedded handles (coroutine frames,
     // error_code outputs) get torn down rather than leaked. Mirrors

@@ -30,6 +30,7 @@
 #include <boost/capy/task.hpp>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -2017,6 +2018,7 @@ struct tcp_socket_test
         testAssignOverOpenKeepsPending();
         testCompletionResumesOnAwaitersContext();
         testCrossContextCompletionOutlivesItsTarget();
+        testReadStopRacingTeardown();
         testRelease();
         testReleaseClosedThrows();
         testAssignV6();
@@ -2588,6 +2590,50 @@ struct tcp_socket_test
         std::ignore = b.poll();
         BOOST_TEST(resumed);
         BOOST_TEST(on_b);
+    }
+
+    // A stop requested on another thread can claim a parked read while
+    // the context tears its sockets down; the drain must still find the
+    // read the stop posts.
+    void testReadStopRacingTeardown()
+    {
+        for (int round = 0; round < 25; ++round)
+        {
+            std::vector<std::stop_source> stops(8);
+            std::atomic<bool> go{false};
+            std::thread stopper;
+            {
+                io_context ioc(Backend);
+                // Paired first: each pairing runs the context, which a
+                // parked read would keep from returning.
+                std::vector<std::pair<tcp_socket, tcp_socket>> pairs;
+                for (std::size_t i = 0; i < stops.size(); ++i)
+                {
+                    pairs.push_back(test::make_socket_pair<
+                        tcp_socket, tcp_acceptor, false>(ioc));
+                    ioc.restart();
+                }
+                for (std::size_t i = 0; i < stops.size(); ++i)
+                    capy::run_async(ioc.get_executor(), stops[i].get_token())(
+                        [](tcp_socket s, tcp_socket) -> capy::task<> {
+                            char c;
+                            std::ignore = co_await s.read_some(
+                                capy::mutable_buffer(&c, 1));
+                        }(std::move(pairs[i].first),
+                          std::move(pairs[i].second)));
+                std::ignore = ioc.poll(); // parks every read
+                stopper     = std::thread([&] {
+                    while (!go.load(std::memory_order_acquire))
+                    {
+                    }
+                    for (auto& src : stops)
+                        src.request_stop();
+                });
+                go.store(true, std::memory_order_release);
+            }
+            stopper.join();
+        }
+        BOOST_TEST_PASS();
     }
 
     // An operation of a long-lived context completes into a short-lived

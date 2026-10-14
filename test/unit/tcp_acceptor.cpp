@@ -32,7 +32,9 @@
 #include <stdexcept>
 #include <stop_token>
 #include <system_error>
+#include <thread>
 #include <tuple>
+#include <vector>
 
 #ifndef _WIN32
 // For the SO_REUSEPORT guard around testReusePort. The corosio public
@@ -2171,6 +2173,44 @@ struct tcp_acceptor_test
         pool.join();
     }
 
+    // A stop requested on another thread can claim a parked accept
+    // while the context tears its acceptors down; the drain must still
+    // find the accept the stop posts.
+    void testAcceptStopRacingTeardown()
+    {
+        for (int round = 0; round < 50; ++round)
+        {
+            std::vector<std::stop_source> stops(8);
+            std::atomic<bool> go{false};
+            std::thread stopper;
+            {
+                io_context ioc(Backend);
+                for (auto& src : stops)
+                    capy::run_async(ioc.get_executor(), src.get_token())(
+                        [](io_context& ioc) -> capy::task<> {
+                            tcp_acceptor acc(ioc);
+                            std::ignore = acc.open();
+                            std::ignore = acc.bind(
+                                endpoint(ipv4_address::loopback(), 0));
+                            std::ignore = acc.listen();
+                            tcp_socket peer(ioc);
+                            std::ignore = co_await acc.accept(peer);
+                        }(ioc));
+                std::ignore = ioc.poll(); // parks every accept
+                stopper     = std::thread([&] {
+                    while (!go.load(std::memory_order_acquire))
+                    {
+                    }
+                    for (auto& src : stops)
+                        src.request_stop();
+                });
+                go.store(true, std::memory_order_release);
+            }
+            stopper.join();
+        }
+        BOOST_TEST_PASS();
+    }
+
     void run()
     {
         testAssignOnOpenIsAlreadyOpen();
@@ -2183,6 +2223,7 @@ struct tcp_acceptor_test
         // Cancellation
         testCancelAccept();
         testAcceptAfterCancel();
+        testAcceptStopRacingTeardown();
         testDeferredExecutorCompletion();
 #if BOOST_COROSIO_POSIX
         testQueuedAcceptClosesPeerOnTeardown();

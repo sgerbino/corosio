@@ -803,6 +803,8 @@ reactor_scheduler::shutdown_drain()
     if (timer_svc_)
         timer_svc_->shutdown();
 
+    wait_cancels_posting();
+
     lock_type lock(mutex_);
     settle_retired(lock);
     destroy_queued(lock);

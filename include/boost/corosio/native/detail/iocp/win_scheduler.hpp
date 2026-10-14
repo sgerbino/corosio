@@ -764,6 +764,8 @@ win_scheduler::shutdown()
     // posts them as cancelled and the pending count can reach zero.
     wait_reactor_->stop();
 
+    wait_cancels_posting();
+
     // Reap every packet still owed to the port before the services
     // free the op memory those packets reference. Work-guard credits,
     // posted handlers, and queued continuations have no bearing here.

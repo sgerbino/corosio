@@ -80,7 +80,7 @@
 
 namespace boost::corosio::detail {
 
-struct scheduler;
+class scheduler;
 class posix_stream_file_service;
 
 /** Stream file implementation for POSIX backends.

@@ -37,7 +37,7 @@
 
 namespace boost::corosio::detail {
 
-struct scheduler;
+class scheduler;
 
 /*
     Timer Service

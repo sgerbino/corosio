@@ -98,7 +98,7 @@
 
 namespace boost::corosio::detail {
 
-struct scheduler;
+class scheduler;
 
 namespace posix_resolver_detail {
 

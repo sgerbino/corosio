@@ -28,6 +28,7 @@
 #include <stop_token>
 #include <thread>
 #include <tuple>
+#include <vector>
 
 #include "context.hpp"
 #include "test_suite.hpp"
@@ -631,6 +632,39 @@ struct signal_set_test
         BOOST_TEST(completed);
         BOOST_TEST(!result_ec);
         BOOST_TEST(got == SIGINT);
+    }
+
+    // A stop requested on another thread can claim a parked wait while
+    // the context tears its signal sets down; the drain must still find
+    // the wait the stop posts.
+    void testStopRacingTeardown()
+    {
+        for (int round = 0; round < 200; ++round)
+        {
+            std::vector<std::stop_source> stops(8);
+            std::atomic<bool> go{false};
+            std::thread stopper;
+            {
+                io_context ioc(Backend);
+                for (auto& src : stops)
+                    capy::run_async(ioc.get_executor(), src.get_token())(
+                        [](io_context& ioc) -> capy::task<> {
+                            signal_set s(ioc, SIGINT);
+                            std::ignore = co_await s.wait();
+                        }(ioc));
+                std::ignore = ioc.poll(); // parks every wait
+                stopper     = std::thread([&] {
+                    while (!go.load(std::memory_order_acquire))
+                    {
+                    }
+                    for (auto& src : stops)
+                        src.request_stop();
+                });
+                go.store(true, std::memory_order_release);
+            }
+            stopper.join();
+        }
+        BOOST_TEST_PASS();
     }
 
     void testDestroyWithArmedStopToken()
@@ -1583,6 +1617,7 @@ struct signal_set_test
         testNormalDeliveryWithLiveToken();
         testDestroyWithArmedStopToken();
         testConcurrentStopRequestRace();
+        testStopRacingTeardown();
         testShutdownWithPendingSignalSet();
 
         // Multiple signal set tests
