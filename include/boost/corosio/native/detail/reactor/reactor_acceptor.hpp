@@ -546,8 +546,7 @@ reactor_acceptor<
     }
     if (post_now)
     {
-        svc_.post(&op);
-        svc_.work_finished();
+        svc_.scheduler().post_counted(&op);
     }
     else
     {

@@ -229,6 +229,19 @@ public:
 
     void compensating_work_started() const noexcept;
 
+    /** Post an operation whose work is already counted.
+
+        The posting thread touches nothing of the scheduler after this
+        returns, unlike a @ref post followed by @ref work_finished: once
+        posted, the operation can complete and let its context be
+        destroyed.
+
+        @pre work_started() was called for @p op.
+
+        @param op The operation to post.
+    */
+    void post_counted(scheduler_op* op) const;
+
     /** Post completed operations for deferred invocation.
 
         If called from a thread running this scheduler, operations
@@ -721,6 +734,20 @@ reactor_scheduler::compensating_work_started() const noexcept
     auto* ctx = reactor_find_context(this);
     if (ctx)
         ++ctx->private_outstanding_work;
+}
+
+inline void
+reactor_scheduler::post_counted(scheduler_op* op) const
+{
+    if (auto* ctx = reactor_find_context(this))
+    {
+        ctx->private_queue.push(op);
+        return;
+    }
+
+    lock_type lock(mutex_);
+    completed_ops_.push(op);
+    wake_one_thread_and_unlock(lock);
 }
 
 inline void

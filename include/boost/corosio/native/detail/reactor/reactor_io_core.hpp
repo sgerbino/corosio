@@ -93,8 +93,7 @@ public:
         if (claimed)
         {
             op.object_ref_ = detail::object_ref(self_ptr());
-            svc_.post(&op);
-            svc_.work_finished();
+            svc_.scheduler().post_counted(&op);
             svc_.scheduler().cancel_posting_end();
         }
     }
@@ -148,8 +147,7 @@ protected:
         }
         // Posted after the descriptor lock is released: the scheduler
         // takes its own lock before descriptor locks.
-        svc_.post(&op);
-        svc_.work_finished();
+        svc_.scheduler().post_counted(&op);
     }
 
     /// Cancel every pending operation.
@@ -331,8 +329,7 @@ private:
         for (int i = 0; i < count; ++i)
         {
             claimed[i]->object_ref_ = detail::object_ref(self_ptr());
-            svc_.post(claimed[i]);
-            svc_.work_finished();
+            svc_.scheduler().post_counted(claimed[i]);
         }
     }
 };

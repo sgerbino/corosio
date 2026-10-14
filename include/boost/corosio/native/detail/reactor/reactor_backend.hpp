@@ -161,8 +161,7 @@ reactor_acceptor_impl<
         }
         if (post_now)
         {
-            this->svc_.post(&op);
-            this->svc_.work_finished();
+            this->svc_.scheduler().post_counted(&op);
         }
         else
         {
