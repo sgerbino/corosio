@@ -308,9 +308,13 @@ public:
     void cancel_ops(Cancel&& cancel) noexcept
     {
         lazy_init_ring();
+        {
+            lock_type lock(ring_mutex_);
+            cancel();
+        }
+        // After queuing: a leader woken first could re-enter its wait
+        // before the cancel SQE exists, leaving it unsubmitted.
         interrupt_reactor();
-        lock_type lock(ring_mutex_);
-        cancel();
     }
 
     /** Cancel an object's operations and flush every SQE naming `fd`.
@@ -1529,12 +1533,12 @@ inline void
 uring_scheduler::submit_cancel_by_user_data(uring_op* target) noexcept
 {
     lazy_init_ring();
-    // Wake the leader (if any) so its submit_and_wait_timeout returns
-    // and releases ring_mutex_; otherwise we'd block here until the
-    // next CQE arrives organically.
+    {
+        lock_type lock(ring_mutex_);
+        cancel_op_locked(target);
+    }
+    // After queuing, so the woken leader's submit carries the cancel.
     interrupt_reactor();
-    lock_type lock(ring_mutex_);
-    cancel_op_locked(target);
 }
 
 inline bool
