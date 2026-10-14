@@ -27,6 +27,7 @@
 #include <boost/capy/ex/io_env.hpp>
 #include <boost/capy/ex/recycling_memory_resource.hpp>
 #include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/ex/work_guard.hpp>
 
 #include <atomic>
 #include <coroutine>
@@ -432,14 +433,17 @@ private:
         }
     };
 
-    // The hold travels in the frame so that it also returns the worker
+    // The holds travel in the frame so that they are also released
     // when the frame is destroyed before it starts or finishes. One
-    // parameter, not two: compilers disagree on the order parameter
+    // parameter, not three: compilers disagree on the order parameter
     // copies are destroyed, but members always go in reverse, so the
     // task, whose parameters may still use the worker, goes first.
+    template<class Executor>
     struct session
     {
         worker_hold hold;
+        // Keeps the session's context running until the connection ends.
+        capy::work_guard<Executor> work;
         capy::task<void> t;
     };
 
@@ -448,10 +452,13 @@ private:
     struct launch_coro
     {
         launch_wrapper<Executor>
-        operator()(Executor, std::stop_token, session s)
+        operator()(Executor, std::stop_token, session<Executor> s)
         {
             // Executor and stop token stored in promise via constructor
             co_await std::move(s.t);
+            // The connection's work ends with its task: the hop below is
+            // the server's, and its context may no longer be running.
+            s.work.reset();
             // The hold returns the worker from the server's executor.
             co_await hop_awaitable{s.hold.server()};
         }
@@ -637,21 +644,25 @@ public:
 
         /** Start the connection-handling coroutine.
 
-            Starts the given coroutine on the specified executor. When
+            Starts the given coroutine on the specified executor, which
+            counts it as work until it ends, so that execution context's
+            `run()` does not return while a connection is active. When
             the coroutine completes, or is destroyed before completing,
             the worker is automatically returned to the idle pool.
 
-            @pre The server's execution context outlives the coroutine:
-                the coroutine holds the worker, whose socket belongs to
-                that execution context.
+            @pre The server's execution context is destroyed only once
+                the coroutine has finished or is suspended in it, whose
+                teardown then destroys the coroutine: the coroutine holds
+                the worker, whose socket belongs to that execution
+                context.
 
             @pre The execution context of @p ex, when it is another one,
-                is destroyed before the server's execution context. The
-                coroutine holds no work on it, so the server's execution
-                context can then destroy a coroutine still suspended on
-                the worker's socket. Its frames must own no I/O object of
-                the execution context of @p ex, and destroying `Executor`
-                must not use its execution context.
+                is destroyed only once the coroutine has finished or is
+                suspended in it: the coroutine holds work on it until it
+                finishes or is destroyed. While some connections are
+                suspended in each execution context, no order of
+                destruction meets both; stop the server and run both
+                until their `run()` returns before destroying either.
 
             @pre @p task was created on a chain whose frame allocator
                 outlives the connection: the task's frame is allocated
@@ -720,7 +731,10 @@ public:
             launch_wrapper<Executor> wrapper = [&] {
                 allocator_scope scope;
                 return launch_coro<Executor>{}(
-                    ex, st, session{std::move(hold), std::move(task)});
+                    ex, st,
+                    session<Executor>{
+                        std::move(hold), capy::work_guard<Executor>(ex),
+                        std::move(task)});
             }();
 
             // Executor and stop token stored in promise via

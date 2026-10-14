@@ -308,8 +308,9 @@ struct teardown_destroy_test
 #if BOOST_COROSIO_POSIX
     // A session runs on another context, as the launcher allows, and
     // awaits a blocking-pool operation of the server's context. The
-    // launcher's order destroys the session's context first; the
-    // operation must not reach it afterwards.
+    // launcher's order destroys the server's context first, which
+    // destroys the session and releases its work on the session's
+    // context.
     struct pool_session_worker : tcp_server::worker_base
     {
         tcp_socket sock_;
@@ -438,7 +439,7 @@ struct teardown_destroy_test
 
     // queued_completion: the operation already ran and its completion
     // waits in the server context's queue, rather than in the pool.
-    void checkSessionContextDestroyedFirst(
+    void checkSessionContextDestroyedLast(
         bool use_file, bool queued_completion)
     {
         int down      = 0;
@@ -482,12 +483,12 @@ struct teardown_destroy_test
         }
         f.reset();
         r.reset();
-        b.reset();
         a.reset();
         BOOST_TEST_EQ(down, 1);
+        b.reset();
     }
 
-    void testSessionContextDestroyedFirst()
+    void testSessionContextDestroyedLast()
     {
 #if BOOST_COROSIO_HAS_URING
         constexpr bool on_ring =
@@ -498,11 +499,11 @@ struct teardown_destroy_test
         // io_uring reads files through the ring, not the pool.
         if constexpr (!on_ring)
         {
-            checkSessionContextDestroyedFirst(true, false);
-            checkSessionContextDestroyedFirst(true, true);
+            checkSessionContextDestroyedLast(true, false);
+            checkSessionContextDestroyedLast(true, true);
         }
-        checkSessionContextDestroyedFirst(false, false);
-        checkSessionContextDestroyedFirst(false, true);
+        checkSessionContextDestroyedLast(false, false);
+        checkSessionContextDestroyedLast(false, true);
     }
 #endif
 
@@ -558,7 +559,7 @@ struct teardown_destroy_test
         testPoolShutdownDestroysQueuedOps();
 #if BOOST_COROSIO_POSIX
         testPoolOpIsWorkOnItsOwnContext();
-        testSessionContextDestroyedFirst();
+        testSessionContextDestroyedLast();
 #endif
         testPostAfterDrainDestroyed();
     }
