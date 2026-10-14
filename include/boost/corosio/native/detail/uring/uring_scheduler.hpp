@@ -813,11 +813,12 @@ uring_scheduler::destroy_queued(lock_type& lock) noexcept
 inline void
 uring_scheduler::stop()
 {
+    // All under the lock: releasing the last work on another thread
+    // gets here, and a run thread that sees stopped_ may return and
+    // let this scheduler be destroyed.
+    lock_type lock(dispatch_mutex_);
     stopped_.store(true, std::memory_order_release);
-    {
-        lock_type lock(dispatch_mutex_);
-        cond_.notify_all();
-    }
+    cond_.notify_all();
     // Force-wake unconditionally — bypass interrupt_reactor's CAS
     // coalescing. A dropped wake here leaves the leader blocked
     // forever in submit_and_wait_timeout (no further CQE will
@@ -1197,7 +1198,13 @@ uring_scheduler::do_one(long timeout_us)
     // threads either dispatch ready ops from completed_ops_ or wait
     // on cond_ until the leader returns from the kernel.
     if (stopped_.load(std::memory_order_acquire))
+    {
+        // stop() sets the flag under the lock and still writes the
+        // eventfd; returning before it unlocks lets the caller destroy
+        // this scheduler under it.
+        lock_type lock(dispatch_mutex_);
         return 0;
+    }
 
     // submit_sqes_op only pumps the ring once per SQE batch. If the user
     // keeps a non-empty completed_ops_ (e.g. timer with 0ns expiry as a
