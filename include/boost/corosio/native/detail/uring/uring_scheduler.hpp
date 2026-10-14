@@ -266,6 +266,14 @@ public:
     /// been signalled and not yet acked.
     void interrupt_reactor() const noexcept;
 
+    /** Wake a thread to run newly queued work.
+
+        Called under `dispatch_mutex_`: the caller may be on another
+        context's thread, and once the lock is released the work can
+        run, finish and let this scheduler be destroyed.
+    */
+    void wake_one_locked() const noexcept;
+
     /** Submit `IORING_OP_ASYNC_CANCEL` targeting an in-flight op by its
         user_data pointer.
 
@@ -365,6 +373,10 @@ public:
     void push_completed_locked(scheduler_op* op) const noexcept
     {
         completed_ops_.push(op);
+        // A run thread finds the op on its next pass; any other caller
+        // must wake one, or it waits for the nearest timer.
+        if (!running_in_this_thread())
+            wake_one_locked();
     }
 
     void configure_threading(threading_config cfg) noexcept override
@@ -960,18 +972,10 @@ uring_scheduler::post(std::coroutine_handle<> h) const
     auto* op = new post_handler(h);
     lazy_init_ring();
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
-    bool wake_leader;
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
-        wake_leader = task_running_;
-        // Woken under the lock: a post from another context's thread may
-        // be the last touch of this scheduler before the posted work
-        // runs, finishes and lets it be destroyed.
-        if (!wake_leader)
-            cond_.notify_one();
-        else
-            interrupt_reactor();
+        wake_one_locked();
     }
 }
 
@@ -980,18 +984,10 @@ uring_scheduler::post(scheduler_op* op) const
 {
     lazy_init_ring();
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
-    bool wake_leader;
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(op);
-        wake_leader = task_running_;
-        // Woken under the lock: a post from another context's thread may
-        // be the last touch of this scheduler before the posted work
-        // runs, finishes and lets it be destroyed.
-        if (!wake_leader)
-            cond_.notify_one();
-        else
-            interrupt_reactor();
+        wake_one_locked();
     }
 }
 
@@ -1000,19 +996,20 @@ uring_scheduler::post(capy::continuation& c) const
 {
     lazy_init_ring();
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
-    bool wake_leader;
     {
         lock_type lock(dispatch_mutex_);
         completed_ops_.push(c);
-        wake_leader = task_running_;
-        // Woken under the lock: a post from another context's thread may
-        // be the last touch of this scheduler before the posted work
-        // runs, finishes and lets it be destroyed.
-        if (!wake_leader)
-            cond_.notify_one();
-        else
-            interrupt_reactor();
+        wake_one_locked();
     }
+}
+
+inline void
+uring_scheduler::wake_one_locked() const noexcept
+{
+    if (!task_running_)
+        cond_.notify_one();
+    else
+        interrupt_reactor();
 }
 
 // Thread-local stack of frames for io_uring schedulers being run on the
