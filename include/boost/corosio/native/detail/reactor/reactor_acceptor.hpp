@@ -542,19 +542,14 @@ reactor_acceptor<
         else
         {
             *desc_slot_ptr = &op;
+            // Select watches an fd only while an op is parked; see
+            // park_op.
+            if constexpr (Service::needs_park_notification)
+                svc_.scheduler().notify_reactor();
         }
     }
     if (post_now)
-    {
         svc_.scheduler().post_counted(&op);
-    }
-    else
-    {
-        // Select watches an fd only while an op is parked; see
-        // register_op.
-        if constexpr (Service::needs_park_notification)
-            svc_.scheduler().notify_reactor();
-    }
     return std::noop_coroutine();
 }
 

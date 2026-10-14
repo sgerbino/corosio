@@ -138,13 +138,7 @@ protected:
     {
         svc_.work_started();
         if (park_op(op, desc_slot, ready_flag, is_write_direction))
-        {
-            // Select rebuilds its fd_sets from parked ops only, so
-            // parking must wake it. Compiled away for epoll and kqueue.
-            if constexpr (Service::needs_park_notification)
-                svc_.scheduler().notify_reactor();
             return;
-        }
         // Posted after the descriptor lock is released: the scheduler
         // takes its own lock before descriptor locks.
         svc_.scheduler().post_counted(&op);
@@ -321,6 +315,12 @@ private:
         }
 
         desc_slot = &op;
+        // Select rebuilds its fd_sets from parked ops only, so parking
+        // must wake it, under the lock: once released, the op can
+        // complete and its context be destroyed. Compiled away for
+        // epoll and kqueue.
+        if constexpr (Service::needs_park_notification)
+            svc_.scheduler().notify_reactor();
         return true;
     }
 
