@@ -76,11 +76,9 @@ public:
 
         /** Return the file size in bytes.
 
-            @return The current size of the file, in bytes.
-
-            @throws std::system_error if the underlying size query fails.
+            @return The error code and the current size, in bytes.
         */
-        virtual std::uint64_t size() const = 0;
+        virtual capy::results<std::uint64_t> size() const noexcept = 0;
 
         /** Resize the file to @p new_size bytes.
 
@@ -104,11 +102,10 @@ public:
 
         /** Release ownership of the native handle.
 
-            @return The native handle, which the caller now owns.
-
-            @throws std::system_error if the file is not open.
+            @return The error code and the native handle, which the
+                caller now owns on success.
         */
-        virtual native_handle_type release() = 0;
+        virtual capy::results<native_handle_type> release() noexcept = 0;
 
         /** Adopt an existing native handle.
 
@@ -232,12 +229,13 @@ public:
 
     /** Return the file size in bytes.
 
-        @return The file size in bytes.
+        A closed file reports `errc::bad_file_descriptor`. Other
+        failures carry the error code from the operating system. On
+        failure the size is zero.
 
-        @throws std::system_error If the file is not open, or if the
-            underlying size query fails.
+        @return The error code and the file size in bytes.
     */
-    std::uint64_t size() const;
+    [[nodiscard]] capy::results<std::uint64_t> size() const noexcept;
 
     /** Resize the file to @p new_size bytes.
 
@@ -276,24 +274,23 @@ public:
         The file object becomes not-open. The caller is
         responsible for closing the returned handle.
 
-        `release()` cancels pending operations first. On Windows, the
-        object keeps the handle and this throws if one is still in
-        flight. It does the same if Windows refuses to detach the
-        handle from the execution context's completion port. Where
-        file I/O runs on a thread pool, it throws likewise while a
-        worker thread is already performing an operation. Call
-        `release()` again once the cancelled operations have
-        completed. Detaching requires Windows 8.1 or later.
+        `release()` cancels pending operations first. It reports
+        `errc::device_or_resource_busy` if one is still in flight on
+        Windows, or, where file I/O runs on a thread pool, while a
+        worker thread is already performing one; call `release()`
+        again once the cancelled operations have completed. On
+        Windows it reports `errc::operation_not_supported` if the
+        handle cannot be detached from the execution context's
+        completion port; detaching requires Windows 8.1 or later.
 
-        @return The native file descriptor or handle.
+        A closed file reports `errc::bad_file_descriptor`. On
+        failure the object keeps the handle and the returned handle
+        is the invalid sentinel ( -1 or `INVALID_HANDLE_VALUE` ), never
+        zero.
 
-        @throws std::system_error `errc::bad_file_descriptor` if the
-            file is not open, or `errc::device_or_resource_busy` if an
-            operation is still using the handle, as described above. On
-            Windows, it also throws `errc::operation_not_supported` if
-            the handle cannot be detached.
+        @return The error code and the native file descriptor or handle.
     */
-    native_handle_type release();
+    [[nodiscard]] capy::results<native_handle_type> release() noexcept;
 
     /** Adopt an existing native handle.
 
