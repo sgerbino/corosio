@@ -491,9 +491,7 @@ struct iocp_faults
     void testTcpReadWriteFails()
     {
         io_context ioc(iocp);
-        auto pair   = make_socket_pair(ioc);
-        auto& a     = pair.first;
-        auto& b     = pair.second;
+        auto [a, b] = must(make_socket_pair(ioc));
         char buf[8] = {};
         char out[4] = "abc";
         std::error_code rec, wec, rcec, wcec, eec, wtec;
@@ -994,9 +992,7 @@ struct iocp_faults
         }
 
         io_context ioc(iocp);
-        auto pair = make_socket_pair(ioc);
-        auto& s1  = pair.first;
-        auto& s2  = pair.second;
+        auto [s1, s2] = must(make_socket_pair(ioc));
         std::error_code wec;
         bool done    = false;
         bool expired = false;
@@ -1040,9 +1036,7 @@ struct iocp_faults
         }
         {
             io_context ioc(iocp);
-            auto pair = make_socket_pair(ioc);
-            auto& s1  = pair.first;
-            auto& s2  = pair.second;
+            auto [s1, s2] = must(make_socket_pair(ioc));
             std::error_code parked_ec;
             bool parked_done = false;
             bool expired     = false;
@@ -1090,9 +1084,7 @@ struct iocp_faults
         // thing that can end this wait: a reactor whose wakes were
         // swallowed would leave it parked.
         io_context ioc(iocp);
-        auto pair = make_socket_pair(ioc);
-        auto& s1  = pair.first;
-        auto& s2  = pair.second;
+        auto [s1, s2] = must(make_socket_pair(ioc));
         std::error_code parked_ec;
         bool expired = false;
         auto parked  = [&]() -> capy::task<> {
@@ -1117,9 +1109,7 @@ struct iocp_faults
     void testWaitReactorPollFails()
     {
         io_context ioc(iocp);
-        auto pair = make_socket_pair(ioc);
-        auto& s1  = pair.first;
-        auto& s2  = pair.second;
+        auto [s1, s2] = must(make_socket_pair(ioc));
         std::optional<fault_scope> arm;
         std::error_code parked_ec;
         bool expired = false;
@@ -1464,9 +1454,7 @@ struct iocp_faults
     void testInlineCompletionPostFails()
     {
         io_context ioc(iocp);
-        auto pair   = make_socket_pair(ioc);
-        auto& a     = pair.first;
-        auto& b     = pair.second;
+        auto [a, b] = must(make_socket_pair(ioc));
         char buf[8] = {};
         std::error_code rec;
         bool fired   = false;
@@ -1513,9 +1501,7 @@ struct iocp_faults
         for (bool error_wait : {false, true})
         {
             io_context ioc(iocp);
-            auto pair = make_socket_pair(ioc);
-            auto& s1  = pair.first;
-            auto& s2  = pair.second;
+            auto [s1, s2] = must(make_socket_pair(ioc));
             std::optional<fault_scope> probe;
             std::error_code wec;
             bool probed  = false;
@@ -1575,8 +1561,8 @@ struct iocp_faults
         {
             // The provider on its own, with none of the library in it.
             io_context ioc(iocp);
-            auto pair     = make_socket_pair(ioc);
-            auto const fd = static_cast<SOCKET>(pair.first.native_handle());
+            auto [s1, s2] = must(make_socket_pair(ioc));
+            auto const fd = static_cast<SOCKET>(s1.native_handle());
             WSAPOLLFD pfd{fd, POLLRDBAND, 0};
             ::WSASetLastError(0);
             int const n   = ::WSAPoll(&pfd, 1, 0);
@@ -1601,18 +1587,16 @@ struct iocp_faults
             // Accepted or ignored, the bit must not cost a live socket
             // its validity.
             BOOST_TEST((pfd.revents & POLLNVAL) == 0);
-            pair.first.close();
-            pair.second.close();
+            s1.close();
+            s2.close();
         }
 
         // The contract: a reset answers the error wait, and a wait
         // registered afterwards is answered too. Both pairs are built
         // before the run, since make_socket_pair runs the context.
         io_context ioc(iocp);
-        auto pair    = make_socket_pair(ioc);
-        auto healthy = make_socket_pair(ioc);
-        auto& s1     = pair.first;
-        auto& s2     = pair.second;
+        auto [s1, s2] = must(make_socket_pair(ioc));
+        auto [h1, h2] = must(make_socket_pair(ioc));
         std::error_code eec, wec;
         bool premise = false;
         bool expired = false;
@@ -1629,7 +1613,7 @@ struct iocp_faults
             }
             auto [ec] = co_await s1.wait(wait_type::error);
             eec       = ec;
-            auto [wc] = co_await healthy.first.wait(wait_type::write);
+            auto [wc] = co_await h1.wait(wait_type::write);
             wec       = wc;
             ioc.stop();
         };
@@ -1645,8 +1629,8 @@ struct iocp_faults
         BOOST_TEST(eec != capy::error::canceled);
         BOOST_TEST(!wec);
         s1.close();
-        healthy.first.close();
-        healthy.second.close();
+        h1.close();
+        h2.close();
     }
 
     /* A descriptor the provider refuses costs its own wait and no
@@ -1671,10 +1655,8 @@ struct iocp_faults
         io_context ioc(iocp);
         // Both pairs exist before anything is closed, so no socket id
         // freed below can come back as one of these.
-        auto pair    = make_socket_pair(ioc);
-        auto healthy = make_socket_pair(ioc);
-        auto& s1     = pair.first;
-        auto& s2     = pair.second;
+        auto [s1, s2] = must(make_socket_pair(ioc));
+        auto [h1, h2] = must(make_socket_pair(ioc));
         std::error_code eec, wec, lec;
         bool done_err  = false;
         bool done_late = false;
@@ -1692,11 +1674,11 @@ struct iocp_faults
             ::closesocket(static_cast<SOCKET>(s1.native_handle()));
             // A register is what makes the reactor rebuild its poll
             // set around the entry that is now gone.
-            auto [wc] = co_await healthy.first.wait(wait_type::write);
+            auto [wc] = co_await h1.wait(wait_type::write);
             wec       = wc;
             // And one more afterwards: a reactor that survived the
             // refusal still takes registrations.
-            auto [lc] = co_await healthy.second.wait(wait_type::write);
+            auto [lc] = co_await h2.wait(wait_type::write);
             lec       = lc;
             done_late = true;
             if (done_err)
@@ -1721,8 +1703,8 @@ struct iocp_faults
         // later call of this test's own asked for.
         s1.close();
         s2.close();
-        healthy.first.close();
-        healthy.second.close();
+        h1.close();
+        h2.close();
     }
 
     /* A context whose extension-pointer bootstrap never ran.

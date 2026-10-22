@@ -406,7 +406,10 @@ struct sockets_test
     void testReadSome()
     {
         corosio::io_context ioc;
-        auto [a, b] = corosio::test::make_socket_pair(ioc);
+        auto [ec, a, b] = corosio::test::make_socket_pair(ioc);
+        BOOST_TEST(!ec);
+        if (ec)
+            return;
         auto ex     = ioc.get_executor();
 
         std::size_t bytes_read = 0;
@@ -423,8 +426,11 @@ struct sockets_test
     {
         corosio::io_context ioc;
         // Linger=false => graceful FIN on close.
-        auto [a, b] = corosio::test::make_socket_pair<
+        auto [ec, a, b] = corosio::test::make_socket_pair<
             corosio::tcp_socket, corosio::tcp_acceptor, false>(ioc);
+        BOOST_TEST(!ec);
+        if (ec)
+            return;
         auto ex = ioc.get_executor();
 
         char storage[64];
@@ -441,7 +447,10 @@ struct sockets_test
     void testReadAll()
     {
         corosio::io_context ioc;
-        auto [a, b] = corosio::test::make_socket_pair(ioc);
+        auto [ec, a, b] = corosio::test::make_socket_pair(ioc);
+        BOOST_TEST(!ec);
+        if (ec)
+            return;
         auto ex     = ioc.get_executor();
 
         char storage[5];
@@ -459,7 +468,10 @@ struct sockets_test
     void testWriteSome()
     {
         corosio::io_context ioc;
-        auto [a, b] = corosio::test::make_socket_pair(ioc);
+        auto [ec, a, b] = corosio::test::make_socket_pair(ioc);
+        BOOST_TEST(!ec);
+        if (ec)
+            return;
         auto ex     = ioc.get_executor();
 
         std::size_t bytes_written = 0;
@@ -474,7 +486,10 @@ struct sockets_test
     void testWriteAll()
     {
         corosio::io_context ioc;
-        auto [a, b] = corosio::test::make_socket_pair(ioc);
+        auto [ec, a, b] = corosio::test::make_socket_pair(ioc);
+        BOOST_TEST(!ec);
+        if (ec)
+            return;
         auto ex     = ioc.get_executor();
 
         std::string_view payload = "payload";
@@ -511,7 +526,10 @@ struct sockets_test
     void testSendData()
     {
         corosio::io_context ioc;
-        auto [a, b] = corosio::test::make_socket_pair(ioc);
+        auto [ec, a, b] = corosio::test::make_socket_pair(ioc);
+        BOOST_TEST(!ec);
+        if (ec)
+            return;
         auto ex     = ioc.get_executor();
 
         capy::run_async(ex)(send_data(a));
@@ -524,7 +542,10 @@ struct sockets_test
     void testBufferSequences()
     {
         corosio::io_context ioc;
-        auto [a, b] = corosio::test::make_socket_pair(ioc);
+        auto [ec, a, b] = corosio::test::make_socket_pair(ioc);
+        BOOST_TEST(!ec);
+        if (ec)
+            return;
         auto ex     = ioc.get_executor();
 
         // 16 bytes cover both reads: the first takes at most 8, so
