@@ -83,22 +83,6 @@ public:
     {
     }
 
-    /** Construct from a string.
-
-        Parses an endpoint string in one of the following formats:
-        @li IPv4 without port: `192.168.1.1`
-        @li IPv4 with port: `192.168.1.1:8080`
-        @li IPv6 without port: `::1` or `2001:db8::1`
-        @li IPv6 with port (bracketed): `[::1]:8080`
-
-        @param s The string to parse.
-
-        @throws std::system_error on parse failure.
-
-        @see make_endpoint for the non-throwing form.
-    */
-    explicit endpoint(std::string_view s);
-
     /** Check if this endpoint uses an IPv4 address.
 
         @return `true` if the endpoint uses IPv4, `false` if IPv6.
@@ -215,14 +199,6 @@ endpoint_format detect_endpoint_format(std::string_view s) noexcept;
 */
 [[nodiscard]] BOOST_COROSIO_DECL capy::results<endpoint>
 make_endpoint(std::string_view s) noexcept;
-
-inline endpoint::endpoint(std::string_view s)
-{
-    auto [ec, ep] = make_endpoint(s);
-    if (ec)
-        detail::throw_system_error(ec);
-    *this = ep;
-}
 
 } // namespace boost::corosio
 

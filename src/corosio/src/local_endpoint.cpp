@@ -16,14 +16,32 @@
 
 namespace boost::corosio {
 
+local_endpoint::local_endpoint(from_path_t, std::string_view path) noexcept
+{
+    std::memcpy(path_, path.data(), path.size());
+    len_ = static_cast<std::uint8_t>(path.size());
+}
+
 local_endpoint::local_endpoint(std::string_view path)
 {
     if (path.size() > max_path_length)
         detail::throw_system_error(
             std::make_error_code(std::errc::filename_too_long),
             "local_endpoint");
-    std::memcpy(path_, path.data(), path.size());
-    len_ = static_cast<std::uint8_t>(path.size());
+    *this = local_endpoint(from_path_t{}, path);
+}
+
+capy::results<local_endpoint>
+make_local_endpoint(std::string_view path) noexcept
+{
+    if (path.size() > local_endpoint::max_path_length)
+    {
+        return {
+            std::make_error_code(std::errc::filename_too_long),
+            local_endpoint{}};
+    }
+    return {
+        std::error_code{}, local_endpoint(local_endpoint::from_path_t{}, path)};
 }
 
 std::ostream&
