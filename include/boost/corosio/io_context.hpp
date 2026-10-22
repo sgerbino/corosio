@@ -443,6 +443,9 @@ public:
 
         This causes `run()` to return as soon as possible. Any pending
         work items remain queued.
+
+        @throws std::system_error on Windows if the wakeup cannot be
+            queued, which leaves blocked `run()` callers unable to wake.
     */
     void stop()
     {
@@ -475,6 +478,13 @@ public:
         or until `stop()` is called. The context is stopped
         when there is no more outstanding work.
 
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
+
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
 
@@ -492,6 +502,13 @@ public:
         or `stop()` is called. The context is stopped when there
         is no more outstanding work.
 
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
+
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
 
@@ -508,6 +525,13 @@ public:
         This function blocks until it has executed work items for the
         specified duration, or until `stop()` is called. The context
         is stopped when there is no more outstanding work.
+
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
 
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
@@ -527,6 +551,13 @@ public:
         This function blocks until the specified time is reached
         or `stop()` is called. The context is stopped when there
         is no more outstanding work.
+
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
 
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
@@ -552,6 +583,13 @@ public:
         the specified duration has elapsed, or `stop()` is called.
         The context is stopped when there is no more outstanding work.
 
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
+
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
 
@@ -570,6 +608,13 @@ public:
         This function blocks until it executes one work item,
         the specified time is reached, or `stop()` is called.
         The context is stopped when there is no more outstanding work.
+
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
 
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
@@ -614,6 +659,13 @@ public:
         without blocking for more work. The context is stopped
         when there is no more outstanding work.
 
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
+
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
 
@@ -630,6 +682,13 @@ public:
         This function executes at most one work item that is ready
         to run without blocking for more work. The context is
         stopped when there is no more outstanding work.
+
+        @throws std::system_error if waiting on the operating system's
+            event demultiplexer fails other than by interruption or
+            another transient condition; the context can no longer
+            dispatch work. On Windows, also if it is called with no
+            outstanding work and the wakeup that stops the context
+            cannot be queued.
 
         @note The context must be restarted with `restart()` before
             calling this function again after it returns.
