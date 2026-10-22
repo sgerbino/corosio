@@ -28,7 +28,6 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <stdexcept>
 
 #include <boost/corosio/detail/conditionally_enabled_mutex.hpp>
 #include <boost/corosio/detail/conditionally_enabled_event.hpp>
@@ -260,6 +259,9 @@ public:
         Called by `io_context` after construction. Values that do
         not apply to this backend are silently ignored.
 
+        @pre `max_events` is in [ 1, `INT_MAX` ] and `budget_max` is at
+            most `INT_MAX`; `io_context` validates both.
+
         @param max_events  Event buffer size for epoll/kqueue.
         @param budget_init Starting inline completion budget.
         @param budget_max  Hard ceiling on adaptive budget ramp-up.
@@ -456,11 +458,11 @@ reactor_scheduler::configure_reactor(
     unsigned budget_max,
     unsigned unassisted)
 {
-    if (max_events < 1 ||
-        max_events > static_cast<unsigned>(std::numeric_limits<int>::max()))
-        throw std::out_of_range("max_events_per_poll must be in [1, INT_MAX]");
-    if (budget_max > static_cast<unsigned>(std::numeric_limits<int>::max()))
-        throw std::out_of_range("inline_budget_max must be in [0, INT_MAX]");
+    BOOST_COROSIO_ASSERT(
+        max_events >= 1 &&
+        max_events <= static_cast<unsigned>((std::numeric_limits<int>::max)()));
+    BOOST_COROSIO_ASSERT(
+        budget_max <= static_cast<unsigned>((std::numeric_limits<int>::max)()));
 
     // Clamp initial and unassisted to budget_max.
     if (budget_init > budget_max)

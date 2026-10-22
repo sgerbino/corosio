@@ -268,6 +268,21 @@ struct uring_faults
             BOOST_TEST(f.fired());
             BOOST_TEST(done);
         }
+        for (int const err : { EBUSY, EAGAIN })
+        {
+            io_context ioc(uring);
+            fault_scope f(sys::io_uring_wait_cqe_timeout, err);
+            bool done = false;
+            auto body = [&]() -> capy::task<> {
+                std::ignore =
+                    co_await corosio::delay(std::chrono::milliseconds(1));
+                done = true;
+            };
+            capy::run_async(ioc.get_executor())(body());
+            ioc.run();
+            BOOST_TEST(f.fired());
+            BOOST_TEST(done);
+        }
         {
             io_context ioc(uring);
             fault_scope f(sys::io_uring_wait_cqe_timeout, EBADF);

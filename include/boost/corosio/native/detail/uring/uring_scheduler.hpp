@@ -1351,13 +1351,19 @@ uring_scheduler::do_one(long timeout_us)
         int rc              = ::io_uring_wait_cqe_timeout(&ring_, &cqe, ts_ptr);
 
         // Phase 3 — drain CQEs under the mutex.
+        // EBUSY: a full CQ held back overflowed completions and another
+        // thread drained it before the wait returned. EAGAIN: a submission
+        // the wait carried ran short of kernel resources. Both clear once
+        // completions are reaped, so drain and wait again.
+        bool const transient =
+            rc == -ETIME || rc == -EINTR || rc == -EBUSY || rc == -EAGAIN;
         {
             lock_type ring_lock(ring_mutex_);
-            if (rc == 0 || rc == -ETIME || rc == -EINTR)
+            if (rc == 0 || transient)
                 process_completions();
         }
 
-        if (rc < 0 && rc != -ETIME && rc != -EINTR)
+        if (rc < 0 && !transient)
         {
             // Restore state before propagating so followers don't
             // deadlock waiting for a leader that never returns.

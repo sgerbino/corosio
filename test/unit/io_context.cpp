@@ -23,10 +23,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stop_token>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 #include <tuple>
@@ -1047,6 +1049,27 @@ struct io_context_test
     }
 #endif
 
+#if BOOST_COROSIO_HAS_EPOLL || BOOST_COROSIO_HAS_KQUEUE || \
+    BOOST_COROSIO_HAS_SELECT
+    void testReactorOptionOutOfRange()
+    {
+        io_context_options events;
+        events.max_events_per_poll = 0;
+        BOOST_TEST_THROWS(io_context(Backend, events), std::invalid_argument);
+
+        io_context_options events_max;
+        events_max.max_events_per_poll =
+            static_cast<unsigned>((std::numeric_limits<int>::max)()) + 1u;
+        BOOST_TEST_THROWS(
+            io_context(Backend, events_max), std::invalid_argument);
+
+        io_context_options budget;
+        budget.inline_budget_max =
+            static_cast<unsigned>((std::numeric_limits<int>::max)()) + 1u;
+        BOOST_TEST_THROWS(io_context(Backend, budget), std::invalid_argument);
+    }
+#endif
+
     // A run call leaves the thread's frame allocator as it found it, so a
     // coroutine created afterwards never uses a resource that died with
     // the frames it ran.
@@ -1078,6 +1101,10 @@ struct io_context_test
     {
 #if BOOST_COROSIO_POSIX
         testZeroThreadPoolSizeThrows();
+#endif
+#if BOOST_COROSIO_HAS_EPOLL || BOOST_COROSIO_HAS_KQUEUE || \
+    BOOST_COROSIO_HAS_SELECT
+        testReactorOptionOutOfRange();
 #endif
         testConstruction();
         testRunRestoresFrameAllocator();
