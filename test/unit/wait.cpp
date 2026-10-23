@@ -1008,12 +1008,12 @@ struct wait_test
             auto [re, n] =
                 co_await s1.read_some(capy::mutable_buffer(buf, sizeof(buf)));
             rec = re;
-            (void)n;
+            std::ignore = n;
             done = true;
         };
         auto resetter = [&]() -> capy::task<> {
             auto [e] = co_await delay(std::chrono::milliseconds(10));
-            (void)e;
+            std::ignore = e;
             if (parked)
                 s2.close();
         };
@@ -1048,7 +1048,7 @@ struct wait_test
             auto [we, n] =
                 co_await s1.write_some(capy::const_buffer("x", 1));
             xec = we;
-            (void)n;
+            std::ignore = n;
         };
         capy::run_async(ioc.get_executor())(t());
         ioc.run();

@@ -427,7 +427,7 @@ struct signal_set_test
 
         auto wait_task = [&]() -> capy::task<> {
             auto [ec, signum] = co_await s.wait();
-            (void)signum;
+            std::ignore = signum;
             first_ec   = ec;
             first_done = true;
         };
@@ -458,7 +458,7 @@ struct signal_set_test
 
         auto second = [&]() -> capy::task<> {
             auto [ec, signum] = co_await s.wait();
-            (void)signum;
+            std::ignore = signum;
             second_ec   = ec;
             second_done = true;
         };
@@ -557,7 +557,7 @@ struct signal_set_test
 
         auto first = [&]() -> capy::task<> {
             auto [ec, signum] = co_await s.wait();
-            (void)signum;
+            std::ignore = signum;
             first_ec   = ec;
             first_done = true;
         };
@@ -581,7 +581,7 @@ struct signal_set_test
 
         auto second = [&]() -> capy::task<> {
             auto [ec, signum] = co_await s.wait();
-            (void)signum;
+            std::ignore = signum;
             second_ec   = ec;
             second_done = true;
         };
@@ -754,7 +754,7 @@ struct signal_set_test
                 // Walk the offset across iterations: a fixed delay would
                 // sit on the same side of the window every time.
                 for (int spin = i % 256; spin > 0; --spin)
-                    (void)arming.load(std::memory_order_relaxed);
+                    std::ignore = arming.load(std::memory_order_relaxed);
                 src.request_stop();
             });
 

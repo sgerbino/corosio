@@ -173,7 +173,7 @@ struct posix_stream_descriptor_test
         };
         auto other = [&]() -> capy::task<> {
             auto [e] = co_await delay(std::chrono::milliseconds(10));
-            (void)e;
+            std::ignore = e;
             BOOST_TEST(d.assign(b[0]) == error::already_open);
             BOOST_TEST_EQ(d.native_handle(), a[0]);
             BOOST_TEST(::fcntl(b[0], F_GETFD) >= 0); // still the caller's
@@ -301,7 +301,7 @@ struct posix_stream_descriptor_test
         // and write_ready is latched.
         auto settle = [&]() -> capy::task<> {
             auto [e] = co_await delay(std::chrono::milliseconds(1));
-            (void)e;
+            std::ignore = e;
         };
         capy::run_async(ioc.get_executor())(settle());
         ioc.run();
@@ -382,7 +382,7 @@ struct posix_stream_descriptor_test
                 co_await d.read_some(capy::mutable_buffer(buf, sizeof(buf)));
             ec   = rec;
             done = true;
-            (void)rn;
+            std::ignore = rn;
         };
         auto canceller = [&]() -> capy::task<> {
             d.cancel();
@@ -748,7 +748,7 @@ struct posix_stream_descriptor_test
             auto [wec, wn] = co_await d.write_some(capy::const_buffer("x", 1));
             ec             = wec;
             done           = true;
-            (void)wn;
+            std::ignore = wn;
         };
         auto closer = [&]() -> capy::task<> {
             co_await delay(std::chrono::milliseconds(10));
@@ -873,12 +873,12 @@ struct posix_stream_descriptor_test
         auto reader = [&]() -> capy::task<> {
             auto [e, n] = co_await d.read_some(capy::mutable_buffer(rbuf, 1));
             rec         = e;
-            (void)n;
+            std::ignore = n;
         };
         auto writer = [&]() -> capy::task<> {
             auto [e, n] = co_await d.write_some(capy::const_buffer("x", 1));
             wec         = e;
-            (void)n;
+            std::ignore = n;
             BOOST_TEST_EQ(::write(sv[1], "y", 1), 1);
         };
         capy::run_async(ioc.get_executor())(reader());
@@ -1095,7 +1095,7 @@ struct posix_stream_descriptor_test
         std::clock_t const c0 = std::clock();
         auto t                = [&]() -> capy::task<> {
             auto [e] = co_await delay(std::chrono::milliseconds(200));
-            (void)e;
+            std::ignore = e;
         };
         capy::run_async(ioc.get_executor())(t());
         ioc.run();
@@ -1117,7 +1117,7 @@ struct posix_stream_descriptor_test
         auto writer = [&]() -> capy::task<> {
             auto [wec, wn] = co_await d.write_some(capy::const_buffer("y", 1));
             ec             = wec;
-            (void)wn;
+            std::ignore = wn;
         };
         capy::run_async(ioc.get_executor())(writer());
         ioc.run();
@@ -1142,11 +1142,11 @@ struct posix_stream_descriptor_test
             auto [e, n] =
                 co_await d.read_some(capy::mutable_buffer(buf, sizeof(buf)));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         auto stopper = [&]() -> capy::task<> {
             auto [e] = co_await delay(std::chrono::milliseconds(10));
-            (void)e;
+            std::ignore = e;
             stop.request_stop();
         };
         capy::run_async(ioc.get_executor(), stop.get_token())(reader());
@@ -1230,13 +1230,13 @@ struct posix_stream_descriptor_test
             auto [e, n] = co_await capy::read(
                 d, capy::mutable_buffer(got.data(), got.size()));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         auto writer = [&]() -> capy::task<> {
             for (char const* part : {"hello", "world"})
             {
                 auto [e] = co_await delay(std::chrono::milliseconds(5));
-                (void)e;
+                std::ignore = e;
                 BOOST_TEST_EQ(::write(fds[1], part, 5), 5);
             }
         };
@@ -1278,7 +1278,7 @@ struct posix_stream_descriptor_test
             auto [e2, n2] =
                 co_await rd.read_some(capy::mutable_buffer(buf, sizeof(buf)));
             eof_ec = e2;
-            (void)n2;
+            std::ignore = n2;
         };
         capy::run_async(ioc.get_executor())(reader());
         ioc.run();
@@ -1322,7 +1322,7 @@ struct posix_stream_descriptor_test
         };
         auto closer = [&]() -> capy::task<> {
             auto [e] = co_await delay(std::chrono::milliseconds(10));
-            (void)e;
+            std::ignore = e;
             if (parked)
             {
                 BOOST_TEST_EQ(done, false);
@@ -1331,7 +1331,7 @@ struct posix_stream_descriptor_test
             for (int i = 0; i < 20 && !done; ++i)
             {
                 auto [e2] = co_await delay(std::chrono::milliseconds(10));
-                (void)e2;
+                std::ignore = e2;
             }
             if (!done)
                 d.cancel();
@@ -1365,7 +1365,7 @@ struct posix_stream_descriptor_test
         auto t = [&]() -> capy::task<> {
             auto [e, n] = co_await d.write_some(capy::const_buffer("x", 1));
             ec          = e;
-            (void)n;
+            std::ignore = n;
         };
         struct sigpipe_ignore
         {
@@ -1448,11 +1448,11 @@ struct posix_stream_descriptor_test
                 auto [e, n] =
                     co_await d.read_some(capy::mutable_buffer(buf, 1));
                 ec = e;
-                (void)n;
+                std::ignore = n;
             };
             auto ender = [&]() -> capy::task<> {
                 auto [e] = co_await delay(std::chrono::milliseconds(10));
-                (void)e;
+                std::ignore = e;
                 if (how == 0)
                     d.cancel();
                 else if (how == 1)

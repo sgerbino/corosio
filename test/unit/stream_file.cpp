@@ -1372,8 +1372,8 @@ struct stream_file_test
             auto reader = [&]() -> capy::task<> {
                 auto [e, n] = co_await f.read_some(
                     capy::mutable_buffer(buf, sizeof(buf)));
-                (void)e;
-                (void)n;
+                std::ignore = e;
+                std::ignore = n;
             };
             auto swapper = [&]() -> capy::task<> {
 #if BOOST_COROSIO_HAS_IOCP

@@ -2545,7 +2545,7 @@ struct tcp_socket_test
             auto [wec, wn] =
                 co_await s2.write_some(capy::const_buffer("ping", 4));
             BOOST_TEST(!wec);
-            (void)wn;
+            std::ignore = wn;
         };
 
         // run_async runs inline to the first suspend, so spawning the

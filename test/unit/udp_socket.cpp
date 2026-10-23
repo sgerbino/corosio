@@ -1558,7 +1558,7 @@ struct udp_socket_test
             auto [ec1, n1]   = co_await peer.send_to(
                 capy::const_buffer(msg, sizeof(msg)), sock_ep);
             BOOST_TEST(!ec1);
-            (void)n1;
+            std::ignore = n1;
         };
 
         // run_async runs inline to the first suspend, so spawning the

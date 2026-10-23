@@ -714,7 +714,7 @@ struct local_datagram_socket_test
             BOOST_TEST(d1.native_handle() == held);
             auto [ec, n] = co_await d2.send(capy::const_buffer("go", 2));
             BOOST_TEST(!ec);
-            (void)n;
+            std::ignore = n;
         };
         capy::run_async(ex)(reader());
         capy::run_async(ex)(assigner());

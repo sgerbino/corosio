@@ -865,7 +865,7 @@ struct random_access_file_test
             auto [e, n] = co_await f.read_some_at(
                 0, capy::mutable_buffer(buf, sizeof(buf)));
             ec = e;
-            (void)n;
+            std::ignore = n;
             on_strand = s.running_in_this_thread();
         };
         capy::run_async(s)(t());
@@ -905,11 +905,11 @@ struct random_access_file_test
             auto [e1, n1] =
                 co_await f.write_some_at(off, capy::const_buffer(out, 4));
             wec = e1;
-            (void)n1;
+            std::ignore = n1;
             auto [e2, n2] =
                 co_await f.read_some_at(off, capy::mutable_buffer(in, 4));
             rec = e2;
-            (void)n2;
+            std::ignore = n2;
         };
         capy::run_async(ioc.get_executor())(t());
         ioc.run();
@@ -936,7 +936,7 @@ struct random_access_file_test
             auto [e, n] = co_await h.read_some_at(
                 0, capy::mutable_buffer(buf, sizeof(buf)));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         auto stopper = [&]() -> capy::task<> {
             ss.request_stop();

@@ -257,7 +257,7 @@ struct win_stream_handle_test
         auto writer = [&]() -> capy::task<> {
             auto [e, n] = co_await h.write_some(capy::const_buffer("x", 1));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         capy::run_async(ioc.get_executor())(writer());
         ioc.run();
@@ -331,7 +331,7 @@ struct win_stream_handle_test
             auto [e, n] =
                 co_await h.read_some(capy::mutable_buffer(buf, sizeof(buf)));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         auto canceller = [&]() -> capy::task<> {
             h.cancel();
@@ -357,7 +357,7 @@ struct win_stream_handle_test
             auto [e, n] =
                 co_await h.read_some(capy::mutable_buffer(buf, sizeof(buf)));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         auto stopper = [&]() -> capy::task<> {
             ss.request_stop();
@@ -576,10 +576,10 @@ struct win_stream_handle_test
             auto [e1, n1] =
                 co_await h.read_some(capy::mutable_buffer(buf, sizeof(buf)));
             rec = e1;
-            (void)n1;
+            std::ignore = n1;
             auto [e2, n2] = co_await h.write_some(capy::const_buffer("x", 1));
             wec = e2;
-            (void)n2;
+            std::ignore = n2;
         };
         capy::run_async(ioc.get_executor())(t());
         ioc.run();

@@ -137,7 +137,7 @@ struct win_random_access_handle_test
         auto reader = [&]() -> capy::task<> {
             auto [e, rn] =
                 co_await fx.h.read_some_at(0, capy::mutable_buffer(buf, count));
-            (void)e;
+            std::ignore = e;
             n = rn;
         };
         capy::run_async(fx.ioc.get_executor())(reader());
@@ -157,7 +157,7 @@ struct win_random_access_handle_test
             auto [e, n] =
                 co_await fx.h.read_some_at(4096, capy::mutable_buffer(buf, 4));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         capy::run_async(fx.ioc.get_executor())(task());
         fx.ioc.run();
@@ -174,7 +174,7 @@ struct win_random_access_handle_test
         auto reader = [&]() -> capy::task<> {
             char buf[4];
             auto [e, n] = co_await h.read_some_at(0, capy::mutable_buffer(buf, 4));
-            (void)n;
+            std::ignore = n;
             if (e == capy::cond::canceled)
                 ++canceled;
         };
@@ -291,7 +291,7 @@ struct win_random_access_handle_test
             auto [e, n] = co_await h.read_some_at(
                 2, capy::mutable_buffer(buf, sizeof(buf)));
             ec = e;
-            (void)n;
+            std::ignore = n;
             on_strand = s.running_in_this_thread();
         };
         capy::run_async(s)(t());
@@ -372,7 +372,7 @@ struct win_random_access_handle_test
             auto [e, n] = co_await h.read_some_at(
                 0, capy::mutable_buffer(buf, sizeof(buf)));
             ec = e;
-            (void)n;
+            std::ignore = n;
         };
         auto stopper = [&]() -> capy::task<> {
             ss.request_stop();

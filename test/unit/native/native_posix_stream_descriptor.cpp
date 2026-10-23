@@ -22,6 +22,7 @@
 
 #include <cstring>
 #include <string>
+#include <tuple>
 #include <type_traits>
 
 #include <unistd.h>
@@ -133,7 +134,7 @@ struct native_posix_stream_descriptor_test
         };
         auto writer = [&]() -> capy::task<> {
             auto [e] = co_await delay(std::chrono::milliseconds(10));
-            (void)e;
+            std::ignore = e;
             BOOST_TEST_EQ(done, false); // the wait parked
             BOOST_TEST_EQ(::write(fds[1], "x", 1), 1);
         };

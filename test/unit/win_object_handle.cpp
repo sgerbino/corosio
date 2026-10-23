@@ -27,6 +27,7 @@
 #include <optional>
 #include <stop_token>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -279,7 +280,7 @@ struct win_object_handle_test
         volatile int sink = 0;
         for (int k = 0; k < n; ++k)
             sink = k;
-        (void)sink;
+        std::ignore = sink;
     }
 
     // SetEvent satisfies the pending wait before it returns: the kernel
@@ -582,7 +583,7 @@ struct win_object_handle_test
         };
         auto poker = [&]() -> capy::task<> {
             auto [d] = co_await delay(std::chrono::milliseconds(10));
-            (void)d;
+            std::ignore = d;
             BOOST_TEST(
                 o.assign(test::as_native(other.get())) == error::already_open);
             BOOST_TEST_EQ(done, false); // the pending wait is undisturbed
