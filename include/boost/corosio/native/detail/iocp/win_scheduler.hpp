@@ -123,6 +123,18 @@ private:
 
     static void on_timer_changed(void* ctx);
     void post_deferred_completions(op_queue& ops);
+
+    // Set stopped_ and post the shutdown packet; returns the Win32
+    // error of a failed post, or 0.
+    unsigned long post_stop() noexcept;
+
+    // Post the shutdown packet unless one is in flight; returns the
+    // Win32 error of a failed post, or 0.
+    unsigned long post_wakeup() noexcept;
+
+    // Retry a wakeup that a noexcept path failed to queue, throwing
+    // if the retry fails too.
+    void report_stop_failure();
     std::size_t do_one(unsigned long timeout_ms);
 
     timer_service* timer_svc_ = nullptr;
@@ -138,6 +150,7 @@ private:
     mutable long pending_io_ = 0;
     mutable long stopped_;
     long stop_event_posted_;
+    long stop_failure_ = 0;
     mutable long dispatch_required_;
     bool scheduler_locking_disabled_ = false;
 
@@ -319,8 +332,11 @@ win_scheduler::work_started() noexcept
 inline void
 win_scheduler::work_finished() noexcept
 {
+    // Completions and guard destructors land here and cannot throw,
+    // so a failed post is recorded for the run loop to report.
     if (::InterlockedDecrement(&outstanding_work_) == 0)
-        stop();
+        if (auto err = post_stop())
+            ::InterlockedExchange(&stop_failure_, static_cast<long>(err));
 }
 
 inline void
@@ -380,24 +396,47 @@ win_scheduler::on_completion(overlapped_op* op, DWORD error, DWORD bytes) const
     ::InterlockedDecrement(&pending_io_);
 }
 
+inline unsigned long
+win_scheduler::post_stop() noexcept
+{
+    ::InterlockedExchange(&stopped_, 1);
+    return post_wakeup();
+}
+
+inline unsigned long
+win_scheduler::post_wakeup() noexcept
+{
+    if (::InterlockedExchange(&stop_event_posted_, 1) != 0)
+        return 0;
+    if (::PostQueuedCompletionStatus(iocp_, 0, key_shutdown, nullptr))
+        return 0;
+    auto err = ::GetLastError();
+    // No packet is in flight, so a later stop retries the wakeup
+    // rather than leaving blocked threads asleep for good.
+    ::InterlockedExchange(&stop_event_posted_, 0);
+    return err;
+}
+
 inline void
 win_scheduler::stop()
 {
-    if (::InterlockedExchange(&stopped_, 1) == 0)
-    {
-        if (::InterlockedExchange(&stop_event_posted_, 1) == 0)
-        {
-            if (!::PostQueuedCompletionStatus(iocp_, 0, key_shutdown, nullptr))
-            {
-                // The shutdown post is the only thing that wakes a
-                // run()/run_one() thread blocked indefinitely in GQCS.
-                // With no periodic timeout there is no fallback, so a
-                // failed post is fatal (matches Asio). It can only fail
-                // under resource exhaustion (ERROR_NO_SYSTEM_RESOURCES).
-                detail::throw_system_error(make_err(::GetLastError()));
-            }
-        }
-    }
+    // The shutdown post is the only thing that wakes a run()/run_one()
+    // thread blocked indefinitely in GQCS. With no periodic timeout
+    // there is no fallback, so a failed post is reported rather than
+    // ignored. It can only fail under resource exhaustion.
+    if (auto err = post_stop())
+        detail::throw_system_error(make_err(err));
+}
+
+inline void
+win_scheduler::report_stop_failure()
+{
+    if (::InterlockedExchange(&stop_failure_, 0) == 0 || !stopped())
+        return;
+    // Other threads may still be blocked waiting for the lost wakeup,
+    // so retry it and report only a retry that fails too.
+    if (auto err = post_wakeup())
+        detail::throw_system_error(make_err(err));
 }
 
 inline bool
@@ -412,11 +451,13 @@ win_scheduler::restart()
 {
     ::InterlockedExchange(&stopped_, 0);
     ::InterlockedExchange(&stop_event_posted_, 0);
+    ::InterlockedExchange(&stop_failure_, 0);
 }
 
 inline std::size_t
 win_scheduler::run()
 {
+    report_stop_failure();
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
     {
         stop();
@@ -438,12 +479,14 @@ win_scheduler::run()
             break;
         }
     }
+    report_stop_failure();
     return n;
 }
 
 inline std::size_t
 win_scheduler::run_one()
 {
+    report_stop_failure();
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
     {
         stop();
@@ -451,12 +494,15 @@ win_scheduler::run_one()
     }
 
     iocp::thread_context_guard ctx(this);
-    return do_one(INFINITE);
+    auto n = do_one(INFINITE);
+    report_stop_failure();
+    return n;
 }
 
 inline std::size_t
 win_scheduler::wait_one(long usec)
 {
+    report_stop_failure();
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
     {
         stop();
@@ -471,12 +517,15 @@ win_scheduler::wait_one(long usec)
         timeout_ms = ms >= 0xFFFFFFFELL ? static_cast<unsigned long>(0xFFFFFFFE)
                                         : static_cast<unsigned long>(ms);
     }
-    return do_one(timeout_ms);
+    auto n = do_one(timeout_ms);
+    report_stop_failure();
+    return n;
 }
 
 inline std::size_t
 win_scheduler::poll()
 {
+    report_stop_failure();
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
     {
         stop();
@@ -489,12 +538,14 @@ win_scheduler::poll()
     while (do_one(0))
         if (n != (std::numeric_limits<std::size_t>::max)())
             ++n;
+    report_stop_failure();
     return n;
 }
 
 inline std::size_t
 win_scheduler::poll_one()
 {
+    report_stop_failure();
     if (::InterlockedExchangeAdd(&outstanding_work_, 0) == 0)
     {
         stop();
@@ -502,7 +553,9 @@ win_scheduler::poll_one()
     }
 
     iocp::thread_context_guard ctx(this);
-    return do_one(0);
+    auto n = do_one(0);
+    report_stop_failure();
+    return n;
 }
 
 inline void
@@ -630,11 +683,9 @@ win_scheduler::do_one(unsigned long timeout_ms)
                 if (stopped())
                 {
                     // Re-post for other waiting threads
-                    if (::InterlockedExchange(&stop_event_posted_, 1) == 0)
-                    {
-                        ::PostQueuedCompletionStatus(
-                            iocp_, 0, key_shutdown, nullptr);
-                    }
+                    if (auto err = post_wakeup())
+                        ::InterlockedExchange(
+                            &stop_failure_, static_cast<long>(err));
                     return 0;
                 }
                 continue;
@@ -649,8 +700,7 @@ win_scheduler::do_one(unsigned long timeout_ms)
         // Timeout or error. INFINITE never times out, so a WAIT_TIMEOUT
         // can only be a finite caller timeout (wait_one/poll) elapsing
         // with no work. run()/run_one() pass INFINITE and block until a
-        // real wake-up; they exit only when stop() posts key_shutdown
-        // (a failed post is fatal in stop()).
+        // real wake-up; they exit only when stop() posts key_shutdown.
         if (dwError != WAIT_TIMEOUT)
             detail::throw_system_error(make_err(dwError));
         return 0;

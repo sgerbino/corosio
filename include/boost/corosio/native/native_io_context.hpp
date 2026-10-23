@@ -108,7 +108,8 @@ public:
     /** Signal the context to stop processing.
 
         @throws std::system_error on Windows if the wakeup cannot be
-            queued, which leaves blocked `run()` callers unable to wake.
+            queued, which leaves blocked `run()` callers unable to wake
+            until a later call succeeds.
     */
     void stop()
     {
@@ -135,9 +136,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @return The number of handlers executed.
     */
@@ -152,9 +152,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @return The number of handlers executed (0 or 1).
     */
@@ -169,9 +168,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @param rel_time The duration for which to process work.
 
@@ -188,9 +186,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @param abs_time The time point until which to process work.
 
@@ -212,9 +209,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @param rel_time The duration for which the call may block.
 
@@ -231,9 +227,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @param abs_time The time point until which the call may block.
 
@@ -274,9 +269,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @return The number of handlers executed.
     */
@@ -291,9 +285,8 @@ public:
         @throws std::system_error if waiting on the operating system's
             event demultiplexer fails other than by interruption or
             another transient condition; the context can no longer
-            dispatch work. On Windows, also if it is called with no
-            outstanding work and the wakeup that stops the context
-            cannot be queued.
+            dispatch work. On Windows, also if the wakeup that stops
+            the context when its work runs out cannot be queued.
 
         @return The number of handlers executed (0 or 1).
     */

@@ -75,8 +75,8 @@ throw `std::bad_alloc`. `run()`, `poll()` and their siblings throw
 `std::system_error` if waiting on the OS demultiplexer fails — a
 condition with no per-operation channel to carry it, after which the
 context cannot dispatch work. On Windows `stop()` throws if it cannot
-queue the wakeup, and so does a run or poll call made with no
-outstanding work, which stops the context itself.
+queue the wakeup, and so do `run()` and `poll()` when they stop the
+context themselves because its work ran out.
 `set_option()`, `get_option()`, `release()`, `size()`, and `available()`
 never throw. `set_option()` and `get_option()` report a platform that
 rejects the option, such as an unsupported option on that protocol or OS,

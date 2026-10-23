@@ -248,7 +248,25 @@ struct iocp_faults
     {
         io_context ioc(iocp);
         // The shutdown packet is the only thing that wakes a blocked
-        // run(), so a failed post is fatal rather than reported.
+        // run(), so a failed post is reported rather than ignored.
+        fault_scope f(
+            sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+        expect_system_error(
+            [&] { ioc.stop(); }, win_err(ERROR_NO_SYSTEM_RESOURCES));
+        BOOST_TEST(f.fired());
+    }
+
+    void testStopPostRetried()
+    {
+        io_context ioc(iocp);
+        {
+            fault_scope f(
+                sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+            expect_system_error(
+                [&] { ioc.stop(); }, win_err(ERROR_NO_SYSTEM_RESOURCES));
+        }
+        // Already stopped, but no wakeup was queued, so a second stop
+        // must try the post again.
         fault_scope f(
             sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
         expect_system_error(
@@ -291,6 +309,83 @@ struct iocp_faults
         capy::run_async(ioc.get_executor())(body());
         expect_system_error([&] { ioc.run(); }, win_err(ERROR_INVALID_HANDLE));
         BOOST_TEST(f.fired());
+    }
+
+    void testWorkFinishedStopPostRetried()
+    {
+        io_context ioc(iocp);
+        // The last handler's completion stops the context from inside
+        // a noexcept path; run() retries the lost wakeup, and a retry
+        // that succeeds leaves nothing to report.
+        std::optional<fault_scope> f;
+        auto body = [&]() -> capy::task<> {
+            f.emplace(
+                sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+            co_return;
+        };
+        capy::run_async(ioc.get_executor())(body());
+        ioc.run();
+        BOOST_TEST(f && f->fired());
+        BOOST_TEST(ioc.stopped());
+    }
+
+    void testWorkFinishedStopPostFails()
+    {
+        io_context ioc(iocp);
+        // The self-stop's post and run()'s own stop both fail, so the
+        // failure reaches run()'s caller.
+        std::optional<fault_scope> first;
+        std::optional<fault_scope> retry;
+        auto body = [&]() -> capy::task<> {
+            first.emplace(
+                sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+            retry.emplace(
+                sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+            co_return;
+        };
+        capy::run_async(ioc.get_executor())(body());
+        expect_system_error(
+            [&] { ioc.run(); }, win_err(ERROR_NO_SYSTEM_RESOURCES));
+        BOOST_TEST(first && first->fired());
+        BOOST_TEST(retry && retry->fired());
+        BOOST_TEST(ioc.stopped());
+    }
+
+    void testRunOneStopPostRetried()
+    {
+        io_context ioc(iocp);
+        // run_one() has no stop of its own after the handler, so the
+        // recorded failure is what retries the wakeup.
+        std::optional<fault_scope> f;
+        auto body = [&]() -> capy::task<> {
+            f.emplace(
+                sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+            co_return;
+        };
+        capy::run_async(ioc.get_executor())(body());
+        BOOST_TEST_EQ(ioc.run_one(), 1u);
+        BOOST_TEST(f && f->fired());
+        BOOST_TEST(ioc.stopped());
+    }
+
+    void testRunOneStopPostFails()
+    {
+        io_context ioc(iocp);
+        std::optional<fault_scope> first;
+        std::optional<fault_scope> retry;
+        auto body = [&]() -> capy::task<> {
+            first.emplace(
+                sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+            retry.emplace(
+                sys::PostQueuedCompletionStatus, ERROR_NO_SYSTEM_RESOURCES);
+            co_return;
+        };
+        capy::run_async(ioc.get_executor())(body());
+        expect_system_error(
+            [&] { ioc.run_one(); }, win_err(ERROR_NO_SYSTEM_RESOURCES));
+        BOOST_TEST(first && first->fired());
+        BOOST_TEST(retry && retry->fired());
+        BOOST_TEST(ioc.stopped());
     }
 
     void testTcpOpenFails()
@@ -1932,10 +2027,15 @@ struct iocp_faults
         testTimerCreationFails();
         testTimerThreadWaitFails();
         testStopPostFails();
+        testStopPostRetried();
         testPostFallbackRuns();
         testPostDeferredFallbackRuns();
         testInlineCompletionPostFails();
         testRunLoopDequeueFails();
+        testWorkFinishedStopPostRetried();
+        testWorkFinishedStopPostFails();
+        testRunOneStopPostRetried();
+        testRunOneStopPostFails();
         testTcpOpenFails();
         testTcpAssignFails();
         testTcpBindFails();
