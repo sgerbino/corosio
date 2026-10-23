@@ -163,14 +163,7 @@ class BOOST_COROSIO_DECL tcp_acceptor : public io_object
 
         [[nodiscard]] capy::results<tcp_socket> await_resume() noexcept
         {
-            // The peer is built only on success: error paths must not
-            // touch acc_.context(), which a moved-from acceptor lacks.
-            if (this->ec_ || !peer_impl_)
-                return {this->ec_, tcp_socket()};
-
-            tcp_socket peer(acc_.context());
-            peer.h_.reset(std::exchange(peer_impl_, nullptr));
-            return {this->ec_, std::move(peer)};
+            return take_peer(acc_, this->ec_, peer_impl_);
         }
     };
 
@@ -757,15 +750,41 @@ protected:
             peer.h_.reset(impl);
     }
 
-private:
-    inline implementation& get() const noexcept
+    /** Return the result of an accept that yields the peer.
+
+        The peer socket is built only on success, so a failed accept
+        never touches the acceptor's context, which a moved-from
+        acceptor lacks.
+
+        @param acc The acceptor that performed the accept.
+        @param ec The completion code.
+        @param impl The accepted peer implementation; taken on success.
+
+        @return The completion code and the peer, which is
+            default-constructed on failure.
+    */
+    static capy::results<tcp_socket> take_peer(
+        tcp_acceptor& acc,
+        std::error_code ec,
+        io_object::implementation*& impl) noexcept
     {
-        return *static_cast<implementation*>(h_.get());
+        if (ec || !impl)
+            return {ec, tcp_socket()};
+
+        tcp_socket peer(acc.context());
+        peer.h_.reset(std::exchange(impl, nullptr));
+        return {ec, std::move(peer)};
     }
 
     /// Close and release a non-null accepted peer no socket took over.
     static void
     discard_peer(tcp_acceptor& acc, io_object::implementation* impl) noexcept;
+
+private:
+    inline implementation& get() const noexcept
+    {
+        return *static_cast<implementation*>(h_.get());
+    }
 };
 
 } // namespace boost::corosio

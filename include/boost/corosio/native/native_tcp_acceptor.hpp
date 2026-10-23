@@ -102,10 +102,18 @@ class native_tcp_acceptor : public tcp_acceptor
         {
         }
 
+        // A peer accepted for an awaiter that never resumed is closed
+        // here, or nothing would own it.
+        ~native_accept_awaitable()
+        {
+            if (peer_impl_)
+                discard_peer(acc_, peer_impl_);
+        }
+
         [[nodiscard]] capy::results<> await_resume() const noexcept
         {
             if (!this->ec_)
-                acc_.reset_peer_impl(peer_, peer_impl_);
+                acc_.reset_peer_impl(peer_, std::exchange(peer_impl_, nullptr));
             return {this->ec_};
         }
 
@@ -121,20 +129,25 @@ class native_tcp_acceptor : public tcp_acceptor
         : detail::void_op_base<native_accept_value_awaitable>
     {
         native_tcp_acceptor& acc_;
-        tcp_socket peer_;
         mutable io_object::implementation* peer_impl_ = nullptr;
 
-        explicit native_accept_value_awaitable(native_tcp_acceptor& acc)
+        explicit native_accept_value_awaitable(
+            native_tcp_acceptor& acc) noexcept
             : acc_(acc)
-            , peer_(acc.context())
         {
+        }
+
+        // A peer accepted for an awaiter that never resumed is closed
+        // here, or nothing would own it.
+        ~native_accept_value_awaitable()
+        {
+            if (peer_impl_)
+                discard_peer(acc_, peer_impl_);
         }
 
         [[nodiscard]] capy::results<tcp_socket> await_resume() noexcept
         {
-            if (!this->ec_ && peer_impl_)
-                acc_.reset_peer_impl(peer_, peer_impl_);
-            return {this->ec_, std::move(peer_)};
+            return take_peer(acc_, this->ec_, peer_impl_);
         }
 
         std::coroutine_handle<>
@@ -226,18 +239,13 @@ public:
 
         @return An awaitable yielding `results<tcp_socket>`.
 
-        A closed acceptor reports `errc::bad_file_descriptor`.
-
-        @throws std::logic_error If the acceptor is moved-from.
+        A closed or moved-from acceptor reports
+        `errc::bad_file_descriptor`.
 
         This acceptor must outlive the returned awaitable.
     */
     [[nodiscard]] auto accept()
     {
-        // The awaitable builds the peer from context(), which a
-        // moved-from acceptor no longer has.
-        if (!h_)
-            detail::throw_logic_error("accept: acceptor moved-from");
         native_accept_value_awaitable aw(*this);
         if (!is_open())
             aw.ec_ = make_error_code(std::errc::bad_file_descriptor);
