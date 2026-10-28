@@ -15,10 +15,10 @@ jobs:
 
     env:
       PLAIN_WORKERS: 8
-      PLAIN_RUNS: 0
+      PLAIN_RUNS: 3000
       GDB_WORKERS: 6
       GDB_RUNS: 300
-      GDB_MAX_CAPTURES: 5
+      GDB_MAX_CAPTURES: 3
 
     steps:
       - name: Clone Boost.Corosio
