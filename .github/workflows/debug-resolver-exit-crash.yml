@@ -1,0 +1,141 @@
+name: Debug resolver exit crash
+
+on:
+  push:
+    branches: [ debug/resolver-exit-crash ]
+
+jobs:
+  loop:
+    name: MinGW static resolver loop
+    runs-on: windows-2025
+    timeout-minutes: 110
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      PLAIN_WORKERS: 4
+      PLAIN_RUNS: 250
+      GDB_WORKERS: 4
+      GDB_RUNS: 100
+      GDB_MAX_CAPTURES: 3
+
+    steps:
+      - name: Clone Boost.Corosio
+        uses: actions/checkout@v4
+        with:
+          path: corosio-root
+
+      # Matches the failing develop run, which resolved to cppalliance/capy develop.
+      - name: Clone Capy
+        uses: actions/checkout@v4
+        with:
+          repository: cppalliance/capy
+          ref: develop
+          path: capy-root
+
+      - name: Clone Boost
+        uses: alandefreitas/cpp-actions/boost-clone@v1.9.0
+        with:
+          branch: develop
+          boost-dir: boost-source
+          modules-exclude-paths: ''
+          scan-modules-dir: corosio-root
+          scan-modules-ignore: corosio, capy
+
+      - name: Patch Boost
+        run: |
+          set -xe
+          rm -rf boost-source/libs/corosio boost-source/libs/capy
+          cp -rL boost-source boost-root
+          cp -r corosio-root boost-root/libs/corosio
+          cp -r capy-root boost-root/libs/capy
+
+      - name: Toolchain
+        run: |
+          echo "C:/mingw64/bin" >> "$GITHUB_PATH"
+          C:/mingw64/bin/g++.exe --version
+          if [ -x C:/mingw64/bin/gdb.exe ]; then
+            echo "GDB=C:/mingw64/bin/gdb.exe" >> "$GITHUB_ENV"
+          else
+            C:/msys64/usr/bin/pacman.exe -S --noconfirm mingw-w64-x86_64-gdb
+            echo "GDB=C:/msys64/mingw64/bin/gdb.exe" >> "$GITHUB_ENV"
+          fi
+
+      # Same properties as the CI leg; debug-symbols only adds -g, which
+      # does not change GCC's code generation.
+      - name: Build resolver test
+        working-directory: boost-root
+        run: |
+          set -xe
+          cmd //c bootstrap.bat
+          ./b2 headers
+          ./b2 -j4 --toolset=gcc address-model=64 cxxstd=20 variant=release \
+            link=static rtti=on debug-symbols=on --abbreviate-paths -q \
+            testing.execute=off libs/corosio/test/unit//resolver
+          exe=$(find bin.v2 -name resolver.exe | head -1)
+          test -n "$exe"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$exe" "$GITHUB_WORKSPACE/out/resolver.exe"
+          "$GITHUB_WORKSPACE/out/resolver.exe" 2>&1 | tail -3
+
+      - name: Plain loop
+        working-directory: out
+        run: |
+          worker() {
+            local w=$1 crashes=0
+            for i in $(seq 1 "$PLAIN_RUNS"); do
+              ./resolver.exe > "plain-$w.txt" 2>&1
+              rc=$?
+              if [ $rc -ne 0 ]; then
+                crashes=$((crashes + 1))
+                mv "plain-$w.txt" "plain-crash-w$w-i$i-rc$rc.txt"
+              fi
+            done
+            echo "worker $w: $crashes/$PLAIN_RUNS nonzero exits"
+          }
+          for w in $(seq 1 "$PLAIN_WORKERS"); do worker "$w" & done
+          wait
+          rm -f plain-?.txt
+          ls plain-crash-* 2>/dev/null | wc -l | xargs echo "total nonzero exits:"
+          for f in plain-crash-*; do [ -f "$f" ] && { echo "== $f"; tail -15 "$f"; }; done
+          true
+
+      # gdb stops on the first-chance access violation, before the test's
+      # unhandled-exception filter swallows it, so the stack survives.
+      - name: gdb loop
+        working-directory: out
+        run: |
+          worker() {
+            local w=$1
+            for i in $(seq 1 "$GDB_RUNS"); do
+              [ "$(ls gdb-crash-* 2>/dev/null | wc -l)" -ge "$GDB_MAX_CAPTURES" ] && break
+              "$GDB" -q -batch -nx \
+                -ex "set pagination off" \
+                -ex "set print thread-events off" \
+                -ex "handle all nostop noprint pass" \
+                -ex "handle SIGSEGV stop print nopass" \
+                -ex run \
+                -ex "info threads" \
+                -ex "info registers" \
+                -ex "x/32gx \$rsp" \
+                -ex "thread apply all bt full" \
+                --args ./resolver.exe > "gdb-$w.txt" 2>&1
+              if grep -q "SIGSEGV" "gdb-$w.txt"; then
+                mv "gdb-$w.txt" "gdb-crash-w$w-i$i.txt"
+                echo "worker $w: captured on run $i"
+              fi
+            done
+          }
+          for w in $(seq 1 "$GDB_WORKERS"); do worker "$w" & done
+          wait
+          rm -f gdb-?.txt
+          for f in gdb-crash-*; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done
+          true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-exit-crash
+          path: out/
