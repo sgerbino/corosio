@@ -14,10 +14,10 @@ jobs:
         shell: bash
 
     env:
-      PLAIN_WORKERS: 4
-      PLAIN_RUNS: 250
-      GDB_WORKERS: 4
-      GDB_RUNS: 100
+      PLAIN_WORKERS: 8
+      PLAIN_RUNS: 3000
+      GDB_WORKERS: 6
+      GDB_RUNS: 300
       GDB_MAX_CAPTURES: 3
 
     steps:
@@ -82,6 +82,7 @@ jobs:
       - name: Plain loop
         working-directory: out
         run: |
+          set +e +o pipefail
           worker() {
             local w=$1 crashes=0
             for i in $(seq 1 "$PLAIN_RUNS"); do
@@ -97,19 +98,21 @@ jobs:
           for w in $(seq 1 "$PLAIN_WORKERS"); do worker "$w" & done
           wait
           rm -f plain-?.txt
-          ls plain-crash-* 2>/dev/null | wc -l | xargs echo "total nonzero exits:"
+          echo "total nonzero exits: $(find . -name 'plain-crash-*' | wc -l)"
           for f in plain-crash-*; do [ -f "$f" ] && { echo "== $f"; tail -15 "$f"; }; done
           true
 
       # gdb stops on the first-chance access violation, before the test's
       # unhandled-exception filter swallows it, so the stack survives.
       - name: gdb loop
+        if: always()
         working-directory: out
         run: |
+          set +e +o pipefail
           worker() {
             local w=$1
             for i in $(seq 1 "$GDB_RUNS"); do
-              [ "$(ls gdb-crash-* 2>/dev/null | wc -l)" -ge "$GDB_MAX_CAPTURES" ] && break
+              [ "$(find . -name 'gdb-crash-*' | wc -l)" -ge "$GDB_MAX_CAPTURES" ] && break
               "$GDB" -q -batch -nx \
                 -ex "set pagination off" \
                 -ex "set print thread-events off" \
