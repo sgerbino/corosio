@@ -15,10 +15,10 @@ jobs:
 
     env:
       PLAIN_WORKERS: 8
-      PLAIN_RUNS: 3000
+      PLAIN_RUNS: 0
       GDB_WORKERS: 6
       GDB_RUNS: 300
-      GDB_MAX_CAPTURES: 3
+      GDB_MAX_CAPTURES: 5
 
     steps:
       - name: Clone Boost.Corosio
@@ -109,21 +109,25 @@ jobs:
         working-directory: out
         run: |
           set +e +o pipefail
+          # A command file: Windows splits quoted -ex arguments at spaces.
+          cat > crash.gdb <<'GDB'
+          set pagination off
+          set print thread-events off
+          set width 0
+          handle all nostop noprint pass
+          handle SIGSEGV stop print nopass
+          run
+          info threads
+          info registers
+          x/96a $rsp
+          info sharedlibrary
+          thread apply all bt 40
+          GDB
           worker() {
             local w=$1
             for i in $(seq 1 "$GDB_RUNS"); do
               [ "$(find . -name 'gdb-crash-*' | wc -l)" -ge "$GDB_MAX_CAPTURES" ] && break
-              "$GDB" -q -batch -nx \
-                -ex "set pagination off" \
-                -ex "set print thread-events off" \
-                -ex "handle all nostop noprint pass" \
-                -ex "handle SIGSEGV stop print nopass" \
-                -ex run \
-                -ex "info threads" \
-                -ex "info registers" \
-                -ex "x/32gx \$rsp" \
-                -ex "thread apply all bt full" \
-                --args ./resolver.exe > "gdb-$w.txt" 2>&1
+              "$GDB" -q -batch -nx -x crash.gdb --args ./resolver.exe > "gdb-$w.txt" 2>&1
               if grep -q "SIGSEGV" "gdb-$w.txt"; then
                 mv "gdb-$w.txt" "gdb-crash-w$w-i$i.txt"
                 echo "worker $w: captured on run $i"
