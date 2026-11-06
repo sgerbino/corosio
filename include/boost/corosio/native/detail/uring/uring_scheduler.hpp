@@ -840,16 +840,15 @@ uring_scheduler::destroy_queued(lock_type& lock) noexcept
 {
     while (auto e = completed_ops_.pop())
     {
-        if (ready_is_continuation(e))
+        if (e.is_continuation())
         {
             lock.unlock();
-            if (auto* c = ready_as_cont(e); c->h)
-                capy::abandon(*c);
+            e.take();
             lock.lock();
         }
         else
         {
-            auto* op = ready_as_op(e);
+            auto* op = e.op();
             if (op == &task_op_)
                 continue;
             lock.unlock();
@@ -1058,7 +1057,7 @@ uring_scheduler::post(capy::continuation& c) const
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
     {
         lock_type lock(dispatch_mutex_);
-        completed_ops_.push(c);
+        completed_ops_.push(capy::chain_holder(c));
         wake_one_locked();
     }
 }
@@ -1268,9 +1267,9 @@ uring_scheduler::do_one(long timeout_us)
         if (stopped_.load(std::memory_order_acquire))
             return 0;
 
-        auto const e = completed_ops_.pop();
+        auto e = completed_ops_.pop();
 
-        if (e && !ready_is_continuation(e) && ready_as_op(e) == &task_op_)
+        if (e.op() == &task_op_)
         {
             bool const more_handlers = !completed_ops_.empty();
 
@@ -1328,10 +1327,10 @@ uring_scheduler::do_one(long timeout_us)
             lock.unlock();
             // Speculative follow-ups in the handler share this budget.
             reset_inline_budget();
-            if (ready_is_continuation(e))
-                ready_as_cont(e)->h.resume();
+            if (e.is_continuation())
+                e.take().release()->h.resume();
             else
-                (*ready_as_op(e))();
+                (*e.op())();
             work_finished();
             return 1;
         }

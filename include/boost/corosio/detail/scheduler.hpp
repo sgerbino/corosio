@@ -56,7 +56,11 @@ public:
     /// Post a scheduler operation for deferred execution.
     virtual void post(scheduler_op*) const = 0;
 
-    /// Post a continuation for deferred execution (zero-allocation).
+    /** Post a continuation for deferred execution (zero-allocation).
+
+        Takes ownership of the coroutine unless it throws. Raw, so the
+        virtual call leaves no holder for the caller to test afterward.
+    */
     virtual void post(capy::continuation&) const = 0;
 
     /// Increment the outstanding work count.

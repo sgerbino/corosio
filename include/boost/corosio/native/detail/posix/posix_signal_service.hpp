@@ -428,7 +428,7 @@ signal_op::operator()() noexcept
 
     // A throw terminates: the wait is no longer parked, so nothing else
     // could resume or abandon the coroutine.
-    ex.post(*c);
+    ex.post(capy::chain_holder(*c));
 
     // Balance the work_started() from start_wait
     if (service)
@@ -481,7 +481,7 @@ posix_signal::wait(
             *ec = make_error_code(capy::error::canceled);
         if (signal_out)
             *signal_out = 0;
-        d.post(*pending_op_.cont);
+        d.post(capy::chain_holder(*pending_op_.cont));
         // completion is always posted to scheduler queue, never inline.
         return std::noop_coroutine();
     }
@@ -868,7 +868,7 @@ posix_signal_service::cancel_wait(posix_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(*op->cont);
+        op->d.post(capy::chain_holder(*op->cont));
         sched_->work_finished();
         sched_->cancel_posting_end();
     }
@@ -901,7 +901,7 @@ posix_signal_service::cancel_wait_token(posix_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(*op->cont);
+        op->d.post(capy::chain_holder(*op->cont));
         sched_->work_finished();
         sched_->cancel_posting_end();
     }
@@ -927,7 +927,7 @@ posix_signal_service::start_wait(posix_signal& impl, signal_op* op)
                 *op->ec_out = make_error_code(capy::error::canceled);
             if (op->signal_out)
                 *op->signal_out = 0;
-            op->d.post(*op->cont);
+            op->d.post(capy::chain_holder(*op->cont));
             return;
         }
 
@@ -940,7 +940,7 @@ posix_signal_service::start_wait(posix_signal& impl, signal_op* op)
                 *op->ec_out = make_error_code(capy::error::canceled);
             if (op->signal_out)
                 *op->signal_out = 0;
-            op->d.post(*op->cont);
+            op->d.post(capy::chain_holder(*op->cont));
             return;
         }
 

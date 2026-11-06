@@ -1896,7 +1896,7 @@ struct posted_resume
     void await_suspend(std::coroutine_handle<> h, capy::await_context const* env)
     {
         c.h = h;
-        env->executor.post(c);
+        env->executor.post(capy::chain_holder(c));
     }
 
     void await_resume() noexcept {}

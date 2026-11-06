@@ -13,6 +13,7 @@
 
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/intrusive.hpp>
+#include <boost/capy/ex/ready_queue.hpp>
 
 #include <cstdint>
 #include <utility>
@@ -48,7 +49,9 @@ namespace boost::corosio::detail {
 
     @see scheduler_op_queue
 */
-class scheduler_op : public intrusive_queue<scheduler_op>::node
+class scheduler_op
+    : public intrusive_queue<scheduler_op>::node
+    , public capy::ready_node
 {
 public:
     /** Function pointer type for completion handling.
@@ -112,13 +115,6 @@ protected:
     explicit scheduler_op(func_type func) noexcept : func_(func) {}
 
     func_type func_;
-
-public:
-    // Tagged next-link for ready_queue (low bit selects node kind). Reuses
-    // the former 8-byte padding word, so size/alignment are unchanged. Used
-    // only while this op is in the ready queue; node.next_ is used while it
-    // is pending in an op_queue. An op is in one or the other, never both.
-    void* q_next_ = nullptr;
 };
 
 using op_queue = intrusive_queue<scheduler_op>;

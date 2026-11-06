@@ -42,7 +42,7 @@ struct bare_post_awaitable
     await_suspend(std::coroutine_handle<> h, capy::await_context const* env) noexcept
     {
         cont->h = h;
-        env->executor.post(*cont);
+        env->executor.post(capy::chain_holder(*cont));
     }
 
     void await_resume() const noexcept {}
@@ -292,7 +292,7 @@ struct continuation_zero_alloc_test
 
         alloc_count.store(0);
         alloc_armed.store(true, std::memory_order_relaxed);
-        ex.post(cont);
+        ex.post(capy::chain_holder(cont));
         alloc_armed.store(false, std::memory_order_relaxed);
 
         BOOST_TEST(alloc_count.load() == 0LL);
