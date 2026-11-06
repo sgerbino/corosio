@@ -501,10 +501,8 @@ protected:
 
             if (!owner)
             {
-                auto* c = std::exchange(op->cont, nullptr);
+                auto held = capy::chain_holder::take(op->cont);
                 self->recycle_op(op);
-                if (c && c->h)
-                    capy::abandon(*c);
                 return;
             }
 

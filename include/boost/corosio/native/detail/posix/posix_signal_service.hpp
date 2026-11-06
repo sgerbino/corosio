@@ -21,7 +21,7 @@
 #include <boost/corosio/detail/object_pool.hpp>
 #include <boost/corosio/detail/object_ref.hpp>
 #include <boost/capy/continuation.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/corosio/native/detail/make_err.hpp>
@@ -428,7 +428,7 @@ signal_op::operator()() noexcept
 
     // A throw terminates: the wait is no longer parked, so nothing else
     // could resume or abandon the coroutine.
-    ex.post(capy::chain_holder(*c));
+    capy::resume_via(ex, *c);
 
     // Balance the work_started() from start_wait
     if (service)
@@ -440,10 +440,8 @@ signal_op::destroy()
 {
     // Embedded in posix_signal: the queued reference keeps it alive
     // while the awaiting coroutine, which may own the set, is destroyed.
-    auto* c = std::exchange(cont, nullptr);
-    auto k  = std::move(keep);
-    if (c && c->h)
-        capy::abandon(*c);
+    auto k = std::move(keep);
+    auto held = capy::chain_holder::take(cont);
 }
 
 // posix_signal implementation
@@ -481,7 +479,7 @@ posix_signal::wait(
             *ec = make_error_code(capy::error::canceled);
         if (signal_out)
             *signal_out = 0;
-        d.post(capy::chain_holder(*pending_op_.cont));
+        capy::resume_via(d, *pending_op_.cont);
         // completion is always posted to scheduler queue, never inline.
         return std::noop_coroutine();
     }
@@ -551,7 +549,7 @@ posix_signal_service::shutdown()
     // ~posix_signal destroys an armed stop_cb_ whose ~stop_callback
     // waits on a token_canceller that takes mutex_.
     std::vector<posix_signal*> doomed;
-    std::vector<capy::continuation> parked;
+    capy::ready_queue<> parked;
 
     {
         posix_signal_detail::signal_state* state =
@@ -574,7 +572,7 @@ posix_signal_service::shutdown()
                 if (auto* c = std::exchange(impl->pending_op_.cont, nullptr))
                 {
                     if (c->h)
-                        parked.push_back(*c);
+                        parked.push(capy::chain_holder(*c));
                 }
             }
 
@@ -615,8 +613,7 @@ posix_signal_service::shutdown()
             registrations_[i] = nullptr;
     }
 
-    for (auto& c : parked)
-        capy::abandon(c);
+    parked.clear();
 
     for (auto* impl : doomed)
         release(impl);
@@ -868,7 +865,7 @@ posix_signal_service::cancel_wait(posix_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(capy::chain_holder(*op->cont));
+        capy::resume_via(op->d, *op->cont);
         sched_->work_finished();
         sched_->cancel_posting_end();
     }
@@ -901,7 +898,7 @@ posix_signal_service::cancel_wait_token(posix_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(capy::chain_holder(*op->cont));
+        capy::resume_via(op->d, *op->cont);
         sched_->work_finished();
         sched_->cancel_posting_end();
     }
@@ -927,7 +924,7 @@ posix_signal_service::start_wait(posix_signal& impl, signal_op* op)
                 *op->ec_out = make_error_code(capy::error::canceled);
             if (op->signal_out)
                 *op->signal_out = 0;
-            op->d.post(capy::chain_holder(*op->cont));
+            capy::resume_via(op->d, *op->cont);
             return;
         }
 
@@ -940,7 +937,7 @@ posix_signal_service::start_wait(posix_signal& impl, signal_op* op)
                 *op->ec_out = make_error_code(capy::error::canceled);
             if (op->signal_out)
                 *op->signal_out = 0;
-            op->d.post(capy::chain_holder(*op->cont));
+            capy::resume_via(op->d, *op->cont);
             return;
         }
 

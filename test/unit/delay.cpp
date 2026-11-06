@@ -16,6 +16,7 @@
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/ex/thread_pool.hpp>
 #include <boost/capy/task.hpp>
+#include <boost/capy/when_all.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -28,6 +29,7 @@
 #include <stop_token>
 #include <tuple>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "context.hpp"
@@ -141,6 +143,63 @@ queued_child(io_context& ioc, int& down)
     co_return capy::results<>{ec};
 }
 
+// Forwards to the io_context, refusing the post numbered `*posts_left`.
+struct refusing_post_executor
+{
+    io_context* ctx_;
+    int* posts_left_;
+
+    bool operator==(refusing_post_executor const& o) const noexcept
+    {
+        return ctx_ == o.ctx_;
+    }
+
+    io_context& context() const noexcept
+    {
+        return *ctx_;
+    }
+
+    void on_work_started() const noexcept
+    {
+        ctx_->get_executor().on_work_started();
+    }
+
+    void on_work_finished() const noexcept
+    {
+        ctx_->get_executor().on_work_finished();
+    }
+
+    std::coroutine_handle<> dispatch(capy::chain_holder&& h) const
+    {
+        return ctx_->get_executor().dispatch(std::move(h));
+    }
+
+    void post(capy::chain_holder&& h) const
+    {
+        if (*posts_left_ > 0 && --*posts_left_ == 0)
+            throw std::runtime_error("post");
+        ctx_->get_executor().post(std::move(h));
+    }
+};
+
+// A when_all runner, unlike a task, lets await_suspend throw.
+static capy::task<>
+expired_wait_refused(io_context& ioc, int& posts_left, int& caught, int& down)
+{
+    count_on_exit g{down};
+    detail::timer t(ioc);
+    t.expires_after(std::chrono::nanoseconds(0));
+    posts_left = 2; // the first launches the runner
+    try
+    {
+        std::ignore = co_await capy::when_all(t.wait());
+    }
+    catch (std::runtime_error const&)
+    {
+        ++caught;
+    }
+}
+
 template<auto Backend>
 struct delay_test
 {
@@ -157,6 +216,21 @@ struct delay_test
 
         ioc.run();
         BOOST_TEST(ok);
+    }
+
+    void testExpiredWaitRefusedPostThrowsIntoCoroutine()
+    {
+        io_context ioc(Backend);
+        int posts_left = 0;
+        int caught     = 0;
+        int down       = 0;
+
+        capy::run_async(refusing_post_executor{&ioc, &posts_left})(
+            expired_wait_refused(ioc, posts_left, caught, down));
+        ioc.run();
+
+        BOOST_TEST_EQ(caught, 1);
+        BOOST_TEST_EQ(down, 1);
     }
 
     void testTimePointCompletes()
@@ -1232,6 +1306,7 @@ struct delay_test
         testClockPastDeadlineWithStopRequested();
         testClockShutdownWithSuspendedWait();
         testClockRearmStopRace();
+        testExpiredWaitRefusedPostThrowsIntoCoroutine();
     }
 };
 

@@ -408,7 +408,7 @@ public:
         coroutine suspended in an operation of this context, or posted to
         it and not yet resumed, is abandoned. Its chain is unwound from
         the top, on the executor of the chain's owner (see
-        `capy::abandon`). The precondition below makes that executor this
+        `capy::chain_holder`). The precondition below makes that executor this
         context's, so the unwind runs during this destruction.
 
         @pre No thread is executing a run variant.
@@ -783,7 +783,7 @@ public:
     std::coroutine_handle<> dispatch(capy::chain_holder&& h) const
     {
         if (running_in_this_thread())
-            return h.release()->h;
+            return h.take_handle();
         post(std::move(h));
         return std::noop_coroutine();
     }

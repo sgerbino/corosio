@@ -17,7 +17,7 @@
 #include <boost/corosio/test/socket_pair.hpp>
 #include <boost/capy/cond.hpp>
 #include <boost/capy/buffers.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
@@ -1692,7 +1692,7 @@ struct tcp_server_test
             {
                 auto c = q.front();
                 q.pop_front();
-                capy::abandon(c);
+                capy::chain_holder doomed(c);
             }
         }
         BOOST_TEST(!launched);

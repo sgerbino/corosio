@@ -164,6 +164,15 @@ public:
                  expiry_ <= std::chrono::steady_clock::now());
         }
 
+        /** Post the waiter's coroutine with a successful result.
+
+            @throws Whatever the executor's `post` throws, in which case
+                the coroutine stays suspended and owned by the caller.
+
+            @param w The waiter to complete.
+        */
+        BOOST_COROSIO_DECL void post_expired(waiter_node& w);
+
         /** Asynchronously wait for the timer to expire.
 
             Publishes the waiter into the service's heap and the
@@ -560,8 +569,7 @@ struct wait_awaitable
         // scheduler, allowing other queued work to run.
         if (impl.already_expired())
         {
-            w_.ec_ = {};
-            w_.d_.post(capy::chain_holder(w_.cont_));
+            impl.post_expired(w_);
             return std::noop_coroutine();
         }
 

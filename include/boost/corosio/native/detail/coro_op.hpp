@@ -14,7 +14,7 @@
 #include <boost/capy/continuation.hpp>
 #include <boost/corosio/detail/object_ref.hpp>
 #include <boost/corosio/detail/scheduler_op.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 
 #include <atomic>
@@ -136,11 +136,7 @@ struct coro_op : scheduler_op
     {
         stop_cb.reset();
         auto keep = std::move(object_ref_);
-        if (auto* c = std::exchange(cont, nullptr))
-        {
-            if (c->h)
-                capy::abandon(*c);
-        }
+        auto held = capy::chain_holder::take(cont);
     }
 
     /// Mark this op cancellation-requested. Shared by every backend.

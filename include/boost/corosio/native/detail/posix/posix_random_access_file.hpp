@@ -29,7 +29,7 @@
 #include <boost/corosio/native/detail/posix/large_file.hpp>
 #include <boost/corosio/native/detail/posix/posix_fd_gate.hpp>
 #include <boost/corosio/native/detail/validate_fd.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <boost/capy/error.hpp>
 #include <boost/capy/buffers.hpp>
@@ -399,12 +399,12 @@ posix_random_access_file::raf_op::destroy()
     stop_cb.reset();
     auto keep = std::move(object_ref_);
     auto& svc = file_->svc_;
-    auto* c   = std::exchange(cont, nullptr);
-    recycle();
-    // The frame may own the file, so it goes while the keepalive
-    // still holds the implementation the op was recycled into.
-    if (c && c->h)
-        capy::abandon(*c);
+    {
+        // The frame may own the file, so it goes while the keepalive
+        // still holds the implementation the op was recycled into.
+        auto held = capy::chain_holder::take(cont);
+        recycle();
+    }
     keep.reset();
     release_work(svc);
 }

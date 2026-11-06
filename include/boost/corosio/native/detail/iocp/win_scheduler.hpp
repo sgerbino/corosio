@@ -24,7 +24,7 @@
 
 #include <boost/corosio/detail/scheduler_op.hpp>
 #include <boost/capy/continuation.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/corosio/native/detail/iocp/win_completion_key.hpp>
 #include <boost/corosio/native/detail/iocp/win_mutex.hpp>
 
@@ -265,12 +265,9 @@ win_scheduler::post_copy(capy::continuation const& c) const
             auto* self = static_cast<post_handler*>(base);
             auto c     = self->c_;
             delete self;
-            if (!owner)
-            {
-                capy::abandon(c);
-                return;
-            }
-            c.h.resume();
+            capy::chain_holder held(c);
+            if (owner)
+                held.resume();
         }
 
         explicit post_handler(capy::continuation const& c)
@@ -709,8 +706,9 @@ win_scheduler::do_one_wait(unsigned long timeout_ms, bool& took_wake)
             case key_continuation:
             {
                 // Posted continuation: overlapped is actually a continuation*
-                auto* c = reinterpret_cast<capy::continuation*>(overlapped);
-                c->h.resume();
+                capy::chain_holder(
+                    *reinterpret_cast<capy::continuation*>(overlapped))
+                    .resume();
                 work_finished();
                 return 1;
             }
@@ -909,10 +907,10 @@ win_scheduler::shutdown()
             }
             else if (key == key_continuation)
             {
-                // Drain without resuming: abandon the parked coroutine.
-                auto* c = reinterpret_cast<capy::continuation*>(overlapped);
-                if (c->h)
-                    capy::abandon(*c);
+                // Drain without resuming: the kernel hands the coroutine
+                // back, and nothing will run it.
+                capy::chain_holder held(
+                    *reinterpret_cast<capy::continuation*>(overlapped));
             }
             else
             {
@@ -963,9 +961,8 @@ win_scheduler::sweep_port() noexcept
         }
         else if (key == key_continuation)
         {
-            auto* c = reinterpret_cast<capy::continuation*>(overlapped);
-            if (c->h)
-                capy::abandon(*c);
+            capy::chain_holder held(
+                *reinterpret_cast<capy::continuation*>(overlapped));
         }
         else
         {

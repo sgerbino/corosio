@@ -11,7 +11,9 @@
 #include <boost/corosio/detail/timer.hpp>
 #include <boost/corosio/detail/timer_service.hpp>
 #include <boost/corosio/detail/dispatch_coro.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
+
+#include <utility>
 
 namespace boost::corosio::detail {
 
@@ -59,11 +61,28 @@ timer::implementation::wait(waiter_node& w)
     // scheduler, allowing other queued work to run.
     if (already_expired())
     {
-        w.ec_ = {};
-        w.d_.post(capy::chain_holder(w.cont_));
+        post_expired(w);
         return std::noop_coroutine();
     }
     return publish(w);
+}
+
+void
+timer::implementation::post_expired(waiter_node& w)
+{
+    w.ec_ = {};
+    capy::chain_holder held(w.cont_);
+    try
+    {
+        w.d_.post(std::move(held));
+    }
+    catch (...)
+    {
+        // A throw out of await_suspend resumes the coroutine, so the
+        // holder must not give it up.
+        held.release();
+        throw;
+    }
 }
 
 std::coroutine_handle<>
@@ -201,8 +220,7 @@ waiter_node::completion_op::destroy()
     auto c      = std::exchange(w->cont_, {});
     auto& sched = w->svc_->get_scheduler();
     sched.work_finished();
-    if (c.h)
-        capy::abandon(c);
+    capy::chain_holder held(c);
 }
 
 } // namespace boost::corosio::detail
