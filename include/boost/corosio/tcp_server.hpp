@@ -212,7 +212,7 @@ private:
                 }
             }
             if (wake)
-                ex.post(wake->cont);
+                ex.post(capy::chain_holder(wake->cont));
         }
 
         /// Drop one hold on @p w, returning it to the pool with the last.
@@ -235,7 +235,7 @@ private:
             while (list)
             {
                 auto* next = list->next;
-                ex.post(list->cont);
+                ex.post(capy::chain_holder(list->cont));
                 list = next;
             }
         }
@@ -511,7 +511,7 @@ private:
             // here, it is destroyed in place.
             if (!root_)
                 cont_.owner = env->owner;
-            return st_.ex.dispatch(cont_);
+            return st_.ex.dispatch(capy::chain_holder(cont_));
         }
 
         void await_resume() noexcept {}
@@ -776,7 +776,16 @@ public:
             // Released only once posted: a post that throws leaves the
             // frame to the wrapper, which destroys it and with it the
             // hold, the work, and the task.
-            ex.post(h.promise().cont_);
+            capy::chain_holder held(h.promise().cont_);
+            try
+            {
+                ex.post(std::move(held));
+            }
+            catch (...)
+            {
+                held.release();
+                throw;
+            }
             wrapper.h = nullptr;
         }
     };

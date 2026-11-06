@@ -1031,8 +1031,8 @@ struct io_context_test
             io_context ioc(Backend);
             auto ex = ioc.get_executor();
 
-            ex.post(cont1);
-            ex.post(cont2);
+            ex.post(capy::chain_holder(cont1));
+            ex.post(capy::chain_holder(cont2));
 
             // io_context destructor drains the ready queue and calls
             // h.destroy() on each queued continuation's handle.

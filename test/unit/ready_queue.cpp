@@ -38,13 +38,13 @@ struct ready_queue_test
         BOOST_TEST(!q.empty());
 
         auto e1 = q.pop();
-        BOOST_TEST(!ready_is_continuation(e1));
-        BOOST_TEST(ready_as_op(e1) == &a);
+        BOOST_TEST(!e1.is_continuation());
+        BOOST_TEST(e1.op() == &a);
 
         auto e2 = q.pop();
-        BOOST_TEST(ready_as_op(e2) == &b);
+        BOOST_TEST(e2.op() == &b);
 
-        BOOST_TEST(q.pop() == nullptr);
+        BOOST_TEST(!q.pop());
         BOOST_TEST(q.empty());
     }
 
@@ -55,19 +55,19 @@ struct ready_queue_test
         boost::capy::continuation c{};
         fake_op b{2};
         q.push(&a);
-        q.push(c);
+        q.push(boost::capy::chain_holder(c));
         q.push(&b);
 
         auto e1 = q.pop();
-        BOOST_TEST(!ready_is_continuation(e1));
-        BOOST_TEST(ready_as_op(e1) == &a);
+        BOOST_TEST(!e1.is_continuation());
+        BOOST_TEST(e1.op() == &a);
 
         auto e2 = q.pop();
-        BOOST_TEST(ready_is_continuation(e2));
-        BOOST_TEST(ready_as_cont(e2) == &c);
+        BOOST_TEST(e2.is_continuation());
+        BOOST_TEST(e2.take().release() == &c);
 
         auto e3 = q.pop();
-        BOOST_TEST(ready_as_op(e3) == &b);
+        BOOST_TEST(e3.op() == &b);
     }
 
     void testSpliceAppendsInOrder()
@@ -78,9 +78,9 @@ struct ready_queue_test
         q2.push(&b);
         q1.splice(q2);
         BOOST_TEST(q2.empty());
-        BOOST_TEST(ready_as_op(q1.pop()) == &a);
-        BOOST_TEST(ready_as_op(q1.pop()) == &b);
-        BOOST_TEST(q1.pop() == nullptr);
+        BOOST_TEST(q1.pop().op() == &a);
+        BOOST_TEST(q1.pop().op() == &b);
+        BOOST_TEST(!q1.pop());
     }
 
     void run()

@@ -16,6 +16,7 @@
 #include <boost/corosio/detail/platform.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/capy/continuation.hpp>
+#include <boost/capy/ex/chain_holder.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/capy/ex/frame_allocator.hpp>
 
@@ -768,10 +769,10 @@ public:
     /** Dispatch a continuation.
 
         Returns a handle for symmetric transfer. If called from
-        within `run()`, returns `c.h`. Otherwise posts `c` for
-        later execution and returns `std::noop_coroutine()`.
+        within `run()`, returns the coroutine's handle. Otherwise posts
+        it for later execution and returns `std::noop_coroutine()`.
 
-        @param c The continuation to dispatch.
+        @param h The holder of the coroutine to dispatch.
 
         @return A handle for symmetric transfer or `std::noop_coroutine()`.
 
@@ -779,41 +780,43 @@ public:
             concurrently with, or after, the context's destruction is
             undefined behavior.
     */
-    std::coroutine_handle<> dispatch(capy::continuation& c) const
+    std::coroutine_handle<> dispatch(capy::chain_holder&& h) const
     {
         if (running_in_this_thread())
-            return c.h;
-        post(c);
+            return h.release()->h;
+        post(std::move(h));
         return std::noop_coroutine();
     }
 
     /** Post a continuation for deferred execution.
 
-        Enqueues `c` directly on the scheduler's ready queue.
+        Enqueues the coroutine directly on the scheduler's ready queue.
         No heap allocation occurs.
 
-        @param c The continuation to enqueue.
+        @param h The holder of the coroutine to enqueue.
 
         @pre The associated context must outlive this call. Posting
             concurrently with, or after, the context's destruction is
             undefined behavior.
     */
-    void post(capy::continuation& c) const
+    void post(capy::chain_holder&& h) const
     {
-        ctx_->sched_->post(c);
+        h.transfer([this](capy::continuation& c) {
+            ctx_->sched_->post(c);
+        });
     }
 
     /** Post a bare coroutine handle for deferred execution.
 
         Heap-allocates a `scheduler_op` to wrap the handle. A caller
         that already owns a `capy::continuation` can post it directly
-        via the `post(capy::continuation&)` overload to avoid the
+        via the `post(capy::chain_holder&&)` overload to avoid the
         allocation.
 
         A handle still queued when the context is torn down is
         destroyed alone, since it carries no owner to unwind its chain
         from. Post a coroutine that another frame awaits through the
-        `post(capy::continuation&)` overload, with its owner set.
+        `post(capy::chain_holder&&)` overload, with its owner set.
 
         @param h The coroutine handle to post.
 

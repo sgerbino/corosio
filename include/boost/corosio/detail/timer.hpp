@@ -561,7 +561,7 @@ struct wait_awaitable
         if (impl.already_expired())
         {
             w_.ec_ = {};
-            w_.d_.post(w_.cont_);
+            w_.d_.post(capy::chain_holder(w_.cont_));
             return std::noop_coroutine();
         }
 

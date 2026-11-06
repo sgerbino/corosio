@@ -60,7 +60,7 @@ timer::implementation::wait(waiter_node& w)
     if (already_expired())
     {
         w.ec_ = {};
-        w.d_.post(w.cont_);
+        w.d_.post(capy::chain_holder(w.cont_));
         return std::noop_coroutine();
     }
     return publish(w);

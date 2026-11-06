@@ -593,14 +593,14 @@ reactor_scheduler::post(capy::continuation& c) const
     if (auto* ctx = reactor_find_context(this))
     {
         ++ctx->private_outstanding_work;
-        ctx->private_queue.push(c);
+        ctx->private_queue.push(capy::chain_holder(c));
         return;
     }
 
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
 
     lock_type lock(mutex_);
-    completed_ops_.push(c);
+    completed_ops_.push(capy::chain_holder(c));
     wake_one_thread_and_unlock(lock);
 }
 
@@ -863,16 +863,15 @@ reactor_scheduler::destroy_queued(lock_type& lock) noexcept
 {
     while (auto e = completed_ops_.pop())
     {
-        if (ready_is_continuation(e))
+        if (e.is_continuation())
         {
             lock.unlock();
-            if (auto* c = ready_as_cont(e); c->h)
-                capy::abandon(*c);
+            e.take();
             lock.lock();
         }
         else
         {
-            auto* op = ready_as_op(e);
+            auto* op = e.op();
             if (op == &task_op_)
                 continue;
             lock.unlock();
@@ -1005,8 +1004,8 @@ reactor_scheduler::do_one(lock_type& lock, long timeout_us, context_type& ctx)
         if (stopped_.load(std::memory_order_acquire))
             return 0;
 
-        auto const e     = completed_ops_.pop();
-        scheduler_op* op = ready_is_continuation(e) ? nullptr : ready_as_op(e);
+        auto e           = completed_ops_.pop();
+        scheduler_op* op = e.op();
 
         // Handle reactor sentinel — time to poll for I/O
         if (op == &task_op_)
@@ -1049,7 +1048,7 @@ reactor_scheduler::do_one(lock_type& lock, long timeout_us, context_type& ctx)
         }
 
         // Handle ready entry (op or continuation)
-        if (e != nullptr)
+        if (e)
         {
             bool more = !completed_ops_.empty();
 
@@ -1068,8 +1067,8 @@ reactor_scheduler::do_one(lock_type& lock, long timeout_us, context_type& ctx)
 
             [[maybe_unused]] work_cleanup on_exit{this, &lock, ctx};
 
-            if (ready_is_continuation(e))
-                ready_as_cont(e)->h.resume();
+            if (e.is_continuation())
+                e.take().release()->h.resume();
             else
                 (*op)();
             return 1;

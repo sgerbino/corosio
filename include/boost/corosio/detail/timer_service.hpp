@@ -407,11 +407,10 @@ timer_service::shutdown()
     for (auto* w : waiters)
     {
         w->reset_stop_cb();
-        auto c = std::exchange(w->cont_, {});
         sched_->work_finished();
-        // Unwinding the frame also ends the node's storage
-        if (c.h)
-            capy::abandon(c);
+        // Unwinding the frame also ends the node's storage, so the
+        // holder's destructor is the last access.
+        capy::chain_holder doomed(w->cont_);
     }
 
     for (auto* impl : impls)

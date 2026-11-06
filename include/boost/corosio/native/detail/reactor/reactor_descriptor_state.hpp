@@ -356,7 +356,7 @@ reactor_descriptor_state::invoke_deferred_io()
     // Execute first handler inline — the scheduler's work_cleanup
     // accounts for this as the "consumed" work item. local_ops holds
     // only ops, so the popped entry decodes directly.
-    scheduler_op* first = ready_as_op(local_ops.pop());
+    scheduler_op* first = local_ops.pop().op();
     if (first)
     {
         sched->post_deferred_completions(local_ops);

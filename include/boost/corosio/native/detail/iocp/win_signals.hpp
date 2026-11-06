@@ -404,7 +404,7 @@ win_signal::wait(
             *signal_out = 0;
         // Posted, never resumed inline: this is the caller's own
         // suspend, and a loop of such waits would nest frames.
-        d.post(*pending_op_.cont);
+        d.post(capy::chain_holder(*pending_op_.cont));
         return std::noop_coroutine();
     }
 
@@ -719,7 +719,7 @@ win_signals::cancel_wait(win_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(*op->cont);
+        op->d.post(capy::chain_holder(*op->cont));
         sched_.work_finished();
         sched_.cancel_posting_end();
     }
@@ -751,7 +751,7 @@ win_signals::cancel_wait_token(win_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(*op->cont);
+        op->d.post(capy::chain_holder(*op->cont));
         sched_.work_finished();
         sched_.cancel_posting_end();
     }
@@ -826,7 +826,7 @@ win_signals::start_wait(win_signal& impl, signal_op* op)
     // Posted outside the lock: this runs inside the caller's own
     // suspend, so resuming it here would nest frames.
     if (was_cancelled)
-        op->d.post(*op->cont);
+        op->d.post(capy::chain_holder(*op->cont));
 }
 
 inline void

@@ -13,6 +13,7 @@
 
 #include <boost/corosio/io_context.hpp>
 #include <boost/capy/continuation.hpp>
+#include <boost/capy/ex/chain_holder.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <boost/capy/detail/type_id.hpp>
 #include <coroutine>
@@ -46,9 +47,10 @@ dispatch_coro(capy::executor_ref ex, capy::continuation& c) noexcept
     // with nobody to resume or abandon its coroutine.
     // A completion from another context must not resume the awaiter
     // on this thread, so the fast path still asks the executor.
+    capy::chain_holder h(c);
     if (auto const* io_ex = ex.target<io_context::executor_type>())
-        return io_ex->dispatch(c);
-    return ex.dispatch(c);
+        return io_ex->dispatch(std::move(h));
+    return ex.dispatch(std::move(h));
 }
 
 } // namespace boost::corosio::detail
