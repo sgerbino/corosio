@@ -19,7 +19,7 @@
 #include <boost/corosio/native/detail/uring/uring_socket_ops.hpp>
 #include <boost/corosio/native/detail/coro_op_complete.hpp>
 #include <boost/corosio/detail/dispatch_coro.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 
 #include <cstdint>
 #include <utility>
@@ -169,10 +169,8 @@ struct uring_random_access_read_op : uring_file_read_op_base
         if (owner == nullptr)
         {
             auto keep = std::move(self->object_ref_);
-            auto* c   = std::exchange(self->cont, nullptr);
+            auto held = capy::chain_holder::take(self->cont);
             delete self;
-            if (c && c->h)
-                capy::abandon(*c);
             return;
         }
 
@@ -313,10 +311,8 @@ struct uring_random_access_write_op : uring_file_write_op_base
         if (owner == nullptr)
         {
             auto keep = std::move(self->object_ref_);
-            auto* c   = std::exchange(self->cont, nullptr);
+            auto held = capy::chain_holder::take(self->cont);
             delete self;
-            if (c && c->h)
-                capy::abandon(*c);
             return;
         }
 

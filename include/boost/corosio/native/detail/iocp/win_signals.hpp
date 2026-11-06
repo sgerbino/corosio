@@ -22,7 +22,7 @@
 #include <boost/corosio/detail/object_pool.hpp>
 #include <boost/corosio/detail/object_ref.hpp>
 #include <boost/capy/continuation.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/corosio/native/detail/iocp/win_mutex.hpp>
 #include <boost/corosio/native/detail/iocp/win_scheduler.hpp>
@@ -345,9 +345,7 @@ signal_op::do_complete(
     {
         // The held reference outlives the destroy: the coroutine may
         // own the set this op is embedded in.
-        auto* dc = std::exchange(op->cont, nullptr);
-        if (dc && dc->h)
-            capy::abandon(*dc);
+        auto held = capy::chain_holder::take(op->cont);
         return;
     }
 
@@ -404,7 +402,7 @@ win_signal::wait(
             *signal_out = 0;
         // Posted, never resumed inline: this is the caller's own
         // suspend, and a loop of such waits would nest frames.
-        d.post(capy::chain_holder(*pending_op_.cont));
+        capy::resume_via(d, *pending_op_.cont);
         return std::noop_coroutine();
     }
 
@@ -473,7 +471,7 @@ win_signals::shutdown()
     // ~win_signal destroys an armed stop_cb_ whose ~stop_callback
     // waits on a token_canceller that takes mutex_.
     std::vector<win_signal*> doomed;
-    std::vector<capy::continuation> parked;
+    capy::ready_queue<> parked;
 
     {
         signal_detail::signal_state* state = signal_detail::get_signal_state();
@@ -495,7 +493,7 @@ win_signals::shutdown()
                 if (auto* c = std::exchange(impl->pending_op_.cont, nullptr))
                 {
                     if (c->h)
-                        parked.push_back(*c);
+                        parked.push(capy::chain_holder(*c));
                 }
             }
 
@@ -528,8 +526,7 @@ win_signals::shutdown()
             registrations_[i] = nullptr;
     }
 
-    for (auto& c : parked)
-        capy::abandon(c);
+    parked.clear();
 
     for (auto* impl : doomed)
         release(impl);
@@ -719,7 +716,7 @@ win_signals::cancel_wait(win_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(capy::chain_holder(*op->cont));
+        capy::resume_via(op->d, *op->cont);
         sched_.work_finished();
         sched_.cancel_posting_end();
     }
@@ -751,7 +748,7 @@ win_signals::cancel_wait_token(win_signal& impl) noexcept
             *op->ec_out = make_error_code(capy::error::canceled);
         if (op->signal_out)
             *op->signal_out = 0;
-        op->d.post(capy::chain_holder(*op->cont));
+        capy::resume_via(op->d, *op->cont);
         sched_.work_finished();
         sched_.cancel_posting_end();
     }
@@ -826,7 +823,7 @@ win_signals::start_wait(win_signal& impl, signal_op* op)
     // Posted outside the lock: this runs inside the caller's own
     // suspend, so resuming it here would nest frames.
     if (was_cancelled)
-        op->d.post(capy::chain_holder(*op->cont));
+        capy::resume_via(op->d, *op->cont);
 }
 
 inline void

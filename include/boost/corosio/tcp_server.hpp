@@ -24,7 +24,7 @@
 #include <boost/capy/ex/any_executor.hpp>
 #include <boost/capy/detail/abandonable.hpp>
 #include <boost/capy/detail/await_suspend_helper.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/capy/ex/frame_alloc_mixin.hpp>
 #include <boost/capy/ex/frame_allocator.hpp>
 #include <boost/capy/ex/await_context.hpp>
@@ -212,7 +212,7 @@ private:
                 }
             }
             if (wake)
-                ex.post(capy::chain_holder(wake->cont));
+                capy::resume_via(ex, wake->cont);
         }
 
         /// Drop one hold on @p w, returning it to the pool with the last.
@@ -235,7 +235,7 @@ private:
             while (list)
             {
                 auto* next = list->next;
-                ex.post(capy::chain_holder(list->cont));
+                capy::resume_via(ex, list->cont);
                 list = next;
             }
         }

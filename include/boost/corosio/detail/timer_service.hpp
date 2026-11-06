@@ -20,7 +20,7 @@
 #include <boost/corosio/detail/thread_local_ptr.hpp>
 #include <boost/capy/error.hpp>
 #include <boost/capy/ex/execution_context.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 #include <boost/capy/ex/executor_ref.hpp>
 #include <system_error>
 

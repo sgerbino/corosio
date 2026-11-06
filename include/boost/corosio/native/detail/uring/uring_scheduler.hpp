@@ -31,7 +31,7 @@
 #include <boost/corosio/native/detail/make_err.hpp>
 #include <boost/corosio/native/detail/posix/posix_signal_service.hpp>
 #include <boost/capy/ex/execution_context.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -1328,7 +1328,7 @@ uring_scheduler::do_one(long timeout_us)
             // Speculative follow-ups in the handler share this budget.
             reset_inline_budget();
             if (e.is_continuation())
-                e.take().release()->h.resume();
+                e.take().resume();
             else
                 (*e.op())();
             work_finished();

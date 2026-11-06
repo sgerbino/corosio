@@ -25,7 +25,7 @@
 #include <boost/corosio/native/detail/posix/large_file.hpp>
 #include <boost/corosio/native/detail/validate_fd.hpp>
 #include <boost/corosio/random_access_file.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -107,11 +107,9 @@ class BOOST_COROSIO_DECL uring_random_access_file final
             auto keep = std::move(self->object_ref_);
             if (owner == nullptr)
             {
-                auto* c = std::exchange(self->cont, nullptr);
-                self->file_->release_op(self);
                 // The frame may own the file; the keepalive outlives it.
-                if (c && c->h)
-                    capy::abandon(*c);
+                auto held = capy::chain_holder::take(self->cont);
+                self->file_->release_op(self);
                 return;
             }
             Base::finish(self);

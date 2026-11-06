@@ -13,7 +13,7 @@
 #include <boost/corosio/detail/config.hpp>
 #include <boost/corosio/detail/object_ref.hpp>
 #include <boost/capy/ex/execution_context.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 
 #include <boost/corosio/detail/ready_queue.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
@@ -1068,7 +1068,7 @@ reactor_scheduler::do_one(lock_type& lock, long timeout_us, context_type& ctx)
             [[maybe_unused]] work_cleanup on_exit{this, &lock, ctx};
 
             if (e.is_continuation())
-                e.take().release()->h.resume();
+                e.take().resume();
             else
                 (*op)();
             return 1;

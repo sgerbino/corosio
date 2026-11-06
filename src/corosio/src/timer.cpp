@@ -11,7 +11,7 @@
 #include <boost/corosio/detail/timer.hpp>
 #include <boost/corosio/detail/timer_service.hpp>
 #include <boost/corosio/detail/dispatch_coro.hpp>
-#include <boost/capy/ex/abandon.hpp>
+#include <boost/capy/ex/chain_owner.hpp>
 
 namespace boost::corosio::detail {
 
@@ -60,7 +60,7 @@ timer::implementation::wait(waiter_node& w)
     if (already_expired())
     {
         w.ec_ = {};
-        w.d_.post(capy::chain_holder(w.cont_));
+        capy::resume_via(w.d_, w.cont_);
         return std::noop_coroutine();
     }
     return publish(w);
@@ -201,8 +201,7 @@ waiter_node::completion_op::destroy()
     auto c      = std::exchange(w->cont_, {});
     auto& sched = w->svc_->get_scheduler();
     sched.work_finished();
-    if (c.h)
-        capy::abandon(c);
+    capy::chain_holder held(c);
 }
 
 } // namespace boost::corosio::detail
