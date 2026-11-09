@@ -801,9 +801,7 @@ public:
     */
     void post(capy::chain_holder&& h) const
     {
-        h.transfer([this](capy::continuation& c) {
-            ctx_->sched_->post(c);
-        });
+        ctx_->sched_->post(h);
     }
 
     /** Post a bare coroutine handle for deferred execution.

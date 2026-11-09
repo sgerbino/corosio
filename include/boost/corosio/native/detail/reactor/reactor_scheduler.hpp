@@ -164,7 +164,7 @@ public:
     void retire_descriptor(reactor_retirable& d, object_ref keep) const;
 
     /// Post a continuation for deferred execution.
-    void post(capy::continuation&) const override;
+    void post(capy::chain_holder&) const override;
 
     /// Return true if called from a thread running this scheduler.
     bool running_in_this_thread() const noexcept override;
@@ -588,19 +588,19 @@ reactor_scheduler::post(scheduler_op* h) const
 }
 
 inline void
-reactor_scheduler::post(capy::continuation& c) const
+reactor_scheduler::post(capy::chain_holder& h) const
 {
     if (auto* ctx = reactor_find_context(this))
     {
         ++ctx->private_outstanding_work;
-        ctx->private_queue.push(capy::chain_holder(c));
+        ctx->private_queue.push(std::move(h));
         return;
     }
 
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
 
     lock_type lock(mutex_);
-    completed_ops_.push(capy::chain_holder(c));
+    completed_ops_.push(std::move(h));
     wake_one_thread_and_unlock(lock);
 }
 

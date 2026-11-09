@@ -16,7 +16,7 @@
 #include <boost/corosio/detail/except.hpp>
 #include <boost/corosio/detail/thread_local_ptr.hpp>
 
-#include <boost/capy/continuation.hpp>
+#include <boost/capy/ex/chain_holder.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
 #include <atomic>
@@ -56,12 +56,11 @@ public:
     /// Post a scheduler operation for deferred execution.
     virtual void post(scheduler_op*) const = 0;
 
-    /** Post a continuation for deferred execution (zero-allocation).
+    /** Post a coroutine for deferred execution (zero-allocation).
 
-        Takes ownership of the coroutine unless it throws. Raw, so the
-        virtual call leaves no holder for the caller to test afterward.
+        Takes `h` unless it throws, in which case `h` keeps the coroutine.
     */
-    virtual void post(capy::continuation&) const = 0;
+    virtual void post(capy::chain_holder& h) const = 0;
 
     /// Increment the outstanding work count.
     virtual void work_started() noexcept = 0;

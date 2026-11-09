@@ -42,6 +42,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <tuple>
 
 #include <boost/corosio/native/detail/iocp/win_windows.hpp>
 
@@ -65,7 +66,7 @@ public:
     void shutdown() override;
     void post(std::coroutine_handle<> h) const override;
     void post(scheduler_op* h) const override;
-    void post(capy::continuation&) const override;
+    void post(capy::chain_holder&) const override;
     bool running_in_this_thread() const noexcept override;
     void stop() override;
     bool stopped() const noexcept override;
@@ -304,18 +305,24 @@ win_scheduler::post(scheduler_op* h) const
 }
 
 inline void
-win_scheduler::post(capy::continuation& c) const
+win_scheduler::post(capy::chain_holder& h) const
 {
     ::InterlockedIncrement(&outstanding_work_);
 
+    // The kernel queue carries a bare pointer; do_one rebuilds the holder.
+    auto* c = h.release();
     if (!::PostQueuedCompletionStatus(
-            iocp_, 0, key_continuation, reinterpret_cast<LPOVERLAPPED>(&c)))
+            iocp_, 0, key_continuation, reinterpret_cast<LPOVERLAPPED>(c)))
     {
-        // completed_ops_ is an op_queue and cannot carry a raw continuation,
-        // so on the rare PQCS failure fall back to an allocated copy, which
-        // keeps the owner. Drop the increment first; post_copy counts its own.
+        // Back to the caller first, so a post_copy that throws leaves it
+        // there. completed_ops_ is an op_queue and cannot carry a raw
+        // continuation, so on the rare PQCS failure fall back to an
+        // allocated copy, which keeps the owner. Drop the increment
+        // first; post_copy counts its own.
+        h = capy::chain_holder(*c);
         ::InterlockedDecrement(&outstanding_work_);
-        post_copy(c);
+        post_copy(*c);
+        std::ignore = h.release();
     }
 }
 

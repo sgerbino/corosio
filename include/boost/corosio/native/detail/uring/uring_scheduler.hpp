@@ -137,7 +137,7 @@ public:
 
     void post(std::coroutine_handle<>) const override;
     void post(scheduler_op*) const override;
-    void post(capy::continuation&) const override;
+    void post(capy::chain_holder&) const override;
 
     bool running_in_this_thread() const noexcept override;
     void stop() override;
@@ -1051,13 +1051,13 @@ uring_scheduler::post(scheduler_op* op) const
 }
 
 inline void
-uring_scheduler::post(capy::continuation& c) const
+uring_scheduler::post(capy::chain_holder& h) const
 {
     lazy_init_ring();
     outstanding_work_.fetch_add(1, std::memory_order_relaxed);
     {
         lock_type lock(dispatch_mutex_);
-        completed_ops_.push(capy::chain_holder(c));
+        completed_ops_.push(std::move(h));
         wake_one_locked();
     }
 }
