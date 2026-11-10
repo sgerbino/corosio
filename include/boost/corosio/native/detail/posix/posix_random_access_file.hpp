@@ -402,7 +402,7 @@ posix_random_access_file::raf_op::destroy()
     {
         // The frame may own the file, so it goes while the keepalive
         // still holds the implementation the op was recycled into.
-        auto held = capy::chain_holder::take(cont);
+        auto held = capy::coroutine_chain_holder::take(cont);
         recycle();
     }
     keep.reset();

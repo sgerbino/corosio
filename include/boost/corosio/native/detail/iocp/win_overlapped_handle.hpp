@@ -501,7 +501,7 @@ protected:
 
             if (!owner)
             {
-                auto held = capy::chain_holder::take(op->cont);
+                auto held = capy::coroutine_chain_holder::take(op->cont);
                 self->recycle_op(op);
                 return;
             }

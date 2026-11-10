@@ -591,7 +591,7 @@ struct teardown_destroy_test
 
         ~late_poster()
         {
-            ex.post(capy::chain_holder(*c));
+            ex.post(capy::coroutine_chain_holder(*c));
         }
 
         void shutdown() override {}

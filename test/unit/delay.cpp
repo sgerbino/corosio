@@ -169,12 +169,12 @@ struct refusing_post_executor
         ctx_->get_executor().on_work_finished();
     }
 
-    std::coroutine_handle<> dispatch(capy::chain_holder&& h) const
+    std::coroutine_handle<> dispatch(capy::coroutine_chain_holder&& h) const
     {
         return ctx_->get_executor().dispatch(std::move(h));
     }
 
-    void post(capy::chain_holder&& h) const
+    void post(capy::coroutine_chain_holder&& h) const
     {
         if (*posts_left_ > 0 && --*posts_left_ == 0)
             throw std::runtime_error("post");

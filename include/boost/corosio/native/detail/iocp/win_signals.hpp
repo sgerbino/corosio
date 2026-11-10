@@ -345,7 +345,7 @@ signal_op::do_complete(
     {
         // The held reference outlives the destroy: the coroutine may
         // own the set this op is embedded in.
-        auto held = capy::chain_holder::take(op->cont);
+        auto held = capy::coroutine_chain_holder::take(op->cont);
         return;
     }
 
@@ -493,7 +493,7 @@ win_signals::shutdown()
                 if (auto* c = std::exchange(impl->pending_op_.cont, nullptr))
                 {
                     if (c->h)
-                        parked.push(capy::chain_holder(*c));
+                        parked.push(capy::coroutine_chain_holder(*c));
                 }
             }
 

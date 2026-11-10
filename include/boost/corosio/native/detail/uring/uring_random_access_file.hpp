@@ -108,7 +108,7 @@ class BOOST_COROSIO_DECL uring_random_access_file final
             if (owner == nullptr)
             {
                 // The frame may own the file; the keepalive outlives it.
-                auto held = capy::chain_holder::take(self->cont);
+                auto held = capy::coroutine_chain_holder::take(self->cont);
                 self->file_->release_op(self);
                 return;
             }

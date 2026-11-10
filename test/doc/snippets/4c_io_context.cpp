@@ -78,10 +78,10 @@ executor_ops_fragment(
 
     // Dispatch a continuation: symmetric transfer if inside run(),
     // otherwise post. Returns a handle to resume.
-    std::coroutine_handle<> next = ex.dispatch(capy::chain_holder(cont));
+    std::coroutine_handle<> next = ex.dispatch(capy::coroutine_chain_holder(cont));
 
     // Post a continuation: always queue for later execution
-    ex.post(capy::chain_holder(cont));
+    ex.post(capy::coroutine_chain_holder(cont));
 
     // Post a bare coroutine handle for later execution
     ex.post(handle);

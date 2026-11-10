@@ -55,7 +55,7 @@ struct ready_queue_test
         boost::capy::continuation c{};
         fake_op b{2};
         q.push(&a);
-        q.push(boost::capy::chain_holder(c));
+        q.push(boost::capy::coroutine_chain_holder(c));
         q.push(&b);
 
         auto e1 = q.pop();

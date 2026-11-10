@@ -410,7 +410,7 @@ timer_service::shutdown()
         sched_->work_finished();
         // Unwinding the frame also ends the node's storage, so the
         // holder's destructor is the last access.
-        capy::chain_holder doomed(w->cont_);
+        capy::coroutine_chain_holder doomed(w->cont_);
     }
 
     for (auto* impl : impls)

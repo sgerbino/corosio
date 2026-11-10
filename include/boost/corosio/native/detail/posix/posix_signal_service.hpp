@@ -441,7 +441,7 @@ signal_op::destroy()
     // Embedded in posix_signal: the queued reference keeps it alive
     // while the awaiting coroutine, which may own the set, is destroyed.
     auto k = std::move(keep);
-    auto held = capy::chain_holder::take(cont);
+    auto held = capy::coroutine_chain_holder::take(cont);
 }
 
 // posix_signal implementation
@@ -572,7 +572,7 @@ posix_signal_service::shutdown()
                 if (auto* c = std::exchange(impl->pending_op_.cont, nullptr))
                 {
                     if (c->h)
-                        parked.push(capy::chain_holder(*c));
+                        parked.push(capy::coroutine_chain_holder(*c));
                 }
             }
 

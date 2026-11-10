@@ -71,7 +71,7 @@ void
 timer::implementation::post_expired(waiter_node& w)
 {
     w.ec_ = {};
-    capy::chain_holder held(w.cont_);
+    capy::coroutine_chain_holder held(w.cont_);
     try
     {
         w.d_.post(std::move(held));
@@ -220,7 +220,7 @@ waiter_node::completion_op::destroy()
     auto c      = std::exchange(w->cont_, {});
     auto& sched = w->svc_->get_scheduler();
     sched.work_finished();
-    capy::chain_holder held(c);
+    capy::coroutine_chain_holder held(c);
 }
 
 } // namespace boost::corosio::detail

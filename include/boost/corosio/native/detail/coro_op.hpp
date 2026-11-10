@@ -136,7 +136,7 @@ struct coro_op : scheduler_op
     {
         stop_cb.reset();
         auto keep = std::move(object_ref_);
-        auto held = capy::chain_holder::take(cont);
+        auto held = capy::coroutine_chain_holder::take(cont);
     }
 
     /// Mark this op cancellation-requested. Shared by every backend.

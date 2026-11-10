@@ -66,7 +66,7 @@ public:
     void shutdown() override;
     void post(std::coroutine_handle<> h) const override;
     void post(scheduler_op* h) const override;
-    void post(capy::chain_holder&) const override;
+    void post(capy::coroutine_chain_holder&) const override;
     bool running_in_this_thread() const noexcept override;
     void stop() override;
     bool stopped() const noexcept override;
@@ -266,7 +266,7 @@ win_scheduler::post_copy(capy::continuation const& c) const
             auto* self = static_cast<post_handler*>(base);
             auto c     = self->c_;
             delete self;
-            capy::chain_holder held(c);
+            capy::coroutine_chain_holder held(c);
             if (owner)
                 held.resume();
         }
@@ -305,7 +305,7 @@ win_scheduler::post(scheduler_op* h) const
 }
 
 inline void
-win_scheduler::post(capy::chain_holder& h) const
+win_scheduler::post(capy::coroutine_chain_holder& h) const
 {
     ::InterlockedIncrement(&outstanding_work_);
 
@@ -319,7 +319,7 @@ win_scheduler::post(capy::chain_holder& h) const
         // continuation, so on the rare PQCS failure fall back to an
         // allocated copy, which keeps the owner. Drop the increment
         // first; post_copy counts its own.
-        h = capy::chain_holder(*c);
+        h = capy::coroutine_chain_holder(*c);
         ::InterlockedDecrement(&outstanding_work_);
         post_copy(*c);
         std::ignore = h.release();
@@ -713,7 +713,7 @@ win_scheduler::do_one_wait(unsigned long timeout_ms, bool& took_wake)
             case key_continuation:
             {
                 // Posted continuation: overlapped is actually a continuation*
-                capy::chain_holder(
+                capy::coroutine_chain_holder(
                     *reinterpret_cast<capy::continuation*>(overlapped))
                     .resume();
                 work_finished();
@@ -916,7 +916,7 @@ win_scheduler::shutdown()
             {
                 // Drain without resuming: the kernel hands the coroutine
                 // back, and nothing will run it.
-                capy::chain_holder held(
+                capy::coroutine_chain_holder held(
                     *reinterpret_cast<capy::continuation*>(overlapped));
             }
             else
@@ -968,7 +968,7 @@ win_scheduler::sweep_port() noexcept
         }
         else if (key == key_continuation)
         {
-            capy::chain_holder held(
+            capy::coroutine_chain_holder held(
                 *reinterpret_cast<capy::continuation*>(overlapped));
         }
         else

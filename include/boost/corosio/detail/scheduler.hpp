@@ -16,7 +16,7 @@
 #include <boost/corosio/detail/except.hpp>
 #include <boost/corosio/detail/thread_local_ptr.hpp>
 
-#include <boost/capy/ex/chain_holder.hpp>
+#include <boost/capy/ex/coroutine_chain_holder.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 
 #include <atomic>
@@ -60,7 +60,7 @@ public:
 
         Takes `h` unless it throws, in which case `h` keeps the coroutine.
     */
-    virtual void post(capy::chain_holder& h) const = 0;
+    virtual void post(capy::coroutine_chain_holder& h) const = 0;
 
     /// Increment the outstanding work count.
     virtual void work_started() noexcept = 0;

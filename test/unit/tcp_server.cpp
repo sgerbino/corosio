@@ -1494,13 +1494,13 @@ struct tcp_server_test
         void on_work_started() const noexcept {}
         void on_work_finished() const noexcept {}
 
-        std::coroutine_handle<> dispatch(capy::chain_holder&& h) const
+        std::coroutine_handle<> dispatch(capy::coroutine_chain_holder&& h) const
         {
             q_->push_back(*h.release());
             return std::noop_coroutine();
         }
 
-        void post(capy::chain_holder&& h) const
+        void post(capy::coroutine_chain_holder&& h) const
         {
             q_->push_back(*h.release());
         }
@@ -1532,12 +1532,12 @@ struct tcp_server_test
             --*work_;
         }
 
-        std::coroutine_handle<> dispatch(capy::chain_holder&&) const
+        std::coroutine_handle<> dispatch(capy::coroutine_chain_holder&&) const
         {
             throw std::runtime_error("dispatch");
         }
 
-        void post(capy::chain_holder&&) const
+        void post(capy::coroutine_chain_holder&&) const
         {
             throw std::runtime_error("post");
         }
@@ -1692,7 +1692,7 @@ struct tcp_server_test
             {
                 auto c = q.front();
                 q.pop_front();
-                capy::chain_holder doomed(c);
+                capy::coroutine_chain_holder doomed(c);
             }
         }
         BOOST_TEST(!launched);

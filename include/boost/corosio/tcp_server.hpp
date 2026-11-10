@@ -511,7 +511,7 @@ private:
             // here, it is destroyed in place.
             if (!root_)
                 cont_.owner = env->owner;
-            return st_.ex.dispatch(capy::chain_holder(cont_));
+            return st_.ex.dispatch(capy::coroutine_chain_holder(cont_));
         }
 
         void await_resume() noexcept {}
@@ -776,7 +776,7 @@ public:
             // Released only once posted: a post that throws leaves the
             // frame to the wrapper, which destroys it and with it the
             // hold, the work, and the task.
-            capy::chain_holder held(h.promise().cont_);
+            capy::coroutine_chain_holder held(h.promise().cont_);
             try
             {
                 ex.post(std::move(held));

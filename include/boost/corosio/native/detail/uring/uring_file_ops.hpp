@@ -169,7 +169,7 @@ struct uring_random_access_read_op : uring_file_read_op_base
         if (owner == nullptr)
         {
             auto keep = std::move(self->object_ref_);
-            auto held = capy::chain_holder::take(self->cont);
+            auto held = capy::coroutine_chain_holder::take(self->cont);
             delete self;
             return;
         }
@@ -311,7 +311,7 @@ struct uring_random_access_write_op : uring_file_write_op_base
         if (owner == nullptr)
         {
             auto keep = std::move(self->object_ref_);
-            auto held = capy::chain_holder::take(self->cont);
+            auto held = capy::coroutine_chain_holder::take(self->cont);
             delete self;
             return;
         }

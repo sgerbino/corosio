@@ -16,7 +16,7 @@
 #include <boost/corosio/detail/platform.hpp>
 #include <boost/corosio/detail/scheduler.hpp>
 #include <boost/capy/continuation.hpp>
-#include <boost/capy/ex/chain_holder.hpp>
+#include <boost/capy/ex/coroutine_chain_holder.hpp>
 #include <boost/capy/ex/execution_context.hpp>
 #include <boost/capy/ex/frame_allocator.hpp>
 
@@ -408,7 +408,7 @@ public:
         coroutine suspended in an operation of this context, or posted to
         it and not yet resumed, is abandoned. Its chain is unwound from
         the top, on the executor of the chain's owner (see
-        `capy::chain_holder`). The precondition below makes that executor this
+        `capy::coroutine_chain_holder`). The precondition below makes that executor this
         context's, so the unwind runs during this destruction.
 
         @pre No thread is executing a run variant.
@@ -780,7 +780,7 @@ public:
             concurrently with, or after, the context's destruction is
             undefined behavior.
     */
-    std::coroutine_handle<> dispatch(capy::chain_holder&& h) const
+    std::coroutine_handle<> dispatch(capy::coroutine_chain_holder&& h) const
     {
         if (running_in_this_thread())
             return h.take_handle();
@@ -799,7 +799,7 @@ public:
             concurrently with, or after, the context's destruction is
             undefined behavior.
     */
-    void post(capy::chain_holder&& h) const
+    void post(capy::coroutine_chain_holder&& h) const
     {
         ctx_->sched_->post(h);
     }
@@ -808,13 +808,13 @@ public:
 
         Heap-allocates a `scheduler_op` to wrap the handle. A caller
         that already owns a `capy::continuation` can post it directly
-        via the `post(capy::chain_holder&&)` overload to avoid the
+        via the `post(capy::coroutine_chain_holder&&)` overload to avoid the
         allocation.
 
         A handle still queued when the context is torn down is
         destroyed alone, since it carries no owner to unwind its chain
         from. Post a coroutine that another frame awaits through the
-        `post(capy::chain_holder&&)` overload, with its owner set.
+        `post(capy::coroutine_chain_holder&&)` overload, with its owner set.
 
         @param h The coroutine handle to post.
 
