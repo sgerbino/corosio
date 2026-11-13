@@ -447,6 +447,9 @@ public:
         This causes `run()` to return as soon as possible. Any pending
         work items remain queued.
 
+        On Windows, work already queued when `stop()` is called still
+        runs first: the stop takes effect when its own wakeup is reached.
+
         @throws std::system_error on Windows if the wakeup cannot be
             queued, which leaves blocked `run()` callers unable to wake
             until a later call succeeds.
