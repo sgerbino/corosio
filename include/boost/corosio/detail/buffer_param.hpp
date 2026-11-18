@@ -328,6 +328,9 @@ namespace boost::corosio::detail {
 class buffer_param
 {
 public:
+    /// Construct an empty parameter that yields no buffers.
+    buffer_param() noexcept = default;
+
     /** Construct from a const buffer sequence.
 
         @param bs The buffer sequence to adapt.
@@ -353,49 +356,74 @@ public:
     std::size_t
     copy_to(capy::mutable_buffer* dest, std::size_t n) const noexcept
     {
-        return fn_(bs_, dest, n);
+        return fn_ ? fn_(bs_, dest, n, 0) : 0;
+    }
+
+    /** Fill an array with buffers, starting @a skip bytes in.
+
+        Lets an operation that outgrows one array continue from where
+        the previous fill ended.
+
+        @param dest Pointer to array of mutable buffer descriptors.
+        @param n Maximum number of buffers to copy.
+        @param skip Bytes at the front of the sequence to leave out.
+
+        @return The number of non-zero buffers copied.
+    */
+    std::size_t
+    copy_to(capy::mutable_buffer* dest, std::size_t n, std::size_t skip)
+        const noexcept
+    {
+        return fn_ ? fn_(bs_, dest, n, skip) : 0;
     }
 
 private:
     template<capy::ConstBufferSequence BS>
-    static std::size_t
-    copy_impl(void const* p, capy::mutable_buffer* dest, std::size_t n)
+    static std::size_t copy_impl(
+        void const* p,
+        capy::mutable_buffer* dest,
+        std::size_t n,
+        std::size_t skip)
     {
         auto const& bs    = *static_cast<BS const*>(p);
         auto it           = capy::buffer_sequence_begin(bs);
         auto const end_it = capy::buffer_sequence_end(bs);
 
         std::size_t i = 0;
-        if constexpr (capy::MutableBufferSequence<BS>)
+        for (; it != end_it && i < n; ++it)
         {
-            for (; it != end_it && i < n; ++it)
+            capy::mutable_buffer buf;
+            if constexpr (capy::MutableBufferSequence<BS>)
             {
-                capy::mutable_buffer buf(*it);
-                if (buf.size() == 0)
-                    continue;
-                dest[i++] = buf;
+                buf = capy::mutable_buffer(*it);
             }
-        }
-        else
-        {
-            for (; it != end_it && i < n; ++it)
+            else
             {
-                capy::const_buffer buf(*it);
-                if (buf.size() == 0)
-                    continue;
-                dest[i++] = capy::mutable_buffer(
-                    const_cast<char*>(static_cast<char const*>(buf.data())),
-                    buf.size());
+                capy::const_buffer cb(*it);
+                buf = capy::mutable_buffer(
+                    const_cast<char*>(static_cast<char const*>(cb.data())),
+                    cb.size());
             }
+            if (skip >= buf.size())
+            {
+                skip -= buf.size();
+                continue;
+            }
+            if (skip)
+            {
+                buf += skip;
+                skip = 0;
+            }
+            dest[i++] = buf;
         }
         return i;
     }
 
-    using fn_t =
-        std::size_t (*)(void const*, capy::mutable_buffer*, std::size_t);
+    using fn_t = std::size_t (*)(
+        void const*, capy::mutable_buffer*, std::size_t, std::size_t);
 
-    void const* bs_;
-    fn_t fn_;
+    void const* bs_ = nullptr;
+    fn_t fn_        = nullptr;
 };
 
 } // namespace boost::corosio::detail

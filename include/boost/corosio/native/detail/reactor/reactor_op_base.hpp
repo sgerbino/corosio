@@ -12,6 +12,8 @@
 
 #include <boost/corosio/native/detail/coro_op.hpp>
 
+#include <boost/corosio/native/detail/transfer_all.hpp>
+
 #include <cstddef>
 
 namespace boost::corosio::detail {
@@ -36,6 +38,9 @@ struct reactor_op_base : coro_op
 
     /// Bytes transferred on success.
     std::size_t bytes_transferred = 0;
+
+    /// State for an op that fills or drains the whole sequence.
+    transfer_all_state<iovec> xfer;
 
     // cancelled, object_ref_, and request_cancel() are inherited from coro_op.
 

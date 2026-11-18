@@ -55,6 +55,14 @@ struct reactor_stream_read_op final
     // the iovec copy-in that readv() pays on every call.
     void perform_io() noexcept override
     {
+        if (this->xfer.active)
+            return this->perform_io_all_with([this] {
+                return this->iovec_count == 1
+                    ? ::recv(
+                          this->fd, this->iovecs[0].iov_base,
+                          this->iovecs[0].iov_len, 0)
+                    : ::readv(this->fd, this->iovecs, this->iovec_count);
+            });
         if (this->iovec_count != 1)
             return reactor_read_op<reactor_stream_base_op<
                 Traits, Socket, Acceptor, Endpoint>>::perform_io();

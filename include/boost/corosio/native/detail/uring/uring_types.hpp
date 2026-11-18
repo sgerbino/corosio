@@ -290,6 +290,172 @@ public:
         return std::noop_coroutine();
     }
 
+    /// Read until the buffers are full, end of stream, or an error.
+    std::coroutine_handle<> read_all(
+        capy::continuation& cont,
+        capy::executor_ref ex,
+        buffer_param buffers,
+        std::stop_token const& token,
+        std::error_code* ec,
+        std::size_t* bytes)
+    {
+        iovec iovecs[uring_max_iov];
+        int iovec_count = copy_to_iovec(buffers, iovecs);
+        bool stop_now   = token.stop_possible() && token.stop_requested();
+        bool empty_buf  = (iovec_count == 0);
+
+        transfer_all_state<iovec> x;
+        x.begin(buffers, iovec_count == int(uring_max_iov));
+
+        ssize_t n          = 0;
+        int err            = 0;
+        bool have_sync_res = stop_now || empty_buf;
+        if (!have_sync_res && spec_.may_speculate_read())
+        {
+            for (;;)
+            {
+                n = uring_direct_read(fd_, iovecs, iovec_count);
+                if (n > 0)
+                {
+                    spec_.on_read_success();
+                    if (x.advance(
+                            iovecs, iovec_count, int(uring_max_iov),
+                            static_cast<std::size_t>(n)))
+                        continue;
+                    have_sync_res = true;
+                }
+                else if (n == 0)
+                {
+                    x.hit_eof     = true;
+                    have_sync_res = true;
+                }
+                else if (errno != EAGAIN && errno != EWOULDBLOCK)
+                {
+                    err           = errno;
+                    have_sync_res = true;
+                }
+                else
+                {
+                    spec_.on_read_exhausted();
+                }
+                break;
+            }
+        }
+
+        if (have_sync_res && sched_->try_consume_inline_budget())
+        {
+            decode_results(
+                ec, bytes, stop_now, err ? make_err(err) : std::error_code{},
+                /*is_read=*/true, x.transferred, empty_buf);
+            if (!stop_now && x.hit_eof && !*ec)
+                *ec = capy::error::eof;
+            return dispatch_coro(ex, cont);
+        }
+
+        rd_.prepare(
+            cont, ex, ec, bytes, fd_, sched_, detail::object_ref(this), &spec_,
+            buffers, token);
+        rd_.xfer        = x;
+        rd_.iovec_count = iovec_count;
+        for (int i = 0; i < iovec_count; ++i)
+            rd_.iovecs[i] = iovecs[i];
+        sched_->work_started();
+        if (have_sync_res || rd_.cancelled.load(std::memory_order_acquire))
+        {
+            if (stop_now)
+                rd_.cancelled.store(true, std::memory_order_release);
+            rd_.res = err ? -err : 0;
+            uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(&rd_);
+            return std::noop_coroutine();
+        }
+        uring_submit_op(*sched_, &rd_);
+        return std::noop_coroutine();
+    }
+
+    /// Write every byte of the buffers, or stop at the first error.
+    std::coroutine_handle<> write_all(
+        capy::continuation& cont,
+        capy::executor_ref ex,
+        buffer_param buffers,
+        std::stop_token const& token,
+        std::error_code* ec,
+        std::size_t* bytes)
+    {
+        iovec iovecs[uring_max_iov];
+        int iovec_count = copy_to_iovec(buffers, iovecs);
+        bool stop_now   = token.stop_possible() && token.stop_requested();
+        bool empty_buf  = (iovec_count == 0);
+
+        transfer_all_state<iovec> x;
+        x.begin(buffers, iovec_count == int(uring_max_iov));
+
+        int err            = 0;
+        bool have_sync_res = stop_now || empty_buf;
+        // A queued batch enters the kernel anyway; joining it spares
+        // this write a syscall of its own.
+        if (!have_sync_res && spec_.may_speculate_write() &&
+            !sched_->write_may_join_batch())
+        {
+            for (;;)
+            {
+                ssize_t n = uring_direct_write(fd_, iovecs, iovec_count);
+                if (n > 0)
+                {
+                    if (x.advance(
+                            iovecs, iovec_count, int(uring_max_iov),
+                            static_cast<std::size_t>(n)))
+                        continue;
+                    have_sync_res = true;
+                }
+                else if (n == 0)
+                {
+                    // Nothing taken; let the kernel finish it.
+                }
+                else if (errno != EAGAIN && errno != EWOULDBLOCK)
+                {
+                    err           = errno;
+                    have_sync_res = true;
+                }
+                else
+                {
+                    spec_.on_write_exhausted();
+                }
+                break;
+            }
+        }
+
+        if (have_sync_res && sched_->try_consume_inline_budget())
+        {
+            decode_results(
+                ec, bytes, stop_now, err ? make_err(err) : std::error_code{},
+                /*is_read=*/false, x.transferred, /*empty_buffer=*/false);
+            return dispatch_coro(ex, cont);
+        }
+
+        wr_.prepare(
+            cont, ex, ec, bytes, fd_, sched_, detail::object_ref(this), &spec_,
+            buffers, token);
+        wr_.xfer        = x;
+        wr_.iovec_count = iovec_count;
+        for (int i = 0; i < iovec_count; ++i)
+            wr_.iovecs[i] = iovecs[i];
+        wr_.msg.msg_iovlen =
+            static_cast<decltype(wr_.msg.msg_iovlen)>(iovec_count);
+        sched_->work_started();
+        if (have_sync_res || wr_.cancelled.load(std::memory_order_acquire))
+        {
+            if (stop_now)
+                wr_.cancelled.store(true, std::memory_order_release);
+            wr_.res = err ? -err : 0;
+            uring_scheduler::lock_type lock(sched_->dispatch_mutex());
+            sched_->push_completed_locked(&wr_);
+            return std::noop_coroutine();
+        }
+        uring_submit_op(*sched_, &wr_);
+        return std::noop_coroutine();
+    }
+
     // ----------------------------------------------------------------
     // tcp_socket::implementation
     // ----------------------------------------------------------------
@@ -408,6 +574,10 @@ public:
 
     void cancel() noexcept override
     {
+        // A transfer-all op whose completion was reaped before this
+        // has no SQE left to cancel, and would resubmit for the rest.
+        rd_.cancelled.store(true, std::memory_order_seq_cst);
+        wr_.cancelled.store(true, std::memory_order_seq_cst);
         if (fd_ >= 0)
             sched_->cancel_ops({&rd_, &wr_, &conn_, &wait_op_});
     }

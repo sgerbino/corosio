@@ -26,6 +26,7 @@
 #include <boost/corosio/detail/intrusive.hpp>
 #include <boost/corosio/native/detail/iocp/win_overlapped_op.hpp>
 #include <boost/corosio/native/detail/iocp/win_windows.hpp>
+#include <boost/corosio/native/detail/transfer_all.hpp>
 
 #include <coroutine>
 
@@ -60,6 +61,13 @@ struct read_op : overlapped_op
     DWORD wsabuf_count = 0;
     DWORD flags        = 0;
     win_tcp_socket& internal;
+    transfer_all_state<WSABUF> xfer;
+
+    void reset() noexcept
+    {
+        overlapped_op::reset();
+        xfer.reset();
+    }
 
     static void do_complete(
         void* owner,
@@ -78,6 +86,13 @@ struct write_op : overlapped_op
     WSABUF wsabufs[max_buffers];
     DWORD wsabuf_count = 0;
     win_tcp_socket& internal;
+    transfer_all_state<WSABUF> xfer;
+
+    void reset() noexcept
+    {
+        overlapped_op::reset();
+        xfer.reset();
+    }
 
     static void do_complete(
         void* owner,
@@ -147,6 +162,37 @@ class win_tcp_socket final
     endpoint local_endpoint_;
     endpoint remote_endpoint_;
 
+    std::coroutine_handle<> start_read(
+        capy::continuation& cont,
+        capy::executor_ref d,
+        buffer_param param,
+        std::stop_token token,
+        std::error_code* ec,
+        std::size_t* bytes_out,
+        bool all);
+
+    std::coroutine_handle<> start_write(
+        capy::continuation& cont,
+        capy::executor_ref d,
+        buffer_param param,
+        std::stop_token token,
+        std::error_code* ec,
+        std::size_t* bytes_out,
+        bool all);
+
+    void issue_read(read_op& op) noexcept;
+    void issue_write(write_op& op) noexcept;
+
+    /** Continue a transfer-all op after a completion.
+
+        @return `true` if the rest of the buffers were resubmitted and
+            the coroutine must not resume yet.
+    */
+    bool continue_read(read_op& op) noexcept;
+
+    /// @copydoc continue_read
+    bool continue_write(write_op& op) noexcept;
+
 public:
     explicit win_tcp_socket(win_tcp_service& svc) noexcept;
 
@@ -197,6 +243,24 @@ public:
         wait_type w,
         std::stop_token token,
         std::error_code* ec) override;
+
+    /// Read until the buffers are full, end of stream, or an error.
+    std::coroutine_handle<> read_all(
+        capy::continuation& cont,
+        capy::executor_ref d,
+        buffer_param buf,
+        std::stop_token token,
+        std::error_code* ec,
+        std::size_t* bytes);
+
+    /// Write every byte of the buffers, or stop at the first error.
+    std::coroutine_handle<> write_all(
+        capy::continuation& cont,
+        capy::executor_ref d,
+        buffer_param buf,
+        std::stop_token token,
+        std::error_code* ec,
+        std::size_t* bytes);
 
     std::error_code shutdown(tcp_socket::shutdown_type what) noexcept override;
 

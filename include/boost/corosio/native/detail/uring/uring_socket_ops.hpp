@@ -15,6 +15,8 @@
 
 #if BOOST_COROSIO_HAS_URING
 
+#include <boost/corosio/native/detail/transfer_all.hpp>
+
 #include <liburing.h>
 
 #include <boost/capy/buffers.hpp>
@@ -162,6 +164,65 @@ uring_set_result(uring_op* self, bool is_read, bool empty_buf) noexcept
         self->res >= 0 ? static_cast<std::size_t>(self->res) : 0u, empty_buf);
 }
 
+inline void uring_submit_op(uring_scheduler& sched, uring_op* op) noexcept;
+
+/** Continue a transfer-all op after a completion, or settle it.
+
+    @return `true` if the op was resubmitted for the rest of the
+        buffers and must not resume its coroutine yet.
+*/
+template<class Op>
+bool
+uring_continue_transfer(Op* self, bool is_read) noexcept
+{
+    auto& x              = self->xfer;
+    bool const cancelled = self->cancelled.load(std::memory_order_acquire);
+    if (x.all_done || x.hit_eof || cancelled || self->res < 0)
+        return false;
+    if (self->res == 0)
+    {
+        if (is_read && !self->empty_buffer)
+            x.hit_eof = true;
+        return false;
+    }
+    if (!x.advance(
+            self->iovecs, self->iovec_count, int(uring_max_iov),
+            static_cast<std::size_t>(self->res)))
+        return false;
+
+    if constexpr (requires { self->msg; })
+        self->msg.msg_iovlen =
+            static_cast<decltype(self->msg.msg_iovlen)>(self->iovec_count);
+    self->res       = 0;
+    self->cqe_flags = 0;
+    // uring_link_sqe re-checks `cancelled` after linking, so a stop
+    // landing between this completion and the resubmit is not lost.
+    self->sqe_set.store(false, std::memory_order_relaxed);
+    // The dispatch that ran this handler spends one work_finished().
+    self->sched_->work_started();
+    uring_submit_op(*self->sched_, self);
+    return true;
+}
+
+/// Settle the outputs of a finished transfer-all op.
+template<class Op>
+void
+uring_set_transfer_result(Op* self, bool is_read) noexcept
+{
+    auto& x              = self->xfer;
+    bool const cancelled = self->cancelled.load(std::memory_order_acquire);
+    decode_results(
+        self->ec_out, self->bytes_out, cancelled,
+        self->res < 0 ? make_err(-self->res) : std::error_code{}, is_read,
+        x.transferred, self->empty_buffer);
+    if (!self->ec_out)
+        return;
+    if (cancelled && !x.all_done)
+        *self->ec_out = capy::error::canceled;
+    else if (x.hit_eof && !*self->ec_out)
+        *self->ec_out = capy::error::eof;
+}
+
 /** Scatter-gather read via `IORING_OP_READV`.
 
     @par Handler dispatch
@@ -174,6 +235,7 @@ struct uring_read_op : uring_op
     int iovec_count                       = 0;
     int fd                                = -1;
     detail::speculative_state* spec_state = nullptr;
+    transfer_all_state<iovec> xfer;
 
     uring_read_op() noexcept : uring_op(&do_handler, &do_cqe, &do_prep)
     {
@@ -212,6 +274,7 @@ struct uring_read_op : uring_op
         cqe_flags    = 0;
         iovec_count  = copy_to_iovec(buffers, iovecs);
         empty_buffer = (iovec_count == 0);
+        xfer.reset();
         start(token);
     }
 
@@ -254,10 +317,16 @@ struct uring_read_op : uring_op
         if (coro_drain_if_shutdown(owner, self))
             return;
 
+        if (self->xfer.active && uring_continue_transfer(self, true))
+            return;
+
         if (self->sched_)
             self->sched_->reset_inline_budget();
 
-        uring_set_result(self, true, self->empty_buffer);
+        if (self->xfer.active)
+            uring_set_transfer_result(self, true);
+        else
+            uring_set_result(self, true, self->empty_buffer);
 
         if (self->res > 0 && self->spec_state)
         {
@@ -282,6 +351,7 @@ struct uring_write_op : uring_op
     int fd          = -1;
     msghdr msg{};
     detail::speculative_state* spec_state = nullptr;
+    transfer_all_state<iovec> xfer;
 
     uring_write_op() noexcept : uring_op(&do_handler, &do_cqe, &do_prep) {}
 
@@ -316,6 +386,7 @@ struct uring_write_op : uring_op
             msg.msg_iov    = iovecs;
             msg.msg_iovlen = static_cast<decltype(msg.msg_iovlen)>(iovec_count);
         }
+        xfer.reset();
         start(token);
     }
 
@@ -356,10 +427,16 @@ struct uring_write_op : uring_op
         if (coro_drain_if_shutdown(owner, self))
             return;
 
+        if (self->xfer.active && uring_continue_transfer(self, false))
+            return;
+
         if (self->sched_)
             self->sched_->reset_inline_budget();
 
-        uring_set_result(self, false, self->empty_buffer);
+        if (self->xfer.active)
+            uring_set_transfer_result(self, false);
+        else
+            uring_set_result(self, false, self->empty_buffer);
 
         if (self->res > 0 && self->spec_state)
         {

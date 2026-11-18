@@ -338,6 +338,29 @@ connect_op::do_complete(
     op->invoke_handler();
 }
 
+/// Settle the outputs of a finished transfer-all op and resume.
+template<class Op>
+void
+win_finish_transfer(Op* op, bool is_read)
+{
+    op->stop_cb.reset();
+    auto& x              = op->xfer;
+    bool const cancelled = op->cancelled.load(std::memory_order_acquire);
+    decode_results(
+        op->ec_out, op->bytes_out, cancelled,
+        op->dwError != 0 ? iocp_make_err(op->dwError, /*accept_path=*/false)
+                         : std::error_code{},
+        is_read, x.transferred, op->empty_buffer);
+    if (op->ec_out)
+    {
+        if (cancelled && !x.all_done)
+            *op->ec_out = capy::error::canceled;
+        else if (x.hit_eof && !*op->ec_out)
+            *op->ec_out = capy::error::eof;
+    }
+    dispatch_coro(op->ex, *op->cont).resume();
+}
+
 // read_op completion handler
 
 inline void
@@ -352,6 +375,15 @@ read_op::do_complete(
     if (!owner)
     {
         op->destroy_awaiting();
+        return;
+    }
+
+    if (op->xfer.active)
+    {
+        if (op->internal.continue_read(*op))
+            return;
+        auto prevent_premature_destruction = std::move(op->object_ref_);
+        win_finish_transfer(op, true);
         return;
     }
 
@@ -373,6 +405,15 @@ write_op::do_complete(
     if (!owner)
     {
         op->destroy_awaiting();
+        return;
+    }
+
+    if (op->xfer.active)
+    {
+        if (op->internal.continue_write(*op))
+            return;
+        auto prevent_premature_destruction = std::move(op->object_ref_);
+        win_finish_transfer(op, false);
         return;
     }
 
@@ -549,6 +590,55 @@ win_tcp_socket::read_some(
     std::error_code* ec,
     std::size_t* bytes_out)
 {
+    return start_read(cont, d, param, token, ec, bytes_out, false);
+}
+
+inline std::coroutine_handle<>
+win_tcp_socket::write_some(
+    capy::continuation& cont,
+    capy::executor_ref d,
+    buffer_param param,
+    std::stop_token token,
+    std::error_code* ec,
+    std::size_t* bytes_out)
+{
+    return start_write(cont, d, param, token, ec, bytes_out, false);
+}
+
+inline std::coroutine_handle<>
+win_tcp_socket::read_all(
+    capy::continuation& cont,
+    capy::executor_ref d,
+    buffer_param param,
+    std::stop_token token,
+    std::error_code* ec,
+    std::size_t* bytes_out)
+{
+    return start_read(cont, d, param, token, ec, bytes_out, true);
+}
+
+inline std::coroutine_handle<>
+win_tcp_socket::write_all(
+    capy::continuation& cont,
+    capy::executor_ref d,
+    buffer_param param,
+    std::stop_token token,
+    std::error_code* ec,
+    std::size_t* bytes_out)
+{
+    return start_write(cont, d, param, token, ec, bytes_out, true);
+}
+
+inline std::coroutine_handle<>
+win_tcp_socket::start_read(
+    capy::continuation& cont,
+    capy::executor_ref d,
+    buffer_param param,
+    std::stop_token token,
+    std::error_code* ec,
+    std::size_t* bytes_out,
+    bool all)
+{
     // Keep this socket alive during I/O
     rd_.object_ref_ = detail::object_ref(this);
 
@@ -571,10 +661,23 @@ win_tcp_socket::read_some(
         return std::noop_coroutine();
     }
 
-    // Prepare buffers
-    capy::mutable_buffer bufs[read_op::max_buffers];
-    op.wsabuf_count =
-        static_cast<DWORD>(param.copy_to(bufs, read_op::max_buffers));
+    if (all)
+    {
+        op.xfer.begin(param, false);
+        op.wsabuf_count = op.xfer.fill(op.wsabufs, DWORD(read_op::max_buffers));
+    }
+    else
+    {
+        capy::mutable_buffer bufs[read_op::max_buffers];
+        op.wsabuf_count =
+            static_cast<DWORD>(param.copy_to(bufs, read_op::max_buffers));
+        for (DWORD i = 0; i < op.wsabuf_count; ++i)
+        {
+            op.wsabufs[i].buf = static_cast<char*>(bufs[i].data());
+            op.wsabufs[i].len = static_cast<ULONG>(
+                (std::min)(bufs[i].size(), std::size_t(0x7fffffff)));
+        }
+    }
 
     // Handle empty buffer: complete with 0 bytes
     if (op.wsabuf_count == 0)
@@ -584,46 +687,19 @@ win_tcp_socket::read_some(
         return std::noop_coroutine();
     }
 
-    for (DWORD i = 0; i < op.wsabuf_count; ++i)
-    {
-        op.wsabufs[i].buf = static_cast<char*>(bufs[i].data());
-        op.wsabufs[i].len = static_cast<ULONG>(
-            (std::min)(bufs[i].size(), std::size_t(0x7fffffff)));
-    }
-
-    op.flags = 0;
-
-    int result = ::WSARecv(
-        socket_, op.wsabufs, op.wsabuf_count, nullptr, &op.flags, &op, nullptr);
-
-    if (result == SOCKET_ERROR)
-    {
-        DWORD err = ::WSAGetLastError();
-        if (err != WSA_IO_PENDING)
-        {
-            svc_.on_completion(&op, err, 0);
-            return std::noop_coroutine();
-        }
-    }
-
-    // Must precede on_pending: once it runs another thread may
-    // complete the op and recycle this impl.
-    if (op.cancelled.load(std::memory_order_acquire))
-        ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
-
-    svc_.on_pending(&op);
-
+    issue_read(op);
     return std::noop_coroutine();
 }
 
 inline std::coroutine_handle<>
-win_tcp_socket::write_some(
+win_tcp_socket::start_write(
     capy::continuation& cont,
     capy::executor_ref d,
     buffer_param param,
     std::stop_token token,
     std::error_code* ec,
-    std::size_t* bytes_out)
+    std::size_t* bytes_out,
+    bool all)
 {
     // Keep this socket alive during I/O
     wr_.object_ref_ = detail::object_ref(this);
@@ -646,46 +722,129 @@ win_tcp_socket::write_some(
         return std::noop_coroutine();
     }
 
-    // Prepare buffers
-    capy::mutable_buffer bufs[write_op::max_buffers];
-    op.wsabuf_count =
-        static_cast<DWORD>(param.copy_to(bufs, write_op::max_buffers));
+    if (all)
+    {
+        op.xfer.begin(param, false);
+        op.wsabuf_count =
+            op.xfer.fill(op.wsabufs, DWORD(write_op::max_buffers));
+    }
+    else
+    {
+        capy::mutable_buffer bufs[write_op::max_buffers];
+        op.wsabuf_count =
+            static_cast<DWORD>(param.copy_to(bufs, write_op::max_buffers));
+        for (DWORD i = 0; i < op.wsabuf_count; ++i)
+        {
+            op.wsabufs[i].buf = static_cast<char*>(bufs[i].data());
+            op.wsabufs[i].len = static_cast<ULONG>(
+                (std::min)(bufs[i].size(), std::size_t(0x7fffffff)));
+        }
+    }
 
     // Handle empty buffer: complete immediately with 0 bytes
     if (op.wsabuf_count == 0)
     {
+        op.xfer.all_done = true;
         svc_.on_completion(&op, 0, 0);
         return std::noop_coroutine();
     }
 
-    for (DWORD i = 0; i < op.wsabuf_count; ++i)
-    {
-        op.wsabufs[i].buf = static_cast<char*>(bufs[i].data());
-        op.wsabufs[i].len = static_cast<ULONG>(
-            (std::min)(bufs[i].size(), std::size_t(0x7fffffff)));
-    }
+    issue_write(op);
+    return std::noop_coroutine();
+}
 
-    int result = ::WSASend(
-        socket_, op.wsabufs, op.wsabuf_count, nullptr, 0, &op, nullptr);
-
+inline void
+win_tcp_socket::issue_read(read_op& op) noexcept
+{
+    op.flags   = 0;
+    int result = ::WSARecv(
+        socket_, op.wsabufs, op.wsabuf_count, nullptr, &op.flags, &op, nullptr);
     if (result == SOCKET_ERROR)
     {
         DWORD err = ::WSAGetLastError();
         if (err != WSA_IO_PENDING)
         {
             svc_.on_completion(&op, err, 0);
-            return std::noop_coroutine();
+            return;
         }
     }
-
     // Must precede on_pending: once it runs another thread may
     // complete the op and recycle this impl.
     if (op.cancelled.load(std::memory_order_acquire))
         ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
-
     svc_.on_pending(&op);
+}
 
-    return std::noop_coroutine();
+inline void
+win_tcp_socket::issue_write(write_op& op) noexcept
+{
+    int result = ::WSASend(
+        socket_, op.wsabufs, op.wsabuf_count, nullptr, 0, &op, nullptr);
+    if (result == SOCKET_ERROR)
+    {
+        DWORD err = ::WSAGetLastError();
+        if (err != WSA_IO_PENDING)
+        {
+            svc_.on_completion(&op, err, 0);
+            return;
+        }
+    }
+    // Must precede on_pending: once it runs another thread may
+    // complete the op and recycle this impl.
+    if (op.cancelled.load(std::memory_order_acquire))
+        ::CancelIoEx(reinterpret_cast<HANDLE>(socket_), &op);
+    svc_.on_pending(&op);
+}
+
+inline bool
+win_tcp_socket::continue_read(read_op& op) noexcept
+{
+    auto& x = op.xfer;
+    if (x.all_done || x.hit_eof || op.dwError != 0 ||
+        op.cancelled.load(std::memory_order_acquire))
+        return false;
+    if (op.bytes_transferred == 0)
+    {
+        if (!op.empty_buffer)
+            x.hit_eof = true;
+        return false;
+    }
+    if (!x.advance(
+            op.wsabufs, op.wsabuf_count, DWORD(read_op::max_buffers),
+            op.bytes_transferred))
+        return false;
+
+    op.reset_overlapped();
+    op.dwError           = 0;
+    op.bytes_transferred = 0;
+    op.ready_.store(0, std::memory_order_relaxed);
+    // The dispatch that ran this handler spends one work_finished().
+    svc_.work_started();
+    issue_read(op);
+    return true;
+}
+
+inline bool
+win_tcp_socket::continue_write(write_op& op) noexcept
+{
+    auto& x = op.xfer;
+    if (x.all_done || op.dwError != 0 ||
+        op.cancelled.load(std::memory_order_acquire))
+        return false;
+    // A zero-byte send completion leaves the buffers as they were.
+    if (op.bytes_transferred != 0 &&
+        !x.advance(
+            op.wsabufs, op.wsabuf_count, DWORD(write_op::max_buffers),
+            op.bytes_transferred))
+        return false;
+
+    op.reset_overlapped();
+    op.dwError           = 0;
+    op.bytes_transferred = 0;
+    op.ready_.store(0, std::memory_order_relaxed);
+    svc_.work_started();
+    issue_write(op);
+    return true;
 }
 
 inline std::coroutine_handle<>

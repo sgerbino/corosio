@@ -53,7 +53,19 @@ complete_io_op(Op& op)
     decode_results(
         op.ec_out, op.bytes_out, op.cancelled.load(std::memory_order_acquire),
         op.errn != 0 ? make_err(op.errn) : std::error_code{},
-        op.is_read_operation(), op.bytes_transferred, /*empty_buffer=*/false);
+        op.is_read_operation(),
+        op.xfer.active ? op.xfer.transferred : op.bytes_transferred,
+        /*empty_buffer=*/false);
+    if (op.xfer.active && !*op.ec_out)
+    {
+        // A partial transfer is a result for *_some ops; for a
+        // transfer-all op only a finished transfer is.
+        if (op.xfer.hit_eof)
+            *op.ec_out = capy::error::eof;
+        else if (
+            !op.xfer.all_done && op.cancelled.load(std::memory_order_acquire))
+            *op.ec_out = capy::error::canceled;
+    }
 
     coro_resume(&op);
 }

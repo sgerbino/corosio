@@ -71,6 +71,7 @@ struct reactor_op : reactor_op_base
         fd                = -1;
         errn              = 0;
         bytes_transferred = 0;
+        xfer.reset();
         cancelled.store(false, std::memory_order_relaxed);
         object_ref_.reset();
         socket_impl_   = nullptr;
@@ -304,6 +305,9 @@ struct reactor_read_op : Base
 
     void perform_io() noexcept override
     {
+        if (this->xfer.active)
+            return perform_io_all();
+
         ssize_t n;
         do
         {
@@ -315,6 +319,43 @@ struct reactor_read_op : Base
             this->complete(0, static_cast<std::size_t>(n));
         else
             this->complete(errno, 0);
+    }
+
+    void perform_io_all() noexcept
+    {
+        perform_io_all_with(
+            [this] { return ::readv(this->fd, iovecs, iovec_count); });
+    }
+
+    // Progress lives in `xfer`; reporting EAGAIN keeps the op parked
+    // until the buffers fill.
+    template<class Read>
+    void perform_io_all_with(Read read) noexcept
+    {
+        for (;;)
+        {
+            ssize_t n;
+            do
+            {
+                n = read();
+            }
+            while (n < 0 && errno == EINTR);
+
+            if (n > 0)
+            {
+                if (this->xfer.advance(
+                        iovecs, iovec_count, int(max_buffers),
+                        static_cast<std::size_t>(n)))
+                    continue;
+                return this->complete(0, 0);
+            }
+            if (n == 0)
+            {
+                this->xfer.hit_eof = true;
+                return this->complete(0, 0);
+            }
+            return this->complete(errno, 0);
+        }
     }
 };
 
@@ -349,6 +390,24 @@ struct reactor_write_op : Base
 
     void perform_io() noexcept override
     {
+        if (this->xfer.active)
+        {
+            // Progress lives in `xfer`; reporting EAGAIN keeps the op
+            // parked until every byte is written.
+            for (;;)
+            {
+                ssize_t n = WritePolicy::write(this->fd, iovecs, iovec_count);
+                if (n < 0)
+                    return this->complete(errno, 0);
+                if (n == 0)
+                    return this->complete(EAGAIN, 0);
+                if (!this->xfer.advance(
+                        iovecs, iovec_count, int(max_buffers),
+                        static_cast<std::size_t>(n)))
+                    return this->complete(0, 0);
+            }
+        }
+
         ssize_t n = WritePolicy::write(this->fd, iovecs, iovec_count);
         if (n >= 0)
             this->complete(0, static_cast<std::size_t>(n));

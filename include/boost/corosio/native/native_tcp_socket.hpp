@@ -121,6 +121,51 @@ class native_tcp_socket : public tcp_socket
         }
     };
 
+    template<class MutableBufferSequence>
+    struct native_read_all_awaitable
+        : detail::bytes_op_base<
+              native_read_all_awaitable<MutableBufferSequence>>
+    {
+        native_tcp_socket& self_;
+        MutableBufferSequence buffers_;
+
+        native_read_all_awaitable(
+            native_tcp_socket& self, MutableBufferSequence buffers) noexcept
+            : self_(self)
+            , buffers_(std::move(buffers))
+        {
+        }
+
+        std::coroutine_handle<>
+        dispatch(capy::continuation& cont, capy::executor_ref ex) const
+        {
+            return self_.get_impl().read_all(
+                cont, ex, buffers_, this->token_, &this->ec_, &this->bytes_);
+        }
+    };
+
+    template<class ConstBufferSequence>
+    struct native_write_all_awaitable
+        : detail::bytes_op_base<native_write_all_awaitable<ConstBufferSequence>>
+    {
+        native_tcp_socket& self_;
+        ConstBufferSequence buffers_;
+
+        native_write_all_awaitable(
+            native_tcp_socket& self, ConstBufferSequence buffers) noexcept
+            : self_(self)
+            , buffers_(std::move(buffers))
+        {
+        }
+
+        std::coroutine_handle<>
+        dispatch(capy::continuation& cont, capy::executor_ref ex) const
+        {
+            return self_.get_impl().write_all(
+                cont, ex, buffers_, this->token_, &this->ec_, &this->bytes_);
+        }
+    };
+
     struct native_wait_awaitable : detail::void_op_base<native_wait_awaitable>
     {
         native_tcp_socket& self_;
@@ -251,6 +296,60 @@ public:
     [[nodiscard]] auto write_some(CB const& buffers)
     {
         return native_write_awaitable<CB>(*this, buffers);
+    }
+
+    /** Asynchronously read until the buffers are full.
+
+        Gives `capy::read` the result of its loop over @ref read_some
+        in one operation. Filling the buffers then costs no coroutine
+        frame and suspends only while waiting for data. `capy::read`
+        forwards here for this socket.
+
+        @par Effects
+        Completes when the buffers are full, at end of stream, or on
+        the first error. On success `n == buffer_size( buffers )`.
+        Otherwise `n` counts the bytes read before end of stream,
+        cancellation, or the error, and `ec` reports which.
+
+        @param buffers The buffer sequence to fill.
+
+        @return An awaitable yielding `(error_code, std::size_t)`.
+
+        This socket must outlive the returned awaitable. The memory
+        referenced by @p buffers must remain valid until the operation
+        completes.
+    */
+    template<capy::MutableBufferSequence MB>
+    [[nodiscard]] auto read(MB const& buffers)
+    {
+        return native_read_all_awaitable<MB>(*this, buffers);
+    }
+
+    /** Asynchronously write the whole buffer sequence.
+
+        Gives `capy::write` the result of its loop over
+        @ref write_some in one operation. Draining the buffers then
+        costs no coroutine frame and suspends only while waiting for
+        space. `capy::write` forwards here for this socket.
+
+        @par Effects
+        Completes when every byte is written or on the first error.
+        On success `n == buffer_size( buffers )`. Otherwise `n`
+        counts the bytes written before cancellation or the error,
+        and `ec` reports which.
+
+        @param buffers The buffer sequence to write.
+
+        @return An awaitable yielding `(error_code, std::size_t)`.
+
+        This socket must outlive the returned awaitable. The memory
+        referenced by @p buffers must remain valid until the operation
+        completes.
+    */
+    template<capy::ConstBufferSequence CB>
+    [[nodiscard]] auto write(CB const& buffers)
+    {
+        return native_write_all_awaitable<CB>(*this, buffers);
     }
 
     /** Asynchronously connect to a remote endpoint.

@@ -150,6 +150,30 @@ public:
         return do_write_some(cont, ex, param, token, ec, bytes_out);
     }
 
+    /// Read until the buffers are full, end of stream, or an error.
+    std::coroutine_handle<> read_all(
+        capy::continuation& cont,
+        capy::executor_ref ex,
+        buffer_param param,
+        std::stop_token token,
+        std::error_code* ec,
+        std::size_t* bytes_out)
+    {
+        return do_read_some(cont, ex, param, token, ec, bytes_out, true);
+    }
+
+    /// Write every byte of the buffers, or stop at the first error.
+    std::coroutine_handle<> write_all(
+        capy::continuation& cont,
+        capy::executor_ref ex,
+        buffer_param param,
+        std::stop_token token,
+        std::error_code* ec,
+        std::size_t* bytes_out)
+    {
+        return do_write_some(cont, ex, param, token, ec, bytes_out, true);
+    }
+
     std::coroutine_handle<> wait(
         capy::continuation& cont,
         capy::executor_ref ex,
@@ -236,7 +260,8 @@ public:
         buffer_param,
         std::stop_token const&,
         std::error_code*,
-        std::size_t*);
+        std::size_t*,
+        bool all = false);
 
     /** Shared gather-write dispatch.
 
@@ -250,7 +275,8 @@ public:
         buffer_param,
         std::stop_token const&,
         std::error_code*,
-        std::size_t*);
+        std::size_t*,
+        bool all = false);
 
     /** Shared readiness-wait dispatch.
 
@@ -476,7 +502,8 @@ reactor_stream_socket<
         buffer_param param,
         std::stop_token const& token,
         std::error_code* ec,
-        std::size_t* bytes_out)
+        std::size_t* bytes_out,
+        bool all)
 {
     auto& op = rd_;
     op.reset();
@@ -519,27 +546,70 @@ reactor_stream_socket<
         op.iovecs[i].iov_len  = bufs[i].size();
     }
 
+    if (all)
+        op.xfer.begin(param, op.iovec_count == int(ReadOp::max_buffers));
+
     // Speculative read; for the single-buffer case use recv() so the
     // kernel skips the readv iov_iter setup.
     ssize_t n;
-    if (op.iovec_count == 1)
+    for (;;)
     {
-        do
+        if (op.iovec_count == 1)
         {
-            n = ::recv(this->fd_, bufs[0].data(), bufs[0].size(), 0);
+            do
+            {
+                n = ::recv(
+                    this->fd_, op.iovecs[0].iov_base, op.iovecs[0].iov_len, 0);
+            }
+            while (n < 0 && errno == EINTR);
         }
-        while (n < 0 && errno == EINTR);
-    }
-    else
-    {
-        do
+        else
         {
-            n = ::readv(this->fd_, op.iovecs, op.iovec_count);
+            do
+            {
+                n = ::readv(this->fd_, op.iovecs, op.iovec_count);
+            }
+            while (n < 0 && errno == EINTR);
         }
-        while (n < 0 && errno == EINTR);
+        if (!all || n <= 0)
+            break;
+        if (!op.xfer.advance(
+                op.iovecs, op.iovec_count, int(ReadOp::max_buffers),
+                static_cast<std::size_t>(n)))
+            break;
     }
 
-    if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+    if (all && n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    {
+        // Park with the progress so far.
+    }
+    else if (all)
+    {
+        // Finished, hit end of stream, or failed partway.
+        int err = (n < 0) ? errno : 0;
+        if (this->svc_.scheduler().try_consume_inline_budget())
+        {
+            if (err)
+                *ec = make_err(err);
+            else if (n == 0)
+                *ec = capy::error::eof;
+            else
+                *ec = {};
+            *bytes_out = op.xfer.transferred;
+            return dispatch_coro(ex, cont);
+        }
+        op.cont      = &cont;
+        op.ex        = ex;
+        op.ec_out    = ec;
+        op.bytes_out = bytes_out;
+        op.start(token, static_cast<Derived*>(this));
+        op.object_ref_  = detail::object_ref(this);
+        op.xfer.hit_eof = (n == 0);
+        op.complete(err, 0);
+        this->svc_.post(&op);
+        return std::noop_coroutine();
+    }
+    else if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
     {
         int err    = (n < 0) ? errno : 0;
         auto bytes = (n > 0) ? static_cast<std::size_t>(n) : std::size_t(0);
@@ -607,7 +677,8 @@ reactor_stream_socket<
         buffer_param param,
         std::stop_token const& token,
         std::error_code* ec,
-        std::size_t* bytes_out)
+        std::size_t* bytes_out,
+        bool all)
 {
     auto& op = wr_;
     op.reset();
@@ -650,21 +721,59 @@ reactor_stream_socket<
         op.iovecs[i].iov_len  = bufs[i].size();
     }
 
+    if (all)
+        op.xfer.begin(param, op.iovec_count == int(WriteOp::max_buffers));
+
     // Speculative write; the single-buffer case dispatches to a
     // backend-specific fast path so the kernel skips msghdr/iov_iter
     // setup (and so each backend can pick the right SIGPIPE strategy).
     ssize_t n;
-    if (op.iovec_count == 1)
+    for (;;)
     {
-        n = WriteOp::write_policy::write_one(
-            this->fd_, bufs[0].data(), bufs[0].size());
-    }
-    else
-    {
-        n = WriteOp::write_policy::write(this->fd_, op.iovecs, op.iovec_count);
+        if (op.iovec_count == 1)
+        {
+            n = WriteOp::write_policy::write_one(
+                this->fd_, op.iovecs[0].iov_base, op.iovecs[0].iov_len);
+        }
+        else
+        {
+            n = WriteOp::write_policy::write(
+                this->fd_, op.iovecs, op.iovec_count);
+        }
+        if (!all || n <= 0)
+            break;
+        if (!op.xfer.advance(
+                op.iovecs, op.iovec_count, int(WriteOp::max_buffers),
+                static_cast<std::size_t>(n)))
+            break;
     }
 
-    if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+    if (all &&
+        ((n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) ||
+         (n == 0 && !op.xfer.all_done)))
+    {
+        // Park with the progress so far.
+    }
+    else if (all)
+    {
+        int err = (n < 0) ? errno : 0;
+        if (this->svc_.scheduler().try_consume_inline_budget())
+        {
+            *ec        = err ? make_err(err) : std::error_code{};
+            *bytes_out = op.xfer.transferred;
+            return dispatch_coro(ex, cont);
+        }
+        op.cont      = &cont;
+        op.ex        = ex;
+        op.ec_out    = ec;
+        op.bytes_out = bytes_out;
+        op.start(token, static_cast<Derived*>(this));
+        op.object_ref_ = detail::object_ref(this);
+        op.complete(err, 0);
+        this->svc_.post(&op);
+        return std::noop_coroutine();
+    }
+    else if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
     {
         int err    = (n < 0) ? errno : 0;
         auto bytes = (n > 0) ? static_cast<std::size_t>(n) : std::size_t(0);
